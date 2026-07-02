@@ -1,4 +1,4 @@
-# Job Scraper & Match Analyzer
+# Career Intelligence System
 
 **An end-to-end, local-first job search pipeline** — scrape hundreds of listings, score them against your profile with a local LLM, and auto-generate tailored CVs and cover letters for every match. All running on your own hardware, zero API costs.
 
