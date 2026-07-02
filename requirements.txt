@@ -1,0 +1,5 @@
+# Core dependencies for Job Scraper Pipeline
+playwright>=1.40.0
+playwright-stealth>=0.0.7
+streamlit>=1.28.0
+PyYAML>=6.0.1

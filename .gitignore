@@ -1,0 +1,38 @@
+# Output — contains personal CVs, cover letters, match reports (PII)
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+*.env
+cookies/
+.browser_context/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Streamlit
+streamlit.log
+
+# Playwright
+playwright-report/
+test-results/
+
+# Debug output
+debug_*.py
