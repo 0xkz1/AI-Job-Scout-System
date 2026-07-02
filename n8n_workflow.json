@@ -1,0 +1,57 @@
+{
+  "id": "",
+  "name": "Job Scraper Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "functionCode": "return { run: true };"
+      },
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [200,300]
+    },
+    {
+      "parameters": {
+        "command": "python3 scraper_saved.py"
+      },
+      "name": "Scrape Saved Jobs",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [400,300]
+    },
+    {
+      "parameters": {
+        "command": "python3 run.py --site indeed --pages 5"
+      },
+      "name": "Run Main Scraper",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [400,500]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Scrape Saved Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Saved Jobs": {
+      "main": [
+        [
+          {
+            "node": "Run Main Scraper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
