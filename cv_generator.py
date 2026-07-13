@@ -4,9 +4,8 @@
 # Generated for automated CV customization per job
 
 MASTER_CV = """Kazuki Yunome
-Edinburgh, Scotland, UK (Local Resident) | junoyuno55@gmail.com | 07787 702187
-GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
-Linktree: https://linktr.ee/kazukiyunome
+Edinburgh, Scotland, UK (Local Resident) | kazukiyunome@gmail.com | 07787 702187
+Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
 
 PROFILE
 {profile}
@@ -29,25 +28,7 @@ Documentation & Tracking
 Obsidian (structured note-taking, workflow organisation, Zettelkasten-style decomposition)
 
 EXPERIENCE
-Independent Development & Workflow Support | Independent | 2019 – 2022
-Maintained and supported automated data processing workflows, monitoring system behaviour, and diagnosing failures under changing external conditions.
-Built an automated arbitrage system scraping product listings from Yahoo Auctions and Mercari, comparing prices against eBay data, and listing qualifying items — deployed on Heroku for real-time data processing and automated listing execution.
-Attempted eBay API integration, encountered platform constraints, and pivoted to browser automation (Selenium) as a practical workaround — gaining hands-on experience diagnosing integration limitations and adapting strategies under technical constraints. Prototyped core logic in Excel/VBA before migrating to Python and PostgreSQL as complexity increased.
-
-Linux Systems & Process Management | Independent | 2025 – Present
-Monitored and managed multiple concurrent processes using tmux and monitoring tools in a Linux environment. Diagnosed process failures, identified root causes, and maintained operational stability under changing conditions.
-
-Sales & Cross-functional Support | Terra Drone Inc. (Tokyo) | 2017 – 2019
-Supported communication between engineering and business teams in a drone surveying company, working with technical product information in a sales and client-facing context. Worked on product explanation and client-facing communication for drone systems and 3D mapping software, supporting sales activities and coordination of deliverables across teams, including brochures, technical documents, and email campaigns.
-
-Creative Workflow Development — "Feral" | Taifunomé | 2023 – Present
-Built an end-to-end creative production pipeline: transforming Obsidian Canvas idea boards into structured markdown, applying LLM-assisted Zettelkasten-style decomposition to generate modular conceptual units, and converting them into prompts for AI image generation workflows using ComfyUI.
-
-Architectural Visualization Project | Taifunomé | 2025 – Present
-Developed structured visual production workflows using Obsidian Canvas, ComfyUI, and Blender to explore composition, asset structure, and iteration processes within digital content pipelines.
-
-Design Competition Entry — "Hive Floral Pod" | Taifunomé | 2024
-Developed a conceptual product from ideation to a structured 3D visual proposal using Procreate and Blender, delivering a complete submission within competition deadline constraints.
+{experience}
 
 EDUCATION
 Hokkai University, Sapporo, Hokkaido | 2013 – 2017
@@ -63,49 +44,96 @@ ADDITIONAL INFORMATION
 LANGUAGES
 Japanese: Native | English: Professional working proficiency | Spanish: Daily conversation level"""
 
-# Profile variants per role type
-PROFILE_VARIANTS = {
-    "development_support": "Technical specialist focused on development support and production workflows, with hands-on experience maintaining, diagnosing, and improving automated workflows and data processing systems. Experienced in breaking down complex technical issues, identifying root causes, and adapting approaches iteratively until systems are stable and reliable. Comfortable supporting both technical and non-technical stakeholders by translating problems into clear, actionable steps. My background spans independent systems development, Linux environment management, and creative workflow design — providing a practical understanding of how technical systems support creative production workflows. I am particularly motivated to support creative teams and contribute to tool pipelines within game development.",
+def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
+    """
+    Dynamically load profile text and core strengths from:
+    00_Kazuki/career/cv/profile/{role_type}.md
+    """
+    from pathlib import Path
     
-    "data_analysis": "Detail-oriented and self-directed professional with hands-on experience building automation tools, data-cleaning workflows, and AI-assisted image tagging systems. Strong background in Excel, VBA, Python, SQL, and local AI workflows, with a practical focus on improving data quality, reducing manual work, and handling large batches of structured and unstructured information. Comfortable working independently, adapting to new tools quickly, and turning messy workflows into reliable systems.",
-    
-    "creative_technologist": "Creative technologist bridging visual production and technical systems. Experienced in building end-to-end creative pipelines combining Obsidian, ComfyUI, Blender, and local AI tools for concept development and asset generation. Strong foundation in Linux systems management, Python automation, and workflow orchestration. Passionate about reducing friction between creative intent and technical execution in game development, architectural visualization, and digital content production.",
-    
-    "technical_artist": "Technical artist with dual expertise in creative production and systems engineering. Proven track record building automated workflows for asset processing, image tagging, and data validation using Python, local AI models, and creative tools (Blender, ComfyUI, Affinity Suite). Experienced in Linux environment management, process monitoring, and troubleshooting technical pipelines under changing conditions. Motivated to support art and engineering teams by stabilizing toolchains and improving production reliability.",
-    
-    "web_developer": "Full-stack developer with a focus on automation and data-driven applications. Experienced building web scrapers, data processing pipelines, and browser automation tools using Python, PostgreSQL, and modern web technologies. Strong Linux systems background with hands-on experience in Docker, process monitoring, and deployment workflows. Comfortable translating business requirements into reliable, maintainable technical solutions.",
-    
-    "general": "Versatile technical professional with hands-on experience spanning systems engineering, automation, data processing, and creative workflow design. Experienced in Linux environment management, Python automation (web scraping, data cleaning, SQL), and AI-assisted pipelines (ComfyUI, local LLMs, VLM tagging). Proven ability to diagnose complex technical issues, adapt workflows under constraints, and bridge technical and non-technical stakeholders. Seeking to apply this interdisciplinary skillset in development support, creative technology, or technical operations roles."
-}
+    # Resolve dynamic paths relative to workspace parent or system mounts
+    base_dir = Path(__file__).resolve().parent.parent
+    profile_path = base_dir / "cv" / "profile" / f"{role_type}.md"
+    if not profile_path.exists():
+        # Fallbacks
+        for fallback in [
+            f"/media/kz003/atelier/00_Kazuki/career/cv/profile/{role_type}.md",
+            f"/home/kz003/atelier/00_Kazuki/career/cv/profile/{role_type}.md"
+        ]:
+            if Path(fallback).exists():
+                profile_path = Path(fallback)
+                break
+                
+    if not profile_path.exists():
+        if role_type != "general":
+            return load_profile_and_strengths("general")
+        return "", ""
 
-# Core strengths variants
-STRENGTHS_VARIANTS = {
-    "development_support": "• Technical troubleshooting and root cause analysis\n• Workflow support and process improvement\n• Task and issue tracking (structured documentation, reproducibility)\n• Cross-functional communication (technical ↔ non-technical)\n• Team collaboration (in-person and remote)\n• Working within evolving schedules and delivery constraints\n• Technical curiosity and self-directed learning",
-    
-    "data_analysis": "• Data entry, validation, formatting, and quality control\n• Data cleaning and standardisation\n• Excel workflow design and spreadsheet automation with VBA, Python, SQL, Pandas, NumPy\n• E-commerce and product data processing\n• Image organisation, tagging, and asset handling\n• Root cause analysis and troubleshooting\n• Independent work and self-management\n• Clear communication with technical and non-technical stakeholders\n• Adapting quickly to new tools, systems, and workflows",
-    
-    "creative_technologist": "• End-to-end creative pipeline design (Obsidian → LLM → ComfyUI → Blender)\n• Technical troubleshooting and root cause analysis in creative workflows\n• Workflow automation and process improvement\n• Cross-functional communication (artists ↔ engineers)\n• Asset organisation, tagging, and visual data management\n• Rapid prototyping and iteration under deadline constraints\n• Self-directed learning of emerging creative tech (Stable Diffusion, local LLMs)",
-    
-    "technical_artist": "• Technical art pipeline design and troubleshooting\n• Asset processing automation (Python, local AI, Blender)\n• Shader, material, and VFX workflow support\n• Cross-team communication (art ↔ engineering ↔ production)\n• Process monitoring and stability management in creative tools\n• Problem-solving under evolving technical constraints\n• Rapid learning of new DCC tools and game engine workflows",
-    
-    "web_developer": "• Full-stack web development with automation focus\n• Web scraping, API integration, and data pipeline construction\n• Database design and SQL optimization (PostgreSQL)\n• Linux systems management and Docker deployment\n• Debugging and root cause analysis in distributed systems\n• Clean code practices and technical documentation\n• Agile workflows and cross-functional collaboration",
-    
-    "general": "• Technical troubleshooting and root cause analysis\n• Workflow automation and process improvement (Python, VBA, n8n, SQL)\n• Data cleaning, validation, and standardisation\n• Cross-functional communication (technical ↔ non-technical)\n• Independent work and self-management\n• Rapid learning of new tools, systems, and workflows\n• Structured documentation and reproducibility (Obsidian, Markdown)"
-}
+    try:
+        content = profile_path.read_text(encoding="utf-8")
+        parts = content.split("---")
+        body = parts[-1].strip()
+        
+        profile_text = ""
+        strengths_text = ""
+        
+        current_section = None
+        current_lines = []
+        
+        for line in body.split("\n"):
+            line_stripped = line.strip()
+            if line_stripped.startswith("## "):
+                if current_section == "profile":
+                    profile_text = "\n".join(current_lines).strip()
+                elif current_section == "strengths":
+                    strengths_text = "\n".join(current_lines).strip()
+                
+                sec_name = line_stripped[3:].lower()
+                if "profile" in sec_name:
+                    current_section = "profile"
+                elif "strength" in sec_name:
+                    current_section = "strengths"
+                else:
+                    current_section = None
+                current_lines = []
+            else:
+                if current_section:
+                    current_lines.append(line)
+                    
+        if current_section == "profile":
+            profile_text = "\n".join(current_lines).strip()
+        elif current_section == "strengths":
+            strengths_text = "\n".join(current_lines).strip()
+            
+        # Convert markdown list markers (- or *) to bullet points (•) to maintain original formatting
+        if strengths_text:
+            formatted_strengths = []
+            for line in strengths_text.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("- ") or stripped.startswith("* "):
+                    formatted_strengths.append(f"• {stripped[2:]}")
+                elif stripped.startswith("• "):
+                    formatted_strengths.append(stripped)
+                elif stripped:
+                    formatted_strengths.append(f"• {stripped}")
+            strengths_text = "\n".join(formatted_strengths)
+            
+        return profile_text, strengths_text
+    except Exception as e:
+        print(f"  ⚠ Error loading profile/strengths for {role_type}: {e}")
+        if role_type != "general":
+            return load_profile_and_strengths("general")
+        return "", ""
 
 def get_profile(role_type: str = "general") -> str:
     """Get profile text for a role type."""
-    return PROFILE_VARIANTS.get(role_type, PROFILE_VARIANTS["general"])
+    p, _ = load_profile_and_strengths(role_type)
+    return p
 
 def get_strengths(role_type: str = "general") -> str:
     """Get core strengths for a role type."""
-    return STRENGTHS_VARIANTS.get(role_type, STRENGTHS_VARIANTS["general"])
-
-def generate_cv(role_type: str = "general") -> str:
-    """Generate a complete CV for a specific role type."""
-    profile = get_profile(role_type)
-    strengths = get_strengths(role_type)
-    return MASTER_CV.format(profile=profile, core_strengths=strengths)
+    _, s = load_profile_and_strengths(role_type)
+    return s
 
 # Role type detection from job title/description
 ROLE_KEYWORDS = {
@@ -114,6 +142,7 @@ ROLE_KEYWORDS = {
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
     "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
+    "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma"],
 }
 
 def detect_role_type(job_title: str, job_description: str = "") -> str:
@@ -127,6 +156,265 @@ def detect_role_type(job_title: str, job_description: str = "") -> str:
         if scores[best] > 0:
             return best
     return "general"
+
+# ─────────────────────────────────────────────
+# Project Registry
+# ─────────────────────────────────────────────
+# Each project is a structured unit that can be dynamically ordered by the LLM
+# based on relevance to a specific job posting.
+
+def load_projects_from_md() -> list[dict]:
+    """
+    Load CV projects dynamically from 00_Kazuki/career/cv/projects/*.md
+    Filters out any projects with 'status: draft' or 'draft: true'.
+    """
+    import yaml
+    from pathlib import Path
+    
+    projects = []
+    for candidate in [
+        Path("/home/kz003/atelier/00_Kazuki/career/cv/projects"),
+        Path("/media/kz003/atelier/00_Kazuki/career/cv/projects"),
+        Path(__file__).resolve().parent.parent / "cv" / "projects",
+    ]:
+        if candidate.exists():
+            cv_projects_dir = candidate
+            break
+    else:
+        return projects
+        
+    for fpath in sorted(cv_projects_dir.glob("*.md")):
+        if fpath.name == "README.md":
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8")
+            parts = content.split("---")
+            if len(parts) >= 3:
+                frontmatter = yaml.safe_load(parts[1]) or {}
+                
+                status = str(frontmatter.get("status", "")).lower().strip()
+                is_draft = frontmatter.get("draft", False) or status == "draft"
+                if is_draft:
+                    continue  # Skip draft projects
+                
+                description = parts[2].strip()
+                
+                project = {
+                    "id": frontmatter.get("id", fpath.stem),
+                    "title": frontmatter.get("title", ""),
+                    "role": frontmatter.get("role", ""),
+                    "period": frontmatter.get("period", ""),
+                    "description": description,
+                    "tags": frontmatter.get("tags", []),
+                    "skills": frontmatter.get("skills", []),
+                }
+                projects.append(project)
+        except Exception as e:
+            print(f"  ⚠ Error loading project file {fpath.name}: {e}")
+            
+    return projects
+
+PROJECTS = load_projects_from_md()
+
+# ─────────────────────────────────────────────
+# Fallback: Static experience per role type
+# ─────────────────────────────────────────────
+# Used when Ollama is unavailable. Projects filtered by role_tags, order fixed.
+
+STATIC_EXPERIENCE = {
+    "web_developer": [
+        "portfolio_website",
+        "independent_development",
+        "linux_systems",
+    ],
+    "development_support": [
+        "independent_development",
+        "linux_systems",
+        "terra_drone",
+    ],
+    "data_analysis": [
+        "independent_development",
+        "terra_drone",
+    ],
+    "creative_technologist": [
+        "feral",
+        "arch_viz",
+        "hive_floral_pod",
+        "portfolio_website",
+    ],
+    "technical_artist": [
+        "feral",
+        "arch_viz",
+        "hive_floral_pod",
+    ],
+    "product_designer": [
+        "portfolio_website",
+        "feral",
+        "arch_viz",
+        "hive_floral_pod",
+    ],
+    "general": [
+        "portfolio_website",
+        "independent_development",
+        "linux_systems",
+        "terra_drone",
+        "feral",
+        "arch_viz",
+        "hive_floral_pod",
+    ],
+}
+
+
+def _format_project_entry(project: dict) -> str:
+    """Format a single project dict into a CV Experience entry."""
+    return f"{project['title']} | {project['role']} | {project['period']}\n{project['description']}"
+
+
+def _get_static_experience(role_type: str) -> str:
+    """Build Experience section from static ordering (no LLM)."""
+    project_ids = STATIC_EXPERIENCE.get(role_type, STATIC_EXPERIENCE["general"])
+    project_map = {p["id"]: p for p in PROJECTS}
+    entries = []
+    for pid in project_ids:
+        if pid in project_map:
+            entries.append(_format_project_entry(project_map[pid]))
+    return "\n\n".join(entries)
+
+
+# ─────────────────────────────────────────────
+# LLM-based Dynamic Experience Generation
+# ─────────────────────────────────────────────
+# Sends job description + all project summaries to Ollama (gemma4:26b),
+# asks it to rank projects by relevance and write the Experience section.
+
+import os as _os
+import json as _json
+import requests as _requests
+import time as _time
+
+_OLLAMA_ENDPOINT = _os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434/api/chat")
+_OLLAMA_MODEL = _os.getenv("OLLAMA_MODEL_CV", "gemma-4-26b-a4b-it-gguf")
+_OLLAMA_TIMEOUT = int(_os.getenv("OLLAMA_TIMEOUT_CV", "120"))
+_OLLAMA_KEEP_ALIVE = _os.getenv("OLLAMA_KEEP_ALIVE", "10m")
+
+
+def _build_project_summaries() -> str:
+    """Build a concise list of all projects for the LLM prompt."""
+    lines = []
+    for i, p in enumerate(PROJECTS, 1):
+        skills_str = ", ".join(p["skills"])
+        lines.append(
+            f"PROJECT {i}: {p['title']}\n"
+            f"  Role: {p['role']} | Period: {p['period']}\n"
+            f"  Skills: {skills_str}\n"
+            f"  Description: {p['description']}\n"
+        )
+    return "\n".join(lines)
+
+
+def _generate_experience_ollama(job_title: str, job_description: str, role_type: str) -> str | None:
+    """
+    Use Ollama LLM to generate a tailored Experience section.
+    Returns formatted Experience text, or None on failure.
+    """
+    if not job_title and not job_description:
+        return None
+
+    project_summaries = _build_project_summaries()
+
+    prompt = f"""You are a CV writer for a job applicant. Your task is to select and order the most relevant projects for a specific job posting, then write the EXPERIENCE section of a CV.
+
+JOB DETAILS:
+Title: {job_title}
+Description (excerpt): {job_description[:2000] if job_description else 'N/A'}
+Detected role type: {role_type}
+
+AVAILABLE PROJECTS:
+{project_summaries}
+
+INSTRUCTIONS:
+1. Select the 3-5 projects MOST RELEVANT to this specific job.
+2. Order them by relevance — most relevant first.
+3. Format each entry exactly as:
+   [Project Title] | [Role] | [Period]
+   [Description verbatim from the data above]
+4. DO NOT modify project descriptions. Use them exactly as provided.
+5. DO NOT add any commentary, headers, or explanations.
+6. Separate entries with a single blank line.
+7. If the job involves front-end/web development, consider including the Portfolio Website project.
+8. If the job involves creative/3D work, prioritize Feral, Arch Viz, and Hive Floral Pod.
+9. If the job involves data/automation, prioritize Independent Development.
+
+Write ONLY the Experience section content. No "EXPERIENCE" header."""
+
+    payload = {
+        "model": _OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a professional CV writer. Output ONLY the requested content, no preface or commentary."},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "keep_alive": _OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0.4},
+    }
+
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            resp = _requests.post(
+                _OLLAMA_ENDPOINT,
+                json=payload,
+                timeout=_OLLAMA_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("message", {}).get("content", "")
+            if content.strip():
+                return content.strip()
+            return None
+        except (_requests.RequestException, _json.JSONDecodeError, KeyError) as e:
+            if attempt < max_retries:
+                _time.sleep(5)
+                continue
+            print(f"  ⚠ Ollama CV error (after {max_retries + 1} attempts): {e}")
+            return None
+
+
+def generate_experience(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
+    """
+    Generate the Experience section for a CV.
+    Tries LLM-based dynamic generation first, falls back to static ordering.
+    """
+    # Try LLM first (if job description is available)
+    if job_description and len(job_description) > 50:
+        llm_result = _generate_experience_ollama(job_title, job_description, role_type)
+        if llm_result:
+            return llm_result
+
+    # Fallback: static experience
+    return _get_static_experience(role_type)
+
+
+def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "") -> str:
+    """Generate a complete CV for a specific role type and job."""
+    profile = get_profile(role_type)
+    strengths = get_strengths(role_type)
+    experience = generate_experience(job_title, job_description, role_type)
+    
+    cv_body = MASTER_CV.format(profile=profile, core_strengths=strengths, experience=experience)
+    
+    frontmatter = f"""---
+title: "{company} - {job_title} (CV)"
+type: "cv"
+company: "{company}"
+match_report: "[[{match_filename}]]"
+cover_letter: "[[{cl_filename}]]"
+---
+"""
+    
+    # Prepend frontmatter and H1
+    display_title = f"{company} - {job_title} (CV)" if company and job_title else "Curriculum Vitae"
+    return f"{frontmatter}\n# {display_title}\n\n{cv_body}"
 
 if __name__ == "__main__":
     import sys

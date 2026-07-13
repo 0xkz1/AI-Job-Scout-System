@@ -15,9 +15,8 @@ from datetime import datetime
 from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
-from playwright_stealth import Stealth
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "10_output")
 
 
 def sanitize_filename(text: str, max_len: int = 80) -> str:
@@ -62,59 +61,94 @@ def is_cookie_valid(cookie_file: str, max_age_days: int = 30) -> bool:
         return False
 
 
-async def _ensure_logged_in(page, config, linkedin_cookie_file: str, max_cookie_age_days: int) -> bool:
-    """Check if logged into LinkedIn; if not, ask user to log in."""
-    print("🔍 Checking LinkedIn login status...")
-    await page.goto("https://www.linkedin.com/jobs/", wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_timeout(2000)
+async def _auto_login(page, config) -> bool:
+    """Auto-login to LinkedIn using credentials from .env."""
+    import os
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+    email = os.environ.get("LINKEDIN_EMAIL", "")
+    password = os.environ.get("LINKEDIN_PASSWORD", "")
+    if not email or not password:
+        print("  ✗ No LinkedIn credentials in .env")
+        return False
 
-    # Check if already logged in (look for job search elements)
-    content = await page.content()
-    if "jobs-search-results" in content or "job-card" in content:
-        print("  ✓ Already logged into LinkedIn.")
-        return True
-
-    # Try to load cached cookies first
-    if is_cookie_valid(linkedin_cookie_file, max_cookie_age_days):
-        print("  → Found valid cached cookies, restoring session...")
-        with open(linkedin_cookie_file) as f:
-            cookies = json.load(f)
-        await page.context.add_cookies(cookies)
-        await page.reload(wait_until="domcontentloaded")
+    print("🔑 Auto-logging in to LinkedIn...")
+    try:
+        await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # Check again
-        content = await page.content()
-        if "jobs-search-results" in content or "job-card" in content:
-            print("  ✓ Restored session from cached cookies.")
-            return True
-        else:
-            print("  ⚠ Cached cookies expired or invalid.")
+        # Direct fill — this approach bypasses LinkedIn's JS detection
+        await page.fill('input[name="session_key"]', email)
+        await page.wait_for_timeout(300)
+        await page.fill('input[name="session_password"]', password)
+        await page.wait_for_timeout(300)
+        await page.click('button[type="submit"]')
+        await page.wait_for_timeout(5000)
 
-    # Interactive login — launch with UI
+        # Check if logged in (redirected to feed or jobs)
+        content = await page.content()
+        if "feed" in page.url or "jobs" in page.url or "mynetwork" in page.url:
+            print("  ✓ LinkedIn auto-login successful")
+            return True
+
+        # Check for CAPTCHA or verification
+        if "captcha" in content.lower() or "verify" in content.lower() or "challenge" in content.lower():
+            print("  ⚠ CAPTCHA/verification detected — manual intervention needed")
+            return False
+
+        print("  ✗ Login may have failed (no redirect to feed/jobs)")
+        return False
+
+    except Exception as e:
+        print(f"  ✗ Auto-login error: {e}")
+        return False
+
+
+async def _ensure_logged_in(page, config, linkedin_cookie_file: str, max_cookie_age_days: int) -> bool:
+    """Check if logged into LinkedIn; if not, try auto-login, then cookie restore."""
+    print("🔍 Checking LinkedIn login status...")
+    # Go directly to jobs search — if cookies are valid, we'll see results
+    await page.goto("https://www.linkedin.com/jobs/search/?keywords=software&location=UK", wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(3000)
+
+    # Check if we see job results (logged in)
+    content = await page.content()
+    has_results = "jobs-search-results" in content or "job-card" in content or "/jobs/view" in content
+
+    if has_results:
+        print("  ✓ Already logged into LinkedIn (session valid).")
+        return True
+
+    # If not logged in, try auto-login (no stealth, direct fill approach)
+    print("  → Session not valid, attempting auto-login...")
+    if await _auto_login(page, config):
+        # Cache full storage state
+        state = await page.context.storage_state()
+        state_file = linkedin_cookie_file.replace(".json", ".state")
+        with open(state_file, "w") as f:
+            json.dump(state, f)
+        print("  ✓ LinkedIn session cached after auto-login.")
+        return True
+
+    # Interactive login fallback
     headless = config.get("cookie_config", {}).get("headless", True)
     if headless:
-        print("  ✗ Running in headless mode but no valid cookies. Run interactively first to log in.")
-        print("     Set cookie_config.headless: false in config.yaml for interactive login.")
+        print("  ✗ Running in headless mode and auto-login failed.")
         return False
 
-    print("🔑 LinkedIn login required.")
-    print("   Please log in manually in the browser window (60s timeout)...")
-    print("   (Cookies will be cached for next time)")
-
-    await page.wait_for_timeout(60000)  # Wait 60s for manual login
+    print("🔑 LinkedIn login required. Please log in manually (60s timeout)...")
+    await page.wait_for_timeout(60000)
 
     content = await page.content()
-    if "jobs-search-results" not in content and "job-card" not in content:
-        print("  ✗ Login not detected. Try running again.")
-        return False
+    if "jobs-search-results" in content or "job-card" in content:
+        state = await page.context.storage_state()
+        with open(linkedin_cookie_file.replace(".json", ".state"), "w") as f:
+            json.dump(state, f)
+        print("  ✓ LinkedIn session cached.")
+        return True
 
-    # Cache cookies
-    cookies = await page.context.cookies()
-    with open(linkedin_cookie_file, "w") as f:
-        json.dump(cookies, f)
-    print("  ✓ LinkedIn session cached.")
-    return True
+    print("  ✗ Login not detected.")
+    return False
 
 
 async def scrape_linkedin(
@@ -158,7 +192,10 @@ async def scrape_linkedin(
                 "--disable-dev-shm-usage",
             ],
         )
-        context = await browser.new_context(
+
+        # Use storage_state file if available (more reliable than add_cookies)
+        state_file = linkedin_cookie_file.replace(".json", ".state")
+        context_kwargs = dict(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -170,8 +207,10 @@ async def scrape_linkedin(
             geolocation={"latitude": 55.9533, "longitude": -3.1883},
             permissions=["geolocation"],
         )
-        stealth = Stealth()
-        await stealth.apply_stealth_async(context)
+        if os.path.exists(state_file):
+            context_kwargs["storage_state"] = state_file
+            print(f"  → Loading saved session state from {state_file}")
+        context = await browser.new_context(**context_kwargs)
         page = await context.new_page()
 
         # Login check
@@ -219,11 +258,12 @@ async def scrape_linkedin(
 
             # Get job cards
             cards = await page.query_selector_all(
-                "li.jobs-search-results__list-item"
+                'li.jobs-search-results__list-item, '
+                'div.job-card-container, '
+                'div.occludable-update, '
+                'li.occludable-update, '
+                'div[class*="job-card"]'
             )
-            if not cards:
-                cards = await page.query_selector_all("div.job-card-container")
-
             print(f"  Page {page_num}: {len(cards)} job cards")
 
             for card in cards:
@@ -264,42 +304,35 @@ async def scrape_linkedin(
 async def _extract_job_card(page, card) -> dict | None:
     """Extract details from a LinkedIn job card."""
     try:
-        # Click card to load details
-        try:
-            await card.click()
-            await page.wait_for_timeout(1000)
-        except Exception:
-            pass
-
-        # --- Title ---
+        # --- Title + URL from link ---
         title_el = await card.query_selector(
-            "a.job-card-list__title, "
-            "a.job-card-container__link, "
-            "strong.job-card-list__title"
+            'a[href*="/jobs/view/"]'
         )
-        title = await title_el.inner_text() if title_el else ""
-        title = title.strip()
-
-        # --- URL ---
+        title = ""
         url = ""
         if title_el:
+            title = (await title_el.inner_text()).strip()
             url = await title_el.get_attribute("href") or ""
+            if url.startswith("/"):
+                url = "https://www.linkedin.com" + url
+            # Strip query params for cleaner URL
+            url = url.split("?")[0]
 
         # --- Company ---
         company_el = await card.query_selector(
             "a.job-card-container__company-name, "
-            "span.job-card-container__company-name"
+            "span.job-card-container__company-name, "
+            "span[class*=\"company-name\"]"
         )
-        company = await company_el.inner_text() if company_el else ""
-        company = company.strip()
+        company = (await company_el.inner_text()).strip() if company_el else ""
 
         # --- Location ---
         loc_el = await card.query_selector(
             "span.job-card-container__metadata-item, "
-            "li.job-card-container__metadata-item"
+            "li.job-card-container__metadata-item, "
+            "span[class*=\"location\"]"
         )
-        location_text = await loc_el.inner_text() if loc_el else ""
-        location_text = location_text.strip()
+        location_text = (await loc_el.inner_text()).strip() if loc_el else ""
 
         # --- Salary ---
         salary_el = await card.query_selector(
@@ -310,19 +343,28 @@ async def _extract_job_card(page, card) -> dict | None:
         if salary_el:
             salary_text = (await salary_el.inner_text()).strip()
 
-        # --- Try to get full description from detail panel ---
+        # --- Navigate to job detail page to get full description ---
         full_desc = ""
-        try:
-            desc_el = await page.query_selector(
-                "div.jobs-description-content__text, "
-                "section.job-details-jobs-unified-description "
-                "article"
-            )
-            if desc_el:
-                full_desc = await desc_el.inner_text()
-                full_desc = full_desc.strip()
-        except Exception:
-            pass
+        if url:
+            try:
+                # Close any modal overlay
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(500)
+
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2000)
+
+                # Try selectors for job description (LinkedIn 2025+ class names)
+                desc_el = await page.query_selector(
+                    'div.jobs-description, '
+                    'article.jobs-description__container, '
+                    'div.jobs-description__content, '
+                    'div[class*="jobs-description"]'
+                )
+                if desc_el:
+                    full_desc = (await desc_el.inner_text()).strip()
+            except Exception:
+                pass
 
         if not title:
             return None
@@ -336,6 +378,7 @@ async def _extract_job_card(page, card) -> dict | None:
             "description": full_desc,
             "url": url,
             "source": "linkedin",
+            "type": "auto",
             "source_site": "LinkedIn",
             "scraped_at": datetime.now().isoformat(),
         }

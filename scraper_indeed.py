@@ -14,8 +14,9 @@ from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
 from playwright_stealth import Stealth
+from scraper_helper import load_description_cache
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "10_output")
 
 
 def sanitize_filename(text: str, max_len: int = 80) -> str:
@@ -29,11 +30,82 @@ async def _stealth_context(context):
     await stealth.apply_stealth_async(context)
 
 
+async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
+    """
+    Navigate to a job's detail page and extract the full description text.
+    Returns up to 5000 chars of cleaned text, or "" on failure.
+    """
+    for attempt in range(retries + 1):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            # Fixed wait for JS rendering (networkidle timeout causes issues)
+            await page.wait_for_timeout(8000)  # Wait for Cloudflare JS challenge + rendering
+
+            # Indeed job description container — try multiple selectors
+            desc_selectors = [
+                "#jobDescriptionText",
+                "div.jobsearch-JobComponentDescription",
+                "div[data-testid='jobsearch-JobComponentDescription']",
+                "#job-details",
+                "div.job-description",
+                "section.jobsearch-JobComponentDescription",
+            ]
+            # Check for Cloudflare block before trying selectors
+            page_title = await page.title()
+            if "just a moment" in page_title.lower():
+                # Cloudflare challenge — wait longer and retry
+                if attempt < retries:
+                    await page.wait_for_timeout(10000)
+                    continue
+                return ""
+
+            body_el = await page.query_selector("body")
+            if body_el:
+                body_text = await body_el.inner_text()
+                if "additional verification required" in body_text.lower() or "cloudflare" in body_text.lower():
+                    # Rate limited — wait longer and retry
+                    if attempt < retries:
+                        await page.wait_for_timeout(15000)
+                        continue
+                    return ""
+
+            for sel in desc_selectors:
+                desc_el = await page.query_selector(sel)
+                if desc_el:
+                    text = await desc_el.inner_text()
+                    if text and len(text.strip()) > 50:
+                        # Check if text is actually a Cloudflare page (162 chars)
+                        if "cloudflare" in text.lower() or "verification" in text.lower():
+                            if attempt < retries:
+                                await page.wait_for_timeout(10000)
+                                continue
+                            return ""
+                        text = re.sub(r"\n{3,}", "\n\n", text.strip())
+                        return text[:5000]
+
+            # Fallback: grab the main content area
+            main_el = await page.query_selector("main, #main-content, #wrapper")
+            if main_el:
+                text = await main_el.inner_text()
+                if text and len(text.strip()) > 100 and "cloudflare" not in text.lower():
+                    return text.strip()[:5000]
+
+            return ""
+        except Exception:
+            if attempt < retries:
+                await page.wait_for_timeout(2000)
+                continue
+            return ""
+    return ""
+
+
 async def scrape_indeed(
     keyword: str,
     location: str = "",
     max_pages: int = 3,
     headless: bool = True,
+    config: dict | None = None,
+    cache: dict | None = None,
 ) -> list[dict]:
     """
     Search Indeed UK and return job listings.
@@ -44,34 +116,117 @@ async def scrape_indeed(
     base_url = "https://uk.indeed.com"
     search_url = f"{base_url}/jobs?q={quote_plus(keyword)}&l={quote_plus(location)}"
 
+    # --- Cookie Configuration ---
+    cookie_dir = None
+    cookie_path = None
+    if config and "cookie_config" in config:
+        cc = config["cookie_config"]
+        cookie_dir = cc.get("cookie_dir", "")
+        if cookie_dir:
+            import os as _os
+            os.makedirs(cookie_dir, exist_ok=True)
+            cookie_path = _os.path.join(cookie_dir, cc.get("indeed_cookie_file", "indeed_cookies.json"))
+
     async with async_playwright() as p:
+        # Step 1: Attempt to launch browser
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-web-security",
+            "--disable-features=IsolateOrigins,site-per-process",
+        ]
+        
+        # Determine headless state. If no cookies exist, force non-headless once to bypass Cloudflare
+        is_headless = headless
+        force_bypass = False
+        import os as _os
+        if cookie_path and not _os.path.exists(cookie_path):
+            print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
+            is_headless = False
+            force_bypass = True
+
         browser = await p.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
+            headless=is_headless,
+            args=launch_args,
         )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-            locale="en-GB",
-            timezone_id="Europe/London",
-            geolocation={"latitude": 55.9533, "longitude": -3.1883},
-            permissions=["geolocation"],
-        )
+
+        context_args = {
+            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "viewport": {"width": 1920, "height": 1080},
+            "locale": "en-GB",
+            "timezone_id": "Europe/London",
+            "geolocation": {"latitude": 55.9533, "longitude": -3.1883},
+            "permissions": ["geolocation"],
+        }
+        
+        if cookie_path and _os.path.exists(cookie_path):
+            context_args["storage_state"] = cookie_path
+            print(f"  🔑 Loaded persistent cookies from {cookie_path}")
+
+        context = await browser.new_context(**context_args)
         await _stealth_context(context)
         page = await context.new_page()
 
         print(f"🔍 Indeed: searching '{keyword}' in '{location}'...")
         await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        # Step 2: Detect Cloudflare challenge page
+        page_title = await page.title()
+        if "just a moment" in page_title.lower() or "cloudflare" in (await page.content()).lower():
+            print("  ⚠️ Cloudflare verification detected!")
+            
+            # If we are headless, we must restart in non-headless mode to let user bypass it
+            if is_headless:
+                print("  🔄 Headless mode blocked by Cloudflare. Relaunching in non-headless mode...")
+                await browser.close()
+                
+                # Relaunch non-headless
+                browser = await p.chromium.launch(headless=False, args=launch_args)
+                context = await browser.new_context(
+                    user_agent=context_args["user_agent"],
+                    viewport=context_args["viewport"],
+                    locale=context_args["locale"],
+                    timezone_id=context_args["timezone_id"],
+                    geolocation=context_args["geolocation"],
+                    permissions=context_args["permissions"],
+                )
+                if cookie_path and _os.path.exists(cookie_path):
+                    with open(cookie_path) as fh:
+                        await context.add_cookies(json.load(fh)["cookies"])
+                await _stealth_context(context)
+                page = await context.new_page()
+                
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(3000)
+                force_bypass = True
+
+            if force_bypass or not is_headless:
+                print("\n" + "="*80)
+                print("  🚨 ACTION REQUIRED: Please solve the Cloudflare verification in the browser window.")
+                print("  Once you are on the search results page, press ENTER in this terminal to continue...")
+                print("="*80 + "\n")
+                
+                # Wait for user input or auto-detect success
+                import sys
+                # Since we run inside a tool context, we can attempt to wait for 15 seconds to let the user solve it,
+                # or wait for terminal keyboard input. Because we can't easily block on stdin in some automated runs,
+                # we'll wait for the title to change or up to 20 seconds, checking every 2 seconds.
+                for _ in range(15):
+                    await page.wait_for_timeout(2000)
+                    title = await page.title()
+                    if "just a moment" not in title.lower():
+                        print("  ✅ Cloudflare bypassed!")
+                        break
+                else:
+                    # Final fallback: wait for any input if we are interactive
+                    print("  ⚠️ Timeout waiting for bypass. Attempting to continue anyway...")
+
+                # Save new storage state
+                if cookie_path:
+                    await context.storage_state(path=cookie_path)
+                    print(f"  💾 Saved bypass cookies to {cookie_path}")
 
         # Accept cookies if shown
         try:
@@ -95,6 +250,8 @@ async def scrape_indeed(
             cards = await page.query_selector_all("div.job_seen_beacon")
             print(f"  Page {page_num}: found {len(cards)} job cards")
 
+            page_jobs_start = len(jobs)
+
             for card in cards:
                 try:
                     job = await _extract_job_card(card, base_url)
@@ -103,6 +260,56 @@ async def scrape_indeed(
                         jobs.append(job)
                 except Exception as e:
                     continue
+
+            # --- Fetch full descriptions via /viewjob?jk=... URLs ---
+            # Check cache first
+            if cache is None:
+                cache = load_description_cache()
+                
+            fetched = 0
+            skipped = 0
+            for i, job in enumerate(jobs[page_jobs_start:]):
+                # Check cache
+                title_lower = job.get("title", "").strip().lower()
+                company_lower = job.get("company", "").strip().lower()
+                cache_key = (title_lower, company_lower)
+                
+                if cache_key in cache and cache[cache_key].get("description"):
+                    cached_job = cache[cache_key]
+                    job["description"] = cached_job["description"]
+                    job["snippet"] = cached_job.get("snippet", cached_job["description"][:300])
+                    if "analysis" in cached_job:
+                        job["analysis"] = cached_job["analysis"]
+                    skipped += 1
+                    continue
+
+                if not job.get("description"):
+                    url = job.get("url", "")
+                    jk_match = re.search(r"jk=([a-f0-9]+)", url)
+                    if jk_match:
+                        jk = jk_match.group(1)
+                        viewjob_url = f"{base_url}/viewjob?jk={jk}"
+                        try:
+                            # Use a fresh page for each detail fetch
+                            detail_page = await context.new_page()
+                            desc = await _fetch_job_description(detail_page, viewjob_url)
+                            await detail_page.close()
+                            if desc:
+                                job["description"] = desc
+                                # Update cache
+                                cache[cache_key] = job
+                                fetched += 1
+                                if fetched % 5 == 0:
+                                    print(f"    → Fetched {fetched} descriptions...")
+                            await page.wait_for_timeout(1000)  # Rate limit courtesy
+                        except Exception as e:
+                            try:
+                                await detail_page.close()
+                            except Exception:
+                                pass
+                            print(f"    ⚠ Failed to fetch description for jk={jk}: {e}")
+            if fetched or skipped:
+                print(f"    → Fetched {fetched} descriptions, skipped {skipped} (cache hits) from detail pages")
 
             # --- Go to next page ---
             next_link = await page.query_selector(
@@ -181,7 +388,7 @@ async def _extract_job_card(card, base_url: str) -> dict | None:
         salary_text = await salary_el.inner_text() if salary_el else ""
         salary_text = salary_text.strip()
 
-        # --- Description snippet ---
+        # --- Description snippet (from card, may be empty) ---
         desc_el = await card.query_selector("div.job-snippet")
         description = await desc_el.inner_text() if desc_el else ""
         description = description.strip().replace("\n", " ")[:500]
@@ -195,13 +402,14 @@ async def _extract_job_card(card, base_url: str) -> dict | None:
             "location": location_text,
             "salary": salary_text,
             "snippet": description,
-            "description": "",
+            "description": "",  # Will be filled by _fetch_job_description
             "url": url,
             "source": "indeed",
+            "type": "auto",
             "source_site": "Indeed",
             "scraped_at": datetime.now().isoformat(),
         }
-
+    
     except Exception as e:
         return None
 
@@ -214,10 +422,11 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
     max_pages = config.get("max_pages_per_search", 3)
+    cache = load_description_cache()
 
     for kw in keywords:
         for loc in locations:
-            jobs = await scrape_indeed(kw, loc, max_pages=max_pages)
+            jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config, cache=cache)
             for j in jobs:
                 dedup_key = (j["title"], j["company"], j["location"])
                 if dedup_key not in seen:

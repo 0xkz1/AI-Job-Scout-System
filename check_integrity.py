@@ -9,10 +9,10 @@ import os
 import re
 from pathlib import Path
 
-OUTPUT_DIR = Path(__file__).parent / "output"
+OUTPUT_DIR = Path(__file__).parent / "10_output"
 MATCHES_DIR = OUTPUT_DIR / "00_matches"
-CVS_DIR = OUTPUT_DIR / "00_cvs"
-LETTERS_DIR = OUTPUT_DIR / "00_cover-letters"
+CVS_DIR = OUTPUT_DIR / "10_cvs"
+LETTERS_DIR = OUTPUT_DIR / "10_cover-letters"
 
 
 def extract_company_title(filename: str, file_type: str) -> tuple[str, str] | None:
