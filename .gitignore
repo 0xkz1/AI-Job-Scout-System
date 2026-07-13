@@ -1,5 +1,17 @@
 # Output — contains personal CVs, cover letters, match reports (PII)
 output/
+10_output/
+
+# Staging — contains raw scraped job data (large + ephemeral)
+00_saved/
+
+# Browser session state / cookies (credentials)
+linkedin_cookies.state
+*.state
+
+# Misc output / logs
+output.txt
+
 
 # Python
 __pycache__/
