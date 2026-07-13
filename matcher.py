@@ -1004,7 +1004,16 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     exp_match = calculate_experience_match(job_level, user_exp)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
-    ctx_match = calculate_context_match(job_description)
+    # Always use Ollama LLM for context scoring (not TF-IDF fallback)
+    persona = _load_persona_summary()
+    if persona and job_description:
+        llm_ctx = _ollama_context_score(job_description, persona)
+        if llm_ctx:
+            ctx_match = llm_ctx
+        else:
+            ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if Ollama fails
+    else:
+        ctx_match = calculate_context_match(job_description)
 
     # Weighted composite — accept custom weights from config or parameter
     w = weights or config.get("weights", DEFAULT_WEIGHTS)
@@ -1040,6 +1049,15 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     else:
         tier = "🔴 Weak Match"
 
+    # A) Generate bilingual job summary via LLM for 50%+ matches
+    summary_en = ""
+    summary_ja = ""
+    if composite >= 0.50 and job_description and len(job_description) >= 50:
+        summary = _ollama_job_summary(job_description)
+        if summary:
+            summary_en = summary.get("summary_en", "")
+            summary_ja = summary.get("summary_ja", "")
+
     return {
         "composite_score": round(composite, 2),
         "tier": tier,
@@ -1049,9 +1067,13 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
         "salary": sal_match,
         "context_score": ctx_match["score"],
         "context_reasoning": ctx_match["reasoning"],
+        "context_reasoning_en": ctx_match.get("reasoning_en", ""),
+        "context_reasoning_ja": ctx_match.get("reasoning_ja", ""),
         "context_top_terms": ctx_match.get("top_terms", []),
         "title_relevance": relevance,
         "weights": weights,
+        "summary_en": summary_en,
+        "summary_ja": summary_ja,
     }
 
 
