@@ -151,6 +151,24 @@ def save_cover_letter(job_title: str, company: str, job_location: str, job_descr
     
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
+    role_type = detect_role_type(job_title, job_description)
+    
+    # Check if template file exists, otherwise it falls back to general
+    base_dir = Path(__file__).resolve().parent.parent
+    cl_path = base_dir / "cover-letter" / f"{role_type}.md"
+    resolved_role = role_type
+    exists = cl_path.exists()
+    if not exists:
+        for fallback in [
+            f"/media/kz003/atelier/00_Kazuki/career/cover-letter/{role_type}.md",
+            f"/home/kz003/atelier/00_Kazuki/career/cover-letter/{role_type}.md"
+        ]:
+            if Path(fallback).exists():
+                exists = True
+                break
+    if not exists:
+        resolved_role = "general"
+        
     letter = generate_cover_letter(job_title, company, job_location, job_description)
     
     safe_company = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
@@ -164,6 +182,7 @@ type: "cover-letter"
 company: "{company}"
 match_report: "[[{match_filename}]]"
 cv: "[[{cv_filename}]]"
+source_template: "[[career/cover-letter/{resolved_role}]]"
 ---
 """
     

@@ -4,6 +4,7 @@ type: "cover-letter"
 company: "Wordsmith AI"
 match_report: "[[Wordsmith_AI_Product_Designer]]"
 cv: "[[Wordsmith_AI_Product_Designer_CV]]"
+source_template: "[[career/cover-letter/product_designer]]"
 ---
 
 # Wordsmith AI - Product Designer (Cover Letter)

@@ -4,6 +4,7 @@ type: "cv"
 company: "Wordsmith AI"
 match_report: "[[Wordsmith_AI_Product_Designer]]"
 cover_letter: "[[Wordsmith_AI_Product_Designer_CL]]"
+source_profile: "[[career/cv/profile/product_designer]]"
 ---
 
 # Wordsmith AI - Product Designer (CV)
@@ -41,16 +42,21 @@ Obsidian (structured note-taking, workflow organisation, Zettelkasten-style deco
 
 EXPERIENCE
 Asset Weaver — Obsidian Plugin | Independent | 2026
-Engineered "Asset Weaver," an Obsidian plugin developed with TypeScript and Node.js, to automate the generation of structured Markdown metadata for untagged images within a user's vault. Integrated local Vision-Language Models (VLM) and Large Language Models (LLM) via Ollama to enable private, high-performance image scanning and semantic indexing without reliance on external cloud APIs.
+• Engineered "Asset Weaver," an Obsidian plugin developed with TypeScript and Node.js, to automate the generation of structured Markdown metadata for untagged images within a user's vault.
+• Integrated local Vision-Language Models (VLM) and Large Language Models (LLM) via Ollama to enable private, high-performance image scanning and semantic indexing without reliance on external cloud APIs.
 
 Feral Research — Living Archive | Taifunomé | 2023 – Present
-Engineered an automated data pipeline using Python, web scraping, and n8n to ingest structured API data and unstructured archival sources into a PostgreSQL database, enabling continuous expansion of the research archive. Implemented a Retrieval-Augmented Generation (RAG) system utilizing the Hermes Agent to facilitate complex knowledge structuring and cross-referencing of scientific studies, field reports, and historical documents. Developed a responsive research platform through frontend engineering and web design, transforming large-scale data wrangling into an interactive living archive designed for narrative world-building and storytelling.
+• Engineered an automated data pipeline using Python, web scraping, and n8n to ingest structured API data and unstructured archival sources into a PostgreSQL database, enabling continuous expansion of the research archive.
+• Implemented a Retrieval-Augmented Generation (RAG) system utilizing the Hermes Agent to facilitate complex knowledge structuring and cross-referencing of scientific studies, field reports, and historical documents.
+• Developed a responsive research platform through frontend engineering and web design, transforming large-scale data wrangling into an interactive living archive designed for narrative world-building and storytelling.
 
 Portfolio Website Design & Development | Independent | 2026 – Present
 Designed and developed a personal portfolio website (kazukiyunome.com) that integrates LinkedIn, Instagram, and GitHub into a single cohesive narrative. Built with semantic HTML, CSS custom properties, and vanilla JavaScript — no frameworks, no build tools. Implemented a Headless CMS (Sanity) backend for content management, with AI-assisted development (OpenCode + local LLM). The site functions as both a portfolio and an experimental space exploring creation and system design in the age of AI.
 
-AI Creative Workflow Automation | Independent | 2026
-Engineered an automated pipeline using Python, Bash, and BeautifulSoup to parse and transform unstructured research notes into optimized formats for high-fidelity image generation. Orchestrated end-to-end creative workflows via ComfyUI, SDXL, and n8n to streamline the transition from initial concept to final visualization, enabling rapid prototyping and idea validation.
+Hermes — AI Agent Orchestration System | Independent | 2026
+• Engineered the Hermes Agent orchestration system, implementing a five-layer hierarchical structure to manage nine specialized AI profiles and automate task routing based on complexity and type.
+• Integrated OpenCode sub-agents with token-saving tools—including RTK and Antigravity Template—to optimize resource efficiency across the multi-agent ecosystem.
+• Architected an interactive constellation visualization within Obsidian to map complex inter-agent relationships, providing a comprehensive overview of the entire orchestration architecture.
 
 EDUCATION
 Hokkai University, Sapporo, Hokkaido | 2013 – 2017
