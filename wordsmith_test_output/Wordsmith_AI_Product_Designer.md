@@ -1,7 +1,7 @@
 ---
-match_score: 0.82
-match_score_pct: 82
-tier: "Strong Match"
+match_score: 0.78
+match_score_pct: 78
+tier: "Good Match"
 company: "Wordsmith AI"
 title: "Product Designer"
 location: "Edinburgh, Scotland, United Kingdom"
@@ -12,7 +12,7 @@ skills_score: 57
 experience_score: 90
 location_score: 100
 salary_score: 60
-context_score: 100
+context_score: 85
 url: "https://www.linkedin.com/jobs/view/4420946259/"
 cv: "[[Wordsmith_AI_Product_Designer_CV]]"
 cover_letter: "[[Wordsmith_AI_Product_Designer_CL]]"
@@ -22,7 +22,7 @@ cover_letter: "[[Wordsmith_AI_Product_Designer_CL]]"
 **Company:** Wordsmith AI  |  **Location:** Edinburgh, Scotland, United Kingdom
 **URL:** https://www.linkedin.com/jobs/view/4420946259/
 
-## 🎯 Overall Match: 🟢 Strong Match (82%)
+## 🎯 Overall Match: 🟡 Good Match (78%)
 
 ---
 
@@ -34,7 +34,7 @@ cover_letter: "[[Wordsmith_AI_Product_Designer_CL]]"
 | Experience | 90% | 25% | 22% |
 | Location | 100% | 10% | 10% |
 | Salary | 60% | 1% | 1% |
-| Context/Ethos | 100% | 29% | 29% |
+| Context/Ethos | 85% | 29% | 25% |
 
 ---
 
@@ -73,9 +73,27 @@ cover_letter: "[[Wordsmith_AI_Product_Designer_CL]]"
 ---
 
 
-## 🧠 Context & Ethos Alignment (100%)
+## 🧠 Context & Ethos Alignment (85%)
 
-Resonant keywords: design, legal, work, ll, product | Job language differs from personal brand style (slight alignment)
+The alignment between Kazuki Yunomé's philosophy and the Wordsmith role is exceptionally high in terms of methodology and technical identity. Kazuki's core ethos—'Craft × Structure'—is a near-perfect mirror to the job requirement of someone who 'thinks like a designer and builds like an engineer.' The candidate's obsession with reducing friction between idea and execution directly matches Wordsmith's mission to simplify messy, complex legal workflows through AI and seamless UI. Furthermore, Kazuki’s interest in using AI as a tool for productivity (rather than just an end goal) aligns with the company's approach to AI agents handling routine tasks.
+
+However, there is a significant potential misalignment regarding work environment and lifestyle. Kazuki's profile emphasizes high mobility, remote compute resources (Japan-based), and a highly optimized mobile setup (MacBook Pro, Mystery Ranch bags). In contrast, Wordsmith explicitly states they are an 'in-office team in Edinburgh' and expect the office to be the default. This creates a tension between the candidate's established 'feral'/mobile workflow and the company's localized, collaborative culture. Additionally, while the technical approach is a match, the domain shift from visual arts/image-making to legal operations represents a pivot in subject matter, though the underlying problem of 'building tools for experts' remains consistent.
+
+**和訳:** Kazuki Yunomé氏の哲学とWordsmith社の職務内容は、手法および技術的アイデンティティにおいて極めて高い親和性があります。氏の核心的な理念である「Craft × Structure（クラフト×構造）」は、「デザイナーのように考え、エンジニアのように構築する」という求人要件とほぼ完璧に一致しています。また、「アイデアと実行の間の摩擦を軽減する」という氏のこだわりは、AIを活用して複雑な法的ワークフローを簡素化するというWordsmith社のミッションと直結しています。AIを単なる目的ではなく、生産性を高めるためのツールとして捉える姿勢も共通しています。
+
+一方で、労働環境とライフスタイルにおいては大きな乖離が見られます。氏のプロフィールは、高い機動力、リモートコンピューティング（日本拠点）、最適化されたモバイル環境（MacBook ProやMystery Ranchのバックパックなど）を強調しています。対照的に、Wordsmith社は「エディンバラのオフィス勤務」を前提としており、オフィスをデフォルトとする文化を明示しています。このため、氏が確立している「フェラル（野生的な）」かつモバイル中心のワークフローと、同社のローカルな共同作業文化との間に摩擦が生じる可能性があります。また、扱うドメインが視覚芸術からリーガルテックへと変化する点も考慮すべきですが、「専門家のためのツールを作る」という問題解決の本質は共通しています。
+
+---
+
+## 📋 求人概要 (Job Summary)
+
+### English
+
+Wordsmith is seeking a hybrid designer-engineer to build category-defining legal AI tools for in-house teams. You will be responsible for designing complex workflows and rapidly prototyping them in code using TypeScript and React to bridge the gap between design and engineering. The ideal candidate possesses exceptional taste, technical craft, and the self-sufficiency to turn ambiguous problems into polished, shipped experiences. Based in an in-office setting in Edinburgh, you will join a fast-moving, collaborative team where you'll have significant ownership over product direction and the chance to define new AI interaction paradigms.
+
+### 日本語
+
+Wordsmithは、社内法務チーム向けのリーガルAIプラットフォームを構築するため、デザインとコードの境界で活躍するハイブリッドな人材を募集しています。主な業務は、複雑なワークフローのデザインからTypeScriptやReactを用いた迅速なプロトタイピングまで、設計とエンジニアリングの両面を担うことです。高い審美眼と技術的な実装力を持ち、曖昧な課題を洗練された製品へと自律的に昇華できる能力が求められます。エディンバラのオフィスを拠点とする小規模でスピード感のあるチームの一員として、AI時代の新しいインタラクションを定義する大きな裁量権を持って働くことができます。
 
 ---
 
