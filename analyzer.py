@@ -94,16 +94,22 @@ def _clean_number(s: str) -> float:
 
 # --- Experience level ---
 
+# Keywords indicating internship / placement
+INTERNSHIP_KEYWORDS = [
+    "internship", "intern", "placement", "graduate scheme",
+    "industrial year", "year in industry", "work experience year",
+]
+
 # Keywords indicating entry-level
 ENTRY_KEYWORDS = [
     "entry level", "graduate", "junior", "trainee", "apprentice",
-    "no experience", "0-", "1 year", "fresh", "intern",
+    "no experience", "0-", "1 year", "fresh",
 ]
 
-# Keywords indicating mid-level
+# Keywords indicating mid-level (manager belongs here, NOT exec)
 MID_KEYWORDS = [
     "mid", "mid-level", "intermediate", "2 years", "3 years",
-    "4 years", "5 years", "experienced",
+    "4 years", "5 years", "experienced", "manager",
 ]
 
 # Keywords indicating senior
@@ -112,51 +118,69 @@ SENIOR_KEYWORDS = [
     "8 years", "10 years", "principal",
 ]
 
-# Keywords indicating director/exec
+# Keywords indicating director/exec (manager excluded — it's mid)
 EXEC_KEYWORDS = [
     "director", "head of", "vp", "vice president", "chief", "cto",
-    "cfo", "ceo", "manager",
+    "cfo", "ceo",
 ]
 
 
 def classify_experience_level(title: str, description: str) -> str:
     """
-    Classify job as: entry_level, mid_senior, director, or unknown.
-    Checks title first, then description.
+    Classify job as one of: internship, entry_level, mid, senior, director, unknown.
+    Checks title first (stronger signal), then falls back to description.
+    Returns the level string.
     """
     text = f"{title} {description}".lower()
 
-    # Check title first (stronger signal)
+    # Check title first (stronger signal) — priority order matters
     title_lower = title.lower()
 
+    # 1. Internship (check first — keep intern out of entry-level)
+    for kw in INTERNSHIP_KEYWORDS:
+        if kw in title_lower:
+            return "internship"
+
+    # 2. Director+ (check before senior — e.g. "Senior Director" = director)
     for kw in EXEC_KEYWORDS:
         if kw in title_lower:
             return "director"
 
+    # 3. Senior
     for kw in SENIOR_KEYWORDS:
         if kw in title_lower:
-            return "mid_senior"
+            return "senior"
 
+    # 4. Mid (manager, mid, intermediate)
+    for kw in MID_KEYWORDS:
+        if kw in title_lower:
+            return "mid"
+
+    # 5. Entry
     for kw in ENTRY_KEYWORDS:
         if kw in title_lower:
             return "entry_level"
 
-    # Then check full description
+    # Fallback: check full text (title + description)
+    for kw in INTERNSHIP_KEYWORDS:
+        if kw in text:
+            return "internship"
+
     for kw in EXEC_KEYWORDS:
         if kw in text:
             return "director"
 
     for kw in SENIOR_KEYWORDS:
         if kw in text:
-            return "mid_senior"
-
-    for kw in ENTRY_KEYWORDS:
-        if kw in text:
-            return "entry_level"
+            return "senior"
 
     for kw in MID_KEYWORDS:
         if kw in text:
-            return "mid_senior"
+            return "mid"
+
+    for kw in ENTRY_KEYWORDS:
+        if kw in text:
+            return "entry_level"
 
     return "unknown"
 
@@ -285,53 +309,53 @@ SKILL_KEYWORDS = [
     "xcode", "android studio",
     # Embedded/IoT
     "embedded", "firmware", "rtos", "arduino", "raspberry pi",
-    "esp32", "stm32", "c", "c embedded",
+    "esp32", "stm32", "c++", "c#", "c embedded",
+    # NOTE: bare "c" removed — matches any word containing 'c'
     # Education & Research
-    "teaching", "training", "education", "curriculum", "pedagogy",
-    "examiner", "moderator", "assessment", "marking", "grading",
-    "lecturer", "tutor", "instructor", "professor", "researcher",
-    "phd", "postdoc", "academic", "university", "college",
-    "laboratory", "lab", "experiment", "publication", "peer review",
-    # Creative & Media
-    "creative", "design", "designer", "artist", "art", "visual",
+    "teaching", "training", "curriculum", "pedagogy",
+    "assessment", "marking", "grading",
+    "lecturer", "tutor", "instructor", "researcher",
+    "phd", "postdoc",
+    # NOTE: "lab" removed — matches "collaborative", "elaborate" etc.
+    # NOTE: "hr" removed — matches "their", "here" etc.
+    # Creative & Media — specific and broad terms (design/creative are valid)
+    "creative", "design", "designer", "artist", "visual",
+    # NOTE: "art" kept but borderline — matches "part", "start"; fine as long as
+    # synonym mapping routes it to a skill users actually have in skills.md
     "photography", "videography", "video editing", "motion graphics",
-    "animation", "illustration", "graphic design", "branding",
-    "typography", "layout", "print design", "web design",
-    "ui design", "ux design", "user research", "usability",
-    "wireframing", "prototyping", "figma", "sketch", "adobe xd",
+    "illustration", "graphic design", "branding",
+    "typography", "web design",
+    "ui design", "ux design", "ui/ux design", "user research", "usability testing",
+    "wireframing", "prototyping", "design systems", "figma", "sketch", "adobe xd",
     "photoshop", "illustrator", "indesign", "after effects",
     "premiere", "davinci resolve", "blender", "maya", "cinema 4d",
     "3d modeling", "3d animation", "vfx", "compositing",
     "game art", "concept art", "character design", "environment art",
     "technical artist", "rigging", "shader", "material",
     # Marketing & Content
-    "marketing", "content", "copywriting", "seo", "sem",
+    "marketing", "copywriting", "seo", "sem",
     "social media", "email marketing", "paid social", "ppc",
-    "analytics", "google analytics", "ga4", "tag manager",
-    "campaign", "conversion", "crm", "hubspot", "salesforce",
+    "google analytics", "ga4", "tag manager",
+    "crm", "hubspot", "salesforce",
     # Business & Management
     "project management", "program management", "product management",
     "agile", "scrum", "kanban", "jira", "confluence",
-    "stakeholder management", "strategy", "roadmap",
-    "budget", "forecasting", "risk management", "change management",
+    "stakeholder management", "roadmap",
+    "risk management", "change management",
     # Science & Engineering
-    "mechanical", "electrical", "electronic", "civil", "chemical",
-    "biomedical", "aerospace", "automotive", "manufacturing",
+    "mechanical engineering", "electrical engineering", "civil engineering",
     "cad", "solidworks", "autocad", "catia", "ansys",
-    "simulation", "fea", "cfd", "pcb", "schematic",
-    "test engineer", "validation", "verification", "compliance",
+    "fea", "cfd", "pcb",
     # Healthcare & Life Sciences
-    "clinical", "medical", "pharmaceutical", "biotech", "genomics",
-    "laboratory", "qc", "qa", "gmp", "glp", "fda", "mhra",
+    "clinical research", "pharmaceutical", "biotech", "genomics",
+    "gmp", "glp",
     # Finance & Legal
-    "finance", "accounting", "audit", "tax", "financial modeling",
-    "excel", "vba", "power bi", "tableau", "sql",
-    "legal", "compliance", "regulatory", "contracts", "gdpr",
+    "financial modeling", "excel", "vba", "power bi", "tableau", "sql",
+    "compliance", "gdpr",
+    # NOTE: bare "legal", "hr", "lab" removed — too generic, match domain context
     # Other Professional
-    "administration", "coordinator", "assistant", "executive",
-    "operations", "logistics", "supply chain", "procurement",
-    "hr", "human resources", "recruitment", "talent acquisition",
-    "facilities", "health safety", "environmental",
+    "operations management", "logistics", "supply chain", "procurement",
+    "human resources", "recruitment", "talent acquisition",
 ]
 
 
@@ -415,39 +439,38 @@ def normalize_skill(skill: str) -> str:
     return SKILL_SYNONYMS.get(skill_lower, skill.title())
 
 
+_SKILL_REGEX_CACHE = {}
+
 def extract_skills(text: str) -> list[str]:
-    """Find mentioned skills in text (title, snippet, description, etc.)."""
+    """Find mentioned skills in text (title, snippet, description, etc.) using boundary checks."""
     if not text:
         return []
+    import re
     text_lower = text.lower()
     found = set()
     for skill in SKILL_KEYWORDS:
-        if skill in text_lower:
+        if skill not in _SKILL_REGEX_CACHE:
+            pattern = re.escape(skill)
+            if skill[0].isalnum() or skill[0] == '_':
+                pattern = r'(?<![a-zA-Z0-9_])' + pattern
+            if skill[-1].isalnum() or skill[-1] == '_':
+                pattern = pattern + r'(?![a-zA-Z0-9_])'
+            _SKILL_REGEX_CACHE[skill] = re.compile(pattern)
+        
+        if _SKILL_REGEX_CACHE[skill].search(text_lower):
             found.add(normalize_skill(skill))
     return sorted(found)
 
 
 def extract_skills_from_title(title: str) -> list[str]:
     """Extract skills specifically from job title (e.g., 'Python Developer', 'AWS Engineer')."""
-    if not title:
-        return []
-    # Common patterns: "X Developer", "X Engineer", "X Architect", "Senior X", "Lead X"
-    title_lower = title.lower()
-    found = set()
-    for skill in SKILL_KEYWORDS:
-        # Check if skill appears as a word in the title
-        # Use word boundaries to avoid partial matches
-        import re
-        pattern = r'\b' + re.escape(skill) + r'\b'
-        if re.search(pattern, title_lower):
-            found.add(normalize_skill(skill))
-    return sorted(found)
+    return extract_skills(title)
 
 
 # --- Ollama Integration ---
 # Local LLM for skill extraction and classification (gemma4:12b / qwen35-9b-tools)
 OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen35-9b-tools")  # no thinking in raw output, better JSON
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))  # seconds - model loading can take 10-15s
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "10m")  # keep model loaded for batch processing
 
@@ -525,9 +548,11 @@ def extract_skills_ollama(title: str, description: str) -> list[str]:
     # Use title + snippet (description), or just title if snippet empty
     text = f"Job title: {title}\nJob description: {description}" if description.strip() else f"Job title: {title}"
 
-    prompt = f"""Extract all technical and soft skills from the following job posting.
+    prompt = f"""Extract ONLY concrete, specific skills from the following job posting.
+Skills must be: programming languages, frameworks, tools, software, platforms, or specific methodologies.
+DO NOT include: job titles, company names, industry domains (e.g. 'legal', 'finance'), generic adjectives (e.g. 'fast', 'self-sufficient'), or single letters.
 Return ONLY a JSON array of skill names, nothing else.
-Example: ["Python", "Docker", "AWS", "Communication", "Agile"]
+Example: ["Python", "Docker", "AWS", "TypeScript", "React", "Figma", "Design Systems"]
 
 {text}"""
 
@@ -559,7 +584,7 @@ def classify_experience_work_style_ollama(title: str, description: str) -> dict:
     text = f"Job title: {title}\nJob description: {description}" if description.strip() else f"Job title: {title}"
 
     prompt = f"""Classify this job's experience level and work style.
-Return JSON: {{"experience_level": "entry_level|mid_senior|director", "work_style": "remote|hybrid|onsite"}}
+Return JSON: {{"experience_level": "internship|entry_level|mid|senior|director", "work_style": "remote|hybrid|onsite"}}
 
 {text}"""
 
@@ -572,7 +597,7 @@ Return JSON: {{"experience_level": "entry_level|mid_senior|director", "work_styl
         exp_level = result.get("experience_level", "unknown")
         work_style = result.get("work_style", "unknown")
         # Validate values
-        valid_exp = {"entry_level", "mid_senior", "director", "unknown"}
+        valid_exp = {"internship", "entry_level", "mid", "senior", "director", "unknown"}
         valid_style = {"remote", "hybrid", "onsite", "unknown"}
         return {
             "experience_level": exp_level if exp_level in valid_exp else "unknown",

@@ -5,22 +5,29 @@ employment_types:
 - freelance
 exclude_description_keywords:
 - driver license
-exclude_title_keywords: []
+exclude_title_keywords:
+- senior
+- lead
+- head of
+- director
+- manager
 include_levels:
 - entry_level
-- mid_senior
-- director
+- mid
+- internship
 keywords:
 - Creative Technologist
 - Development Support
 - Technical Artist
 - Web Developer
 - Web Designer
+- Digital Designer
 - Design Engineer
-- Builder AI Native
-- Designer AI Native
+- Builder
+- Designer
 locations:
 - Edinburgh
+- Dundee
 - Glasgow
 - London
 - Manchester
@@ -29,21 +36,8 @@ locations:
 max_pages_per_search: 10
 min_salary_gbp: 26000
 sites:
+- reed
+- guardian
+- adzuna
 - indeed
 - linkedin
-
-# CV generation threshold: only generate CV/cover letter for jobs with match score >= this value
-# Range: 0.0 - 1.0 (e.g., 0.50 = 50%). Set to 0.0 to generate for all jobs.
-match_score_threshold: 0.50
-
-# Cookie persistence configuration
-cookie_config:
-  # Directory for persistent cookie storage (absolute path recommended for cron)
-  cookie_dir: "/media/kz003/atelier/00_Kazuki/career/scraper/cookies"
-  # Cookie file names
-  linkedin_cookie_file: "linkedin_cookies.json"
-  indeed_cookie_file: "indeed_cookies.json"
-  # Cookie expiry threshold in days (cookies older than this trigger re-login)
-  max_cookie_age_days: 30
-  # Headless mode for cron (true=cron, false=interactive login)
-  headless: true

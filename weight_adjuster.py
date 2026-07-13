@@ -5,7 +5,7 @@ Adjust the importance of Skills, Experience, Location, Salary
 via sliders and see match scores recalculate in real time.
 
 Usage:
-    cd /media/kz003/atelier/00_Kazuki/career/scraper
+    cd /media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System
     .venv/bin/streamlit run weight_adjuster.py --server.port 8501
 """
 
@@ -29,7 +29,7 @@ from filter import filter_jobs
 
 # --- Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+OUTPUT_DIR = os.path.join(BASE_DIR, "10_output")
 ANALYZED_PATH = os.path.join(OUTPUT_DIR, "_analyzed.json")
 MATCH_DIR = os.path.join(OUTPUT_DIR, "00_matches")
 
@@ -70,6 +70,7 @@ def get_base_scores(jobs_json_str: str):
             "exp_raw": match["experience"]["score"],
             "loc_raw": match["location"]["score"],
             "sal_raw": match["salary"]["score"],
+            "ctx_raw": match.get("context_score", 0.5),
             "tier": match["tier"],
         })
     return results
@@ -83,7 +84,7 @@ except FileNotFoundError:
 # --- Weight Sliders ---
 st.markdown("### ⚖️ Weight Configuration")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     w_skills = st.slider(
@@ -102,18 +103,25 @@ with col2:
 with col3:
     w_location = st.slider(
         "📍 Location",
-        min_value=0, max_value=100, value=20,
+        min_value=0, max_value=100, value=10,
         help="How much weight to give location/work style matching"
     )
 
 with col4:
     w_salary = st.slider(
         "💰 Salary",
-        min_value=0, max_value=100, value=15,
+        min_value=0, max_value=100, value=5,
         help="How much weight to give salary matching"
     )
 
-total = w_skills + w_experience + w_location + w_salary
+with col5:
+    w_context = st.slider(
+        "🧠 Context/Ethos",
+        min_value=0, max_value=100, value=20,
+        help="How much weight to give personal brand & ethos alignment"
+    )
+
+total = w_skills + w_experience + w_location + w_salary + w_context
 
 if total == 0:
     st.warning("All weights are 0 — cannot calculate scores. Please adjust sliders.")
@@ -124,6 +132,7 @@ norm_skills = w_skills / total
 norm_experience = w_experience / total
 norm_location = w_location / total
 norm_salary = w_salary / total
+norm_context = w_context / total
 
 # Show normalization
 st.info(
@@ -131,7 +140,8 @@ st.info(
     f"Skills: {norm_skills*100:.0f}% | "
     f"Experience: {norm_experience*100:.0f}% | "
     f"Location: {norm_location*100:.0f}% | "
-    f"Salary: {norm_salary*100:.0f}%"
+    f"Salary: {norm_salary*100:.0f}% | "
+    f"Context: {norm_context*100:.0f}%"
     + (f"  ⚠️ (raw sum={total}, auto-normalized to 100%)" if total != 100 else "")
 )
 
@@ -145,6 +155,7 @@ weights = {
     "experience": norm_experience,
     "location": norm_location,
     "salary": norm_salary,
+    "context": norm_context,
 }
 
 for r in base_results:
@@ -153,15 +164,16 @@ for r in base_results:
         + r["exp_raw"] * weights["experience"]
         + r["loc_raw"] * weights["location"]
         + r["sal_raw"] * weights["salary"]
+        + r["ctx_raw"] * weights["context"]
     )
     r["composite_score"] = round(composite * 100)
 
 # Build DataFrame
 df = pd.DataFrame(base_results)
 df = df[["company", "title", "location", "composite_score",
-         "skill_raw", "exp_raw", "loc_raw", "sal_raw", "tier", "url"]]
+         "skill_raw", "exp_raw", "loc_raw", "sal_raw", "ctx_raw", "tier", "url"]]
 df.columns = ["Company", "Title", "Location", "Score (%)",
-              "Skills", "Exp", "Loc", "Salary", "Tier", "URL"]
+              "Skills", "Exp", "Loc", "Salary", "Context", "Tier", "URL"]
 df = df.sort_values("Score (%)", ascending=False).reset_index(drop=True)
 df.index += 1  # 1-based rank
 
@@ -177,7 +189,7 @@ st.metric("Jobs shown", f"{len(filtered_df)} / {len(df)}")
 # --- Table ---
 st.dataframe(
     filtered_df[["Company", "Title", "Location", "Score (%)",
-                 "Skills", "Exp", "Loc", "Salary", "Tier"]],
+                 "Skills", "Exp", "Loc", "Salary", "Context", "Tier"]],
     use_container_width=True,
     height=500,
 )
@@ -212,6 +224,9 @@ if st.button("🔄 Regenerate Match Reports", type="primary"):
             "weights": weights,
         }
 
+        # Include context in config for match report generation
+        config["weights"]["context"] = norm_context
+
         # Clear old files
         old_files = glob.glob(os.path.join(MATCH_DIR, "match_*.md"))
         for f in old_files:
@@ -224,21 +239,5 @@ if st.button("🔄 Regenerate Match Reports", type="primary"):
                 save_match_report(job, match, MATCH_DIR)
                 count += 1
 
-        # Sync to Obsidian vault via hard links
-        VAULT_MATCH_DIR = "/media/kz003/atelier/obsidian-vault/career/scraper/output/00_matches"
-        synced = 0
-        if os.path.isdir(VAULT_MATCH_DIR):
-            # Remove old hard links
-            for f in glob.glob(os.path.join(VAULT_MATCH_DIR, "match_*.md")):
-                os.remove(f)
-            # Create new hard links
-            for f in glob.glob(os.path.join(MATCH_DIR, "match_*.md")):
-                dst = os.path.join(VAULT_MATCH_DIR, os.path.basename(f))
-                try:
-                    os.link(f, dst)
-                    synced += 1
-                except OSError:
-                    pass  # File may already exist
-
-        st.success(f"✅ Regenerated {count} match reports! (Obsidian vault synced: {synced})")
+        st.success(f"✅ Regenerated {count} match reports!")
         st.balloons()

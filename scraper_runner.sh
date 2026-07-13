@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRAPER_DIR="/media/kz003/atelier/00_Kazuki/career/scraper"
-OUTPUT_DIR="${SCRAPER_DIR}/output"
+SCRAPER_DIR="/media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System"
+OUTPUT_DIR="${SCRAPER_DIR}/10_output"
+SAVED_DIR="${SCRAPER_DIR}/00_saved"
 REPORT_DIR="${HOME}/.hermes/cron/output/20e08388d5df"
 TIMESTAMP=$(date '+%Y-%m-%d-%H:%M:%S')
 REPORT_FILE="${REPORT_DIR}/runner-${TIMESTAMP}.md"
@@ -36,15 +37,15 @@ echo "" >> "${REPORT_FILE}"
 # ---- Step 3: 集計 ----
 echo "## Step 3: 結果サマリー" >> "${REPORT_FILE}"
 MATCH_COUNT=$(find "${OUTPUT_DIR}/00_matches" -name "*_match.md" 2>/dev/null | wc -l)
-CV_COUNT=$(find "${OUTPUT_DIR}/00_cvs" -name "*CV.md" 2>/dev/null | wc -l)
-CL_COUNT=$(find "${OUTPUT_DIR}/00_cover-letters" -name "*.md" 2>/dev/null | wc -l)
-SAVED_COUNT=$(find "${OUTPUT_DIR}/00_saved" -type f 2>/dev/null | wc -l)
+CV_COUNT=$(find "${OUTPUT_DIR}/10_cvs" -name "*CV.md" 2>/dev/null | wc -l)
+CL_COUNT=$(find "${OUTPUT_DIR}/10_cover-letters" -name "*.md" 2>/dev/null | wc -l)
+SAVED_COUNT=$(find "${SAVED_DIR}" -type f 2>/dev/null | wc -l)
 
 echo "| 出力先 | ファイル数 |" >> "${REPORT_FILE}"
 echo "|--------|-----------|" >> "${REPORT_FILE}"
 echo "| 00_matches | ${MATCH_COUNT} |" >> "${REPORT_FILE}"
-echo "| 00_cvs | ${CV_COUNT} |" >> "${REPORT_FILE}"
-echo "| 00_cover-letters | ${CL_COUNT} |" >> "${REPORT_FILE}"
+echo "| 10_cvs | ${CV_COUNT} |" >> "${REPORT_FILE}"
+echo "| 10_cover-letters | ${CL_COUNT} |" >> "${REPORT_FILE}"
 echo "| 00_saved | ${SAVED_COUNT} |" >> "${REPORT_FILE}"
 
 ELAPSED=$(( $(date +%s) - START_TS ))

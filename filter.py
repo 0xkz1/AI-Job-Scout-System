@@ -19,18 +19,22 @@ def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
     salary = analysis.get("salary", {})
     level = analysis.get("experience_level", "unknown")
 
-    # --- Exclude by title keywords ---
+    # --- Exclude by title keywords (word-boundary match, title only) ---
+    # Uses \b word boundaries so "senior" matches "Senior Developer" but NOT
+    # "seniority" or description text like "cooperate with senior engineers".
     exclude_titles = config.get("exclude_title_keywords", [])
     title_lower = title.lower()
     for kw in exclude_titles:
-        if kw.lower() in title_lower:
+        kw_lower = kw.lower().strip()
+        if kw_lower and re.search(r'\b' + re.escape(kw_lower) + r'\b', title_lower):
             return False, f"title contains excluded keyword '{kw}'"
 
-    # --- Exclude by description keywords ---
+    # --- Exclude by description keywords (word-boundary match) ---
     exclude_desc = config.get("exclude_description_keywords", [])
     desc_lower = description.lower()
     for kw in exclude_desc:
-        if kw.lower() in desc_lower:
+        kw_lower = kw.lower().strip()
+        if kw_lower and re.search(r'\b' + re.escape(kw_lower) + r'\b', desc_lower):
             return False, f"description contains excluded keyword '{kw}'"
 
     # --- Filter by experience level ---
