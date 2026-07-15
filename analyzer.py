@@ -104,7 +104,7 @@ INTERNSHIP_KEYWORDS = [
 # Keywords indicating entry-level
 ENTRY_KEYWORDS = [
     "entry level", "graduate", "junior", "trainee", "apprentice",
-    "no experience", "0-", "1 year", "fresh",
+    "no experience", "0-", "1 year", "fresh", "associate",
 ]
 
 # Keywords indicating mid-level (manager belongs here, NOT exec)
@@ -126,6 +126,18 @@ EXEC_KEYWORDS = [
 ]
 
 
+def _kw_search(kw: str, text: str) -> bool:
+    """Keyword match with word boundaries, so 'lead' won't match 'leading',
+    'intern' won't match 'international', 'sr' won't match 'srg'.
+    Keywords ending in non-alphanumerics (e.g. '0-') keep an open right edge."""
+    pattern = re.escape(kw)
+    if kw[0].isalnum():
+        pattern = r"(?<![a-z0-9])" + pattern
+    if kw[-1].isalnum():
+        pattern = pattern + r"(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
 def classify_experience_level(title: str, description: str) -> str:
     """
     Classify job as one of: internship, entry_level, mid, senior, director, unknown.
@@ -133,68 +145,39 @@ def classify_experience_level(title: str, description: str) -> str:
     Returns the level string.
     """
     text = f"{title} {description}".lower()
-
-    # Check title first (stronger signal) — priority order matters
     title_lower = title.lower()
 
-    # 1. Internship (check first — keep intern out of entry-level)
-    for kw in INTERNSHIP_KEYWORDS:
-        if kw in title_lower:
-            return "internship"
+    # Priority order matters: internship first (keep intern out of entry-level),
+    # director before senior (e.g. "Senior Director" = director).
+    ordered = [
+        ("internship", INTERNSHIP_KEYWORDS),
+        ("director", EXEC_KEYWORDS),
+        ("senior", SENIOR_KEYWORDS),
+        ("mid", MID_KEYWORDS),
+        ("entry_level", ENTRY_KEYWORDS),
+    ]
 
-    # 2. Director+ (check before senior — e.g. "Senior Director" = director)
-    for kw in EXEC_KEYWORDS:
-        if kw in title_lower:
-            return "director"
-
-    # 3. Senior
-    for kw in SENIOR_KEYWORDS:
-        if kw in title_lower:
-            return "senior"
-
-    # 4. Mid (manager, mid, intermediate)
-    for kw in MID_KEYWORDS:
-        if kw in title_lower:
-            return "mid"
-
-    # 5. Entry
-    for kw in ENTRY_KEYWORDS:
-        if kw in title_lower:
-            return "entry_level"
-
-    # Fallback: check full text (title + description)
-    for kw in INTERNSHIP_KEYWORDS:
-        if kw in text:
-            return "internship"
-
-    for kw in EXEC_KEYWORDS:
-        if kw in text:
-            return "director"
-
-    for kw in SENIOR_KEYWORDS:
-        if kw in text:
-            return "senior"
-
-    for kw in MID_KEYWORDS:
-        if kw in text:
-            return "mid"
-
-    for kw in ENTRY_KEYWORDS:
-        if kw in text:
-            return "entry_level"
+    # Check title first (stronger signal), then full text
+    for scope in (title_lower, text):
+        for level, keywords in ordered:
+            for kw in keywords:
+                if _kw_search(kw, scope):
+                    return level
 
     return "unknown"
 
 
 # --- Employment type ---
 
+# Word boundaries required: without them "intern" matches "international",
+# "contract" matches "contractual obligations" is fine but "ftc" matches inside words.
 EMPLOYMENT_PATTERNS = {
-    "full_time": re.compile(r"full[-\s]?time|permanent", re.IGNORECASE),
-    "part_time": re.compile(r"part[-\s]?time", re.IGNORECASE),
-    "contract": re.compile(r"contract|fixed[-\s]?term|temporary|ftc|freelance", re.IGNORECASE),
-    "internship": re.compile(r"internship|intern|placement|graduate scheme", re.IGNORECASE),
-    "freelance": re.compile(r"freelance|self[-\s]?employed|contractor", re.IGNORECASE),
-    "apprenticeship": re.compile(r"apprentice|apprenticeship", re.IGNORECASE),
+    "full_time": re.compile(r"\bfull[-\s]?time\b|\bpermanent\b", re.IGNORECASE),
+    "part_time": re.compile(r"\bpart[-\s]?time\b", re.IGNORECASE),
+    "contract": re.compile(r"\bcontract\b|\bfixed[-\s]?term\b|\btemporary\b|\bftc\b|\bfreelance\b", re.IGNORECASE),
+    "internship": re.compile(r"\binternship\b|\bintern\b|\bplacement\b|\bgraduate scheme\b", re.IGNORECASE),
+    "freelance": re.compile(r"\bfreelance\b|\bself[-\s]?employed\b|\bcontractor\b", re.IGNORECASE),
+    "apprenticeship": re.compile(r"\bapprentice(ship)?\b", re.IGNORECASE),
 }
 
 
