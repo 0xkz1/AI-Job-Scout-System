@@ -1,17 +1,24 @@
 """Unified LLM client — supports Ollama (local), Mistral, and OpenRouter (cloud).
 
 Provider selection:
-  env ANALYSIS_PROVIDER  = "mistral" | "openrouter" | "ollama" (default)
-  env FALLBACK_PROVIDER  = provider to try when primary hits rate limit / 5xx
-                            (default: "" = no fallback)
-  env CLOUD_MODEL       = model name override (defaults vary by provider)
-  env CLOUD_API_KEY     = optional override (else uses MISTRAL_API_KEY or OPENROUTER_API_KEY)
+  env ANALYSIS_PROVIDER   = "mistral" | "openrouter" | "ollama" (default)
+  env FALLBACK_PROVIDERS  = comma-separated chain to try in order when the
+                            primary hits rate limit / 5xx / missing API key,
+                            e.g. "openrouter,ollama"
+  env FALLBACK_PROVIDER   = legacy single-provider form (used when
+                            FALLBACK_PROVIDERS is unset)
+  env MISTRAL_MODEL       = model for the mistral provider (else CLOUD_MODEL, else mistral-tiny)
+  env OPENROUTER_MODEL    = model for the openrouter provider (else CLOUD_MODEL,
+                            else stepfun/step-3.5-flash)
+  env OLLAMA_MODEL        = model for the ollama provider
+  env CLOUD_MODEL         = shared model override (legacy)
+  env CLOUD_API_KEY       = optional key override (else MISTRAL_API_KEY / OPENROUTER_API_KEY)
 
-Two-tier fallback:
-  call_llm() first tries primary provider; if it fails with a transient error
-  (429 rate limit, 5xx server error, timeout), it automatically retries the
-  fallback provider.  Set FALLBACK_PROVIDER=ollama to spill over when cloud
-  is throttled.
+Chained fallback:
+  call_llm() tries the primary provider; on a transient error (429 rate limit,
+  5xx server error, timeout) or a missing API key it moves down the fallback
+  chain. Set FALLBACK_PROVIDERS=openrouter,ollama to spill over to a cheap
+  cloud model first and local Ollama last.
 
 Usage:
   from llm_client import call_llm
@@ -83,26 +90,30 @@ def call_llm(
     cid = call_llm_counter  # short alias for log prefix
 
     primary = provider or os.environ.get("ANALYSIS_PROVIDER", "ollama")
-    fallback = os.environ.get("FALLBACK_PROVIDER", "").strip()
+    fallbacks_env = os.environ.get("FALLBACK_PROVIDERS") or os.environ.get("FALLBACK_PROVIDER", "")
+    chain = [primary] + [
+        p.strip() for p in fallbacks_env.split(",")
+        if p.strip() and p.strip() != primary
+    ]
 
-    # Try primary
-    try:
-        return _call_provider(primary, messages, system_prompt, temperature, max_tokens, retries)
-    except RuntimeError as e:
-        if not _is_transient_error(e):
-            raise  # non-transient → propagate immediately
-        # Transient failure — attempt fallback
-        if not fallback or fallback == primary:
-            raise
-
-        print(f"[llm_client #{cid}] {primary} transient failure, falling back to {fallback}: {e}")
+    errors: list[str] = []
+    for i, prov in enumerate(chain):
+        is_last = i == len(chain) - 1
         try:
-            return _call_provider(fallback, messages, system_prompt, temperature, max_tokens, retries)
-        except RuntimeError as e2:
-            raise RuntimeError(
-                f"Primary({primary}) failed: {e}; "
-                f"Fallback({fallback}) also failed: {e2}"
-            )
+            return _call_provider(prov, messages, system_prompt, temperature, max_tokens, retries)
+        except ValueError as e:
+            # Missing API key — skip to the next provider in the chain
+            if is_last:
+                raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
+            errors.append(f"{prov}: {e}")
+            print(f"[llm_client #{cid}] {prov} unavailable ({e}), trying next fallback")
+        except RuntimeError as e:
+            if not _is_transient_error(e) or is_last:
+                if errors:
+                    raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
+                raise  # non-transient (or nothing left) → propagate
+            errors.append(f"{prov}: {e}")
+            print(f"[llm_client #{cid}] {prov} transient failure, trying next fallback: {e}")
 
 
 def _call_provider(
@@ -133,7 +144,7 @@ def _call_mistral(
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not set (nor CLOUD_API_KEY)")
 
-    model = os.environ.get("CLOUD_MODEL", "mistral-tiny")
+    model = os.environ.get("MISTRAL_MODEL") or os.environ.get("CLOUD_MODEL", "mistral-tiny")
     full_messages = _build_messages(messages, system_prompt)
 
     for attempt in range(retries + 1):
@@ -172,7 +183,7 @@ def _call_openrouter(
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
 
-    model = os.environ.get("CLOUD_MODEL", "google/gemini-2.0-flash-lite-preview-02-05")
+    model = os.environ.get("OPENROUTER_MODEL") or os.environ.get("CLOUD_MODEL", "stepfun/step-3.5-flash")
     full_messages = _build_messages(messages, system_prompt)
 
     for attempt in range(retries + 1):

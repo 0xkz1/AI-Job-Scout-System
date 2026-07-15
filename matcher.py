@@ -294,6 +294,12 @@ SKILL_SYNONYMS = {
     # Product building variants
     "product dev": "product development",
     "product building": "product development",
+    # Web design variants
+    "web designer": "web design",
+    "website design": "web design",
+    "landing page": "web design",
+    "landing pages": "web design",
+    "landing page design": "web design",
 }
 
 
@@ -754,14 +760,22 @@ def _load_persona_summary() -> str:
     if _persona_cache is not None:
         return _persona_cache
     persona_files = ["ethos.md", "about.md", "profile.md", "interests.md"]
-    parts = []
+    # Hard facts first: smaller LLMs otherwise infer "based in Japan" from
+    # scattered Japan references (remote hardware, past photography) even
+    # though profile.md states the location explicitly.
+    parts = [
+        "--- KEY FACTS (authoritative) ---\n"
+        "Current location: Edinburgh, UK (relocated 2025). UK work eligible, local resident.\n"
+        "Any mentions of Japan below refer to past work, photography subjects, or a "
+        "remote compute machine — NOT the candidate's current location."
+    ]
     for fname in persona_files:
         fpath = USER_PROFILE_DIR / fname
         if fpath.exists():
             content = fpath.read_text(encoding="utf-8").strip()
             if content:
                 parts.append(f"--- {fname} ---\n{content[:2000]}")
-    _persona_cache = "\n\n".join(parts) if parts else ""
+    _persona_cache = "\n\n".join(parts) if len(parts) > 1 else ""
     return _persona_cache
 
 
@@ -833,7 +847,8 @@ def _ollama_job_summary(job_description: str) -> dict | None:
 
 Focus on: role, key responsibilities, required skills, team/company culture, and what makes this role distinctive.
 
-Respond ONLY with JSON:
+Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
+3-5 sentences) — NEVER nested objects, lists, or markdown headings:
 {{"summary_en": "<3-5 sentence summary in English>", "summary_ja": "<3-5文の日本語要約>"}}
 
 ## Job Description
@@ -858,11 +873,20 @@ Respond ONLY with JSON:
         for match in reversed(matches):
             try:
                 data = json.loads(match.group())
-                summary_en = data.get("summary_en", "")
-                summary_ja = data.get("summary_ja", "")
-                # LLMs occasionally nest the value (dict/list) — only accept strings
-                if not isinstance(summary_en, str) or not isinstance(summary_ja, str):
-                    continue
+
+                def _flatten(v):
+                    # LLMs sometimes nest the summary into {"role": ..., ...}
+                    # despite the prompt — salvage by joining the string leaves
+                    if isinstance(v, str):
+                        return v.strip()
+                    if isinstance(v, dict):
+                        return " ".join(p for p in (_flatten(x) for x in v.values()) if p)
+                    if isinstance(v, list):
+                        return " ".join(p for p in (_flatten(x) for x in v) if p)
+                    return ""
+
+                summary_en = _flatten(data.get("summary_en", ""))
+                summary_ja = _flatten(data.get("summary_ja", ""))
                 if summary_en or summary_ja:
                     return {"summary_en": summary_en, "summary_ja": summary_ja}
             except (json.JSONDecodeError, ValueError, TypeError):
