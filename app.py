@@ -685,13 +685,18 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     return HTML(string=html).write_pdf()
 
 
-def pdf_export_controls(company: str, title: str, key_prefix: str):
+def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""):
     """Show a 📄 PDF popover on a kanban card when its CV/CL markdown exists.
 
     Conversion is on-demand (button click); the PDF is saved to 10_output/20_pdfs/
     and offered as a download.
     """
+    import hashlib
     base = make_safe_name(company, title)
+    # generate_outputs() suffixes colliding basenames with a URL hash — check both
+    hashed = f"{base}_{hashlib.md5((url or '').encode()).hexdigest()[:6]}"
+    if not (CV_DIR / f"{base}_CV.md").exists() and (CV_DIR / f"{hashed}_CV.md").exists():
+        base = hashed
     candidates = [("CV", CV_DIR / f"{base}_CV.md"), ("CL", CL_DIR / f"{base}_CL.md")]
     if not any(p.exists() for _, p in candidates):
         return
@@ -830,7 +835,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
-                pdf_export_controls(j["company"], j["title"], f"saved_{j['url']}")
+                pdf_export_controls(j["company"], j["title"], f"saved_{j['url']}", j["url"])
 
     # Column 2: Active (Applied, Screening, Interviewing)
     with col_k2:
@@ -855,7 +860,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
-                pdf_export_controls(j["company"], j["title"], f"active_{j['url']}")
+                pdf_export_controls(j["company"], j["title"], f"active_{j['url']}", j["url"])
 
     # Column 3: Offer / Accepted
     with col_k3:
@@ -877,7 +882,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
-                pdf_export_controls(j["company"], j["title"], f"offer_{j['url']}")
+                pdf_export_controls(j["company"], j["title"], f"offer_{j['url']}", j["url"])
 
     # Column 4: Rejected / Archived
     with col_k4:

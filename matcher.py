@@ -281,6 +281,19 @@ SKILL_SYNONYMS = {
     "game dev": "game development",
     "gameplay programming": "gameplay systems",
     "gameplay": "gameplay systems",
+    # Photography variants
+    "photoshoot": "photography",
+    "photoshoots": "photography",
+    "photo shoot": "photography",
+    "photo shoots": "photography",
+    "raw editing": "raw photo editing",
+    "photo editing": "raw photo editing",
+    "darktable": "raw photo editing",
+    "lightroom": "raw photo editing",
+    "adobe lightroom": "raw photo editing",
+    # Product building variants
+    "product dev": "product development",
+    "product building": "product development",
 }
 
 
@@ -289,6 +302,8 @@ NON_SKILL_FILTER: set[str] = {
     "make", "less",
     "problem solving", "creative", "innovation", "innovative",
     "interpersonal", "communication", "teamwork", "leadership",
+    "team leadership", "team building", "people leadership",
+    "people management",
     "time management", "critical thinking", "analytical",
     "analytical skills", "attention to detail", "problem solver",
     "proactive", "self motivated", "self-starter", "fast learner",
@@ -825,24 +840,18 @@ Respond ONLY with JSON:
 {job_description[:5000]}
 """
 
-    payload = {
-        "model": _OLLAMA_CTX_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a job description summarizer. Output ONLY valid JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "keep_alive": _OLLAMA_CTX_KEEP_ALIVE,
-    }
-
     try:
-        resp = _requests.post(
-            _OLLAMA_CTX_ENDPOINT,
-            json=payload,
-            timeout=_OLLAMA_CTX_TIMEOUT,
+        # Route through llm_client like every other LLM call (provider chain:
+        # ANALYSIS_PROVIDER with FALLBACK_PROVIDER on transient errors) —
+        # previously this hit Ollama directly and silently returned None
+        # whenever Ollama wasn't running.
+        from llm_client import call_llm as _call_llm
+        content = _call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a job description summarizer. Output ONLY valid JSON.",
+            temperature=0.2,
+            max_tokens=600,
         )
-        resp.raise_for_status()
-        content = resp.json().get("message", {}).get("content", "")
 
         import json
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
@@ -1119,14 +1128,17 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     else:
         tier = "🔴 Weak Match"
 
-    # A) Generate bilingual job summary via LLM for 50%+ matches (skippable for batch mode)
-    summary_en = ""
-    summary_ja = ""
-    if not skip_summary and composite >= 0.50 and job_description and len(job_description) >= 50:
-        summary = _ollama_job_summary(job_description)
-        if summary:
-            summary_en = summary.get("summary_en", "")
-            summary_ja = summary.get("summary_ja", "")
+    # A) Bilingual job summary via LLM for 50%+ matches (skippable for batch mode).
+    # Preserve an existing summary — like context scores, summaries are
+    # expensive LLM output and must survive --reanalyze runs.
+    summary_en = old_match.get("summary_en", "")
+    summary_ja = old_match.get("summary_ja", "")
+    if not summary_en and not summary_ja:
+        if not skip_summary and composite >= 0.50 and job_description and len(job_description) >= 50:
+            summary = _ollama_job_summary(job_description)
+            if summary:
+                summary_en = summary.get("summary_en", "")
+                summary_ja = summary.get("summary_ja", "")
 
     return {
         "composite_score": round(composite, 2),
@@ -1150,6 +1162,36 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
 
 
 # --- Report Generation ---
+
+# Job category taxonomy for Dataview filtering (Match Score List etc.).
+# TITLE-ONLY on purpose — descriptions are full of trap words (see the
+# experience-level classifier). A job can carry multiple categories.
+_JOB_CATEGORY_KEYWORDS = {
+    "design": ["designer", "design", "ui", "ux", "figma", "typograph"],
+    "engineering": ["engineer", "developer", "programmer", "software",
+                    "full stack", "fullstack", "devops", "sre", "technologist",
+                    "technical", "data", "ai", "ml", "cloud"],
+    "art": ["artist", "art", "illustrat", "3d", "animation", "animator",
+            "vfx", "visual effects", "concept"],
+    "marketing": ["marketing", "seo", "growth", "social media", "content",
+                  "copywriter", "campaign"],
+    "branding": ["brand", "branding"],
+}
+
+
+def classify_job_categories(title: str) -> list[str]:
+    """Classify a job into categories (design/engineering/art/marketing/branding)
+    from the TITLE only, word-boundary matched. Returns [] when nothing hits."""
+    title_lower = (title or "").lower()
+    cats = []
+    for cat, keywords in _JOB_CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            # Trailing wildcard allowed (e.g. "illustrat" → illustrator/illustration)
+            if re.search(r"(?<![a-z0-9])" + re.escape(kw), title_lower):
+                cats.append(cat)
+                break
+    return cats
+
 
 def make_safe_name(company: str, title: str) -> str:
     """Create a unified safe base name for all generated files (match, CV, CL)."""
@@ -1182,13 +1224,16 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     saved_at = scraped_at[:10] if scraped_at else datetime.now().strftime("%Y-%m-%d")
     cv_link = f'\ncv: "[[{cv_filename.replace(".md", "")}]]"' if cv_filename else ""
     cl_link = f'\ncover_letter: "[[{cl_filename.replace(".md", "")}]]"' if cl_filename else ""
-    
+    categories = classify_job_categories(title)
+    categories_yaml = "[" + ", ".join(categories) + "]" if categories else "[]"
+
     frontmatter = f"""---
 match_score: {score}
 match_score_pct: {score_pct}
 tier: "{_tier_short(match['tier'])}"
 company: "{company}"
 title: "{title}"
+categories: {categories_yaml}
 location: "{location}"
 source: "{source}"
 type: "{jtype}"

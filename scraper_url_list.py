@@ -31,6 +31,13 @@ def _try_acquire_lock(name="url_list_jobs"):
 def extract_job_from_text(text: str) -> dict:
     prompt = f"""
 You are an expert data extractor. Extract the job listing details from the following text (which was scraped from a job board or company website).
+
+IMPORTANT: The page text may include unrelated listings from "Similar jobs" /
+"More jobs at this company" sidebars. Extract ONLY the MAIN job posting — the
+one whose full description appears on this page (its title is near the top,
+directly above the description). The title MUST be the one that belongs to
+that description, never a title from a sidebar list.
+
 Extract the following fields:
 - title (string)
 - company (string)

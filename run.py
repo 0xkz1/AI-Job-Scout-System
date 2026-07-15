@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -137,15 +138,31 @@ def load_all_from_saved() -> list[dict]:
     return all_jobs
 
 
-def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
-    """Merge jobs with identical (company, title) — e.g. LinkedIn reposts of the
-    same role under a new job ID.
+def _same_posting(a: dict, b: dict) -> bool:
+    """Are these two same-company+title records the SAME posting?
 
-    All generated files (match report, CV, CL) are named company_title, so two
-    such entries would silently overwrite each other's outputs. Keeps the entry
-    with the longest description (best data), then highest composite score; the
-    losers' URLs are preserved in "duplicate_urls" so future scrapes still
-    recognise them as known.
+    Scraped titles can be wrong (e.g. the LLM extractor picking a title from a
+    LinkedIn "Similar jobs" sidebar), so title equality alone is not enough —
+    require the descriptions to actually match. Missing/short descriptions
+    can't disprove a duplicate, so they count as matching.
+    """
+    from difflib import SequenceMatcher
+    da = (a.get("description") or "")[:1500]
+    db = (b.get("description") or "")[:1500]
+    if len(da) < 100 or len(db) < 100:
+        return True
+    return SequenceMatcher(None, da, db).ratio() >= 0.9
+
+
+def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
+    """Merge duplicate postings of the same role (e.g. LinkedIn reposts under a
+    new job ID): identical (company, title) AND matching descriptions.
+
+    Keeps the entry with the longest description (best data), then highest
+    composite score; the losers' URLs are preserved in "duplicate_urls" so
+    future scrapes still recognise them as known. Same-titled jobs with
+    genuinely different descriptions are kept separate (see generate_outputs
+    for the filename disambiguation).
     """
     groups: dict[tuple, list[dict]] = {}
     no_key = []
@@ -160,26 +177,28 @@ def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
     result = []
     merged_away = 0
     for group in groups.values():
-        if len(group) == 1:
-            result.append(group[0])
-            continue
         group.sort(key=lambda j: (
             len(j.get("description") or ""),
             j.get("match", {}).get("composite_score", 0),
         ), reverse=True)
-        best = group[0]
-        dup_urls = list(best.get("duplicate_urls") or [])
-        for loser in group[1:]:
-            if loser.get("url") and loser["url"] != best.get("url"):
-                dup_urls.append(loser["url"])
-            dup_urls.extend(u for u in (loser.get("duplicate_urls") or []) if u not in dup_urls)
+        # Greedy clustering: each job joins the first kept entry it matches
+        kept: list[dict] = []
+        for j in group:
+            target = next((k for k in kept if _same_posting(k, j)), None)
+            if target is None:
+                kept.append(j)
+                continue
+            dup_urls = list(target.get("duplicate_urls") or [])
+            if j.get("url") and j["url"] != target.get("url"):
+                dup_urls.append(j["url"])
+            dup_urls.extend(u for u in (j.get("duplicate_urls") or []) if u not in dup_urls)
+            if dup_urls:
+                target["duplicate_urls"] = sorted(set(dup_urls))
             merged_away += 1
-        if dup_urls:
-            best["duplicate_urls"] = sorted(set(dup_urls))
-        result.append(best)
+        result.extend(kept)
 
     if merged_away:
-        print(f"  🔀 Merged {merged_away} duplicate postings (same company+title, different URL)")
+        print(f"  🔀 Merged {merged_away} duplicate postings (same company+title, matching description)")
     return result + no_key
 
 
@@ -203,11 +222,19 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
     letter_generated = 0
     letter_skipped = 0
 
+    seen_bases: set[str] = set()
     for job in passed_jobs:
         match = job.get("match", {})
         if not match:
             continue
         base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
+        # Distinct jobs can share company+title (dedupe keeps them separate when
+        # descriptions differ) — disambiguate with a stable URL-hash suffix so
+        # they don't overwrite each other's report/CV/CL.
+        if base in seen_bases:
+            suffix = hashlib.md5((job.get("url") or "").encode()).hexdigest()[:6]
+            base = f"{base}_{suffix}"
+        seen_bases.add(base)
         composite_score = match.get("composite_score", 0)
 
         # Pre-calculate base filenames (without paths or extensions for Obsidian links)
@@ -524,15 +551,18 @@ async def main():
             if args.llm_context:
                 from matcher import _ollama_context_score, _load_persona_summary
 
-                # Pre-flight check: verify Ollama is alive before starting
-                import requests as _req
-                try:
-                    _req.get("http://localhost:11434/api/tags", timeout=5)
-                except Exception:
-                    print("  ❌ ERROR: Ollama is not running on localhost:11434!")
-                    print("     Start it with: ollama serve")
-                    print("     Aborting LLM Context Match to prevent fallback 50% contamination.")
-                    sys.exit(1)
+                # Pre-flight check: only when the provider is actually Ollama
+                # (importing llm_client loads .env, which sets ANALYSIS_PROVIDER)
+                import llm_client as _llm_client  # noqa: F401 — .env side effect
+                if os.environ.get("ANALYSIS_PROVIDER", "ollama") == "ollama":
+                    import requests as _req
+                    try:
+                        _req.get("http://localhost:11434/api/tags", timeout=5)
+                    except Exception:
+                        print("  ❌ ERROR: Ollama is not running on localhost:11434!")
+                        print("     Start it with: ollama serve")
+                        print("     Aborting LLM Context Match to prevent fallback 50% contamination.")
+                        sys.exit(1)
 
                 # Sort by composite score and optionally limit to top N
                 analyzed_with_scores = sorted(analyzed, key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
