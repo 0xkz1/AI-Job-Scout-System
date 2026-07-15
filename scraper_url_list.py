@@ -81,7 +81,7 @@ Text:
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
-                extracted = json.loads(match.group())
+                extracted = json.loads(match.group(), strict=False)
                 return extracted
             except json.JSONDecodeError:
                 continue
