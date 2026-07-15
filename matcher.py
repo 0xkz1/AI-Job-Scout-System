@@ -253,6 +253,34 @@ SKILL_SYNONYMS = {
     "stakeholder communication": "cross-functional collaboration",
     "technical writing": "technical documentation",
     "documentation": "technical documentation",
+    # Adobe tools — covered by equivalent experience (Affinity, GIMP, Krita, Procreate)
+    "illustrator": "graphic design",
+    "adobe illustrator": "graphic design",
+    "indesign": "graphic design",
+    "adobe indesign": "graphic design",
+    "adobe creative suite": "graphic design",
+    "adobe creative cloud": "graphic design",
+    "creative suite": "graphic design",
+    "affinity designer": "graphic design",
+    "photoshop": "digital illustration",
+    "adobe photoshop": "digital illustration",
+    "gimp": "digital illustration",
+    "krita": "digital illustration",
+    "procreate": "digital illustration",
+    # Engineering practice variants
+    "refactoring": "code refactoring",
+    "coding standards": "code standards",
+    "code quality": "code standards",
+    "code review": "code standards",
+    "database management": "data management",
+    "data pipelines": "data management",
+    "data pipeline": "data management",
+    "data driven": "data-driven systems",
+    "data-driven": "data-driven systems",
+    # Game development variants (aspirational — partial credit via skills.md)
+    "game dev": "game development",
+    "gameplay programming": "gameplay systems",
+    "gameplay": "gameplay systems",
 }
 
 
