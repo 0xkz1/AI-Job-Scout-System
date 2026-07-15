@@ -49,6 +49,22 @@ if re.search(r'\b' + re.escape(keyword) + r'\b', text, re.IGNORECASE):
 Never use `keyword in text` — short keywords (`c`, `go`, `hr`, `lab`) will match inside
 unrelated longer words (`collaborative`, `laboratory`, `labor`), causing false positives.
 
+This applies to ALL keyword classification, not just skills. On 2026-07-16 substring
+matching in `analyzer.py` was found to have misclassified 124/305 jobs' experience level
+("lead" matched "**Lead**ing video game company" → senior) and 192/305 employment types
+("intern" matched "inter**n**ationally" → internship), silently filtering good jobs out.
+Use `_kw_search()` in `analyzer.py`.
+
+### 2b. Experience level classification is TITLE-ONLY (user instruction)
+
+`classify_experience_level()` in `analyzer.py` must classify from the job **title only** —
+never scan the description. Description text is full of trap phrases ("work with senior
+stakeholders", "5 years of company history") that misclassify. Titles without a level word
+return `"unknown"`, which (a) triggers the LLM fallback in `analyze_job()` — the LLM reads
+the description WITH context, and (b) passes the level filter (benefit of the doubt).
+This was instructed by Kazuki before 2026-07-16 but a previous agent never landed it; do
+not "improve" it back to description scanning.
+
 ### 3. Skill synonym mapping is in `matcher.py`
 
 `SKILL_SYNONYMS` dict maps aliases → canonical skill name.

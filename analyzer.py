@@ -141,10 +141,13 @@ def _kw_search(kw: str, text: str) -> bool:
 def classify_experience_level(title: str, description: str) -> str:
     """
     Classify job as one of: internship, entry_level, mid, senior, director, unknown.
-    Checks title first (stronger signal), then falls back to description.
-    Returns the level string.
+
+    TITLE ONLY by design: description text is full of trap phrases ("work with
+    senior stakeholders", "leading company") that misclassify. Jobs without a
+    level word in the title return "unknown", which analyze_job hands to the
+    LLM classifier (it reads the description with context) and the filter
+    passes through.
     """
-    text = f"{title} {description}".lower()
     title_lower = title.lower()
 
     # Priority order matters: internship first (keep intern out of entry-level),
@@ -157,12 +160,10 @@ def classify_experience_level(title: str, description: str) -> str:
         ("entry_level", ENTRY_KEYWORDS),
     ]
 
-    # Check title first (stronger signal), then full text
-    for scope in (title_lower, text):
-        for level, keywords in ordered:
-            for kw in keywords:
-                if _kw_search(kw, scope):
-                    return level
+    for level, keywords in ordered:
+        for kw in keywords:
+            if _kw_search(kw, title_lower):
+                return level
 
     return "unknown"
 
