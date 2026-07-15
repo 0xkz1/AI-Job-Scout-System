@@ -511,7 +511,7 @@ def _extract_json_array(text: str) -> list | None:
     matches = list(re.finditer(r'\[.*?\]', text, re.DOTALL))
     for match in reversed(matches):
         try:
-            return json.loads(match.group())
+            return json.loads(match.group(), strict=False)
         except json.JSONDecodeError:
             continue
     return None
@@ -524,7 +524,7 @@ def _extract_json_object(text: str) -> dict | None:
     matches = list(re.finditer(r'\{.*?\}', text, re.DOTALL))
     for match in reversed(matches):
         try:
-            return json.loads(match.group())
+            return json.loads(match.group(), strict=False)
         except json.JSONDecodeError:
             continue
     return None

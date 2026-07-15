@@ -820,7 +820,7 @@ The reasoning should explain WHY this score, citing specific aspects of the job 
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
-                data = json.loads(match.group())
+                data = json.loads(match.group(), strict=False)
                 score = float(data.get("score", 50))
                 reasoning_en = data.get("reasoning_en", data.get("reasoning", ""))
                 reasoning_ja = data.get("reasoning_ja", "")
@@ -872,7 +872,7 @@ Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
-                data = json.loads(match.group())
+                data = json.loads(match.group(), strict=False)
 
                 def _flatten(v):
                     # LLMs sometimes nest the summary into {"role": ..., ...}
