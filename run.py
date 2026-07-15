@@ -137,6 +137,52 @@ def load_all_from_saved() -> list[dict]:
     return all_jobs
 
 
+def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
+    """Merge jobs with identical (company, title) — e.g. LinkedIn reposts of the
+    same role under a new job ID.
+
+    All generated files (match report, CV, CL) are named company_title, so two
+    such entries would silently overwrite each other's outputs. Keeps the entry
+    with the longest description (best data), then highest composite score; the
+    losers' URLs are preserved in "duplicate_urls" so future scrapes still
+    recognise them as known.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    no_key = []
+    for j in jobs:
+        company = (j.get("company") or "").strip().lower()
+        title = (j.get("title") or "").strip().lower()
+        if company and title:
+            groups.setdefault((company, title), []).append(j)
+        else:
+            no_key.append(j)
+
+    result = []
+    merged_away = 0
+    for group in groups.values():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        group.sort(key=lambda j: (
+            len(j.get("description") or ""),
+            j.get("match", {}).get("composite_score", 0),
+        ), reverse=True)
+        best = group[0]
+        dup_urls = list(best.get("duplicate_urls") or [])
+        for loser in group[1:]:
+            if loser.get("url") and loser["url"] != best.get("url"):
+                dup_urls.append(loser["url"])
+            dup_urls.extend(u for u in (loser.get("duplicate_urls") or []) if u not in dup_urls)
+            merged_away += 1
+        if dup_urls:
+            best["duplicate_urls"] = sorted(set(dup_urls))
+        result.append(best)
+
+    if merged_away:
+        print(f"  🔀 Merged {merged_away} duplicate postings (same company+title, different URL)")
+    return result + no_key
+
+
 def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
     """Generate match reports, tailored CVs and cover letters for filter-passed jobs.
 
@@ -455,6 +501,7 @@ async def main():
             with open(raw_path) as f:
                 analyzed = json.load(f)
             print(f"  📂 Loaded {len(analyzed)} pre-analyzed jobs from {raw_path}")
+            analyzed = dedupe_by_company_title(analyzed)
             
             if args.force_reanalyze:
                 print("  🔄 Re-running full keyword/Ollama analysis (skills and experience classification) on all jobs...")
@@ -749,7 +796,11 @@ async def main():
             with open(raw_path, "r", encoding="utf-8") as f:
                 existing_analyzed = json.load(f)
             existing_urls = {j["url"] for j in existing_analyzed if j.get("url")}
-            print(f"\n  📂 Existing DB: {len(existing_analyzed)} jobs ({len(existing_urls)} unique URLs)")
+            # duplicate_urls: alternate postings of jobs already merged away —
+            # still "known", must not be re-ingested as new
+            for j in existing_analyzed:
+                existing_urls.update(j.get("duplicate_urls") or [])
+            print(f"\n  📂 Existing DB: {len(existing_analyzed)} jobs ({len(existing_urls)} known URLs)")
         except Exception:
             existing_analyzed = []
 
@@ -789,6 +840,9 @@ async def main():
     for j in new_analyzed:
         if not j.get("url"):
             merged_analyzed.append(j)
+
+    # Merge duplicate postings (same company+title under different URLs)
+    merged_analyzed = dedupe_by_company_title(merged_analyzed)
 
     with open(raw_path, "w", encoding="utf-8") as f:
         json.dump(merged_analyzed, f, indent=2, ensure_ascii=False, default=str)

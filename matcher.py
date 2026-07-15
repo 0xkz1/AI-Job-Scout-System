@@ -1214,12 +1214,16 @@ url: "{url}"{cv_link}{cl_link}
             f"",
         ]
 
+    dup_urls = job.get("duplicate_urls") or []
+    dup_lines = [f"**Also posted at:** {u}" for u in dup_urls]
+
     lines = [
         frontmatter,
         f"",
         f"# Match Report: {title}",
         f"**Company:** {company}  |  **Location:** {location}",
         f"**URL:** {url}",
+        *dup_lines,
         f"",
         *desc_warning,
         f"## 🎯 Overall Match: {match['tier']} ({score_pct}%)",
