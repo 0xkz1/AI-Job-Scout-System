@@ -7,7 +7,9 @@ This document describes the system architecture, data flow, staging layer, and d
 ## 1. High-Level Architecture
 
 The system is a multi-stage pipeline: **Scrape → Stage (00_saved/) → Analyze → Filter → Match → Generate CV/CL**.
-It runs as a local-first service with a **Streamlit UI** on port `8501`, backed by local **Ollama models** (`gemma4:26b`) for cognitive operations.
+It runs as a local service with a **Streamlit UI** on port `8501`. All cognitive operations go through `llm_client.py`'s provider chain — **Mistral (cloud) → StepFun `step-3.5-flash` (cloud) → local Ollama (`gemma-4-26b`)** — falling through on rate limits, 5xx, timeouts, or missing API keys.
+
+![System architecture](docs/architecture.svg)
 
 ```mermaid
 flowchart TD
@@ -33,13 +35,13 @@ flowchart TD
     subgraph Analysis["Analysis & Alignment"]
         AN1["analyzer.py<br/>(Salary/Level Classification)"]
         AN2["matcher.py<br/>(Scoring & Philosophy Weighting)"]
-        OL1["Local Ollama<br/>(gemma4:26b)"]
+        OL1["llm_client.py<br/>(Mistral → StepFun → Ollama)"]
     end
 
     subgraph DynamicGen["Dynamic Resume & Cover Letter Generator"]
         CVG["cv_generator.py (Dynamic CV)"]
         CLG["cover_letter_generator.py (Tailored CL)"]
-        OL2["Ollama (gemma4:26b)<br/>(Dynamic Experience Sorter)"]
+        OL2["llm_client.py<br/>(Dynamic Experience Sorter)"]
     end
 
     subgraph Output["10_output/ — Analysis Results"]
@@ -155,14 +157,14 @@ Every match report carries these fields (Dataview-queryable in Obsidian):
 
 ## 3. Dynamic Experience Generator (Ollama Pipeline)
 
-This section highlights how CVs are dynamically tailored for each specific job posting using the local `gemma4:26b` model.
+This section highlights how CVs are dynamically tailored for each specific job posting via the `llm_client.py` provider chain (Mistral → StepFun → local `gemma-4-26b`).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Pipeline as Generation Pipeline (run.py)
     participant CVG as cv_generator.py (generate_cv)
-    participant OLL as Ollama (gemma4:26b)
+    participant OLL as llm_client (Mistral→StepFun→Ollama)
 
     Pipeline->>CVG: Call generate_cv(role_type, job_title, job_description)
     alt Job description available (len > 50 chars)

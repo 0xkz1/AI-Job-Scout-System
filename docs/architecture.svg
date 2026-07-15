@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="1010" viewBox="0 0 1180 1010" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.5 L7.5,4 L0,7.5 Z" fill="#8a8a8a"/>
+    </marker>
+    <marker id="arrAccent" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.5 L7.5,4 L0,7.5 Z" fill="#944040"/>
+    </marker>
+  </defs>
+
+  <rect width="1180" height="1010" fill="#fbfaf9"/>
+
+  <!-- ═══════════ Title ═══════════ -->
+  <rect x="40" y="34" width="5" height="34" fill="#944040"/>
+  <text x="58" y="52" font-size="22" font-weight="800" fill="#1a1a1a" letter-spacing="1">JOB INTELLIGENCE SYSTEM</text>
+  <text x="58" y="70" font-size="11.5" fill="#777">scrape → analyze → match → generate — LLM-assisted job pipeline, consumed through Obsidian &amp; Streamlit</text>
+
+  <!-- ═══════════ SOURCES ═══════════ -->
+  <rect x="40" y="96" width="660" height="104" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2"/>
+  <text x="58" y="119" font-size="11" font-weight="700" fill="#555" letter-spacing="2">SOURCES</text>
+  <!-- scraper chips -->
+  <g font-size="11.5" font-weight="600" fill="#1a1a1a" text-anchor="middle">
+    <rect x="58"  y="130" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1"/><text x="101" y="147">Indeed</text>
+    <rect x="152" y="130" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1"/><text x="195" y="147">LinkedIn</text>
+    <rect x="246" y="130" width="76" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1"/><text x="284" y="147">Reed</text>
+    <rect x="330" y="130" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1"/><text x="373" y="147">Guardian</text>
+    <rect x="424" y="130" width="80" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1"/><text x="464" y="147">Adzuna</text>
+  </g>
+  <text x="58" y="176" font-size="10" fill="#999">Playwright stealth scrapers</text>
+  <!-- manual sources -->
+  <line x1="522" y1="130" x2="522" y2="185" stroke="#e4e0dc"/>
+  <g font-size="11" fill="#1a1a1a">
+    <text x="538" y="141" font-weight="600">url-list.md</text><text x="618" y="141" font-size="9.5" fill="#999">paste URLs → LLM extract</text>
+    <text x="538" y="159" font-weight="600">watched-list/</text><text x="628" y="159" font-size="9.5" fill="#999">paste descriptions</text>
+    <text x="538" y="177" font-weight="600">saved bookmarks</text><text x="648" y="177" font-size="9.5" fill="#999">LinkedIn saved</text>
+  </g>
+
+  <!-- ═══════════ PROFILE (right rail) ═══════════ -->
+  <rect x="740" y="96" width="400" height="180" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2"/>
+  <text x="758" y="119" font-size="11" font-weight="700" fill="#555" letter-spacing="2">PROFILE — SINGLE SOURCE OF TRUTH</text>
+  <g font-size="11.5" fill="#1a1a1a">
+    <text x="758" y="142" font-weight="600">skills.md</text><text x="836" y="142" font-size="10" fill="#999">39 skills · levels · aspirational section</text>
+    <text x="758" y="162" font-weight="600">about.md / profile.md</text><text x="908" y="162" font-size="10" fill="#999">experience · Edinburgh, UK</text>
+    <text x="758" y="182" font-weight="600">ethos.md / interests.md</text><text x="918" y="182" font-size="10" fill="#999">persona for context scoring</text>
+  </g>
+  <line x1="758" y1="196" x2="1122" y2="196" stroke="#eeebe8"/>
+  <text x="758" y="216" font-size="10" fill="#999">lives OUTSIDE the repo · never overwritten by generators</text>
+  <text x="758" y="232" font-size="10" fill="#999">SKILL_SYNONYMS maps job wording → your skills</text>
+  <text x="758" y="256" font-size="10.5" fill="#944040" font-weight="600">feeds matcher (5-axis) + LLM persona ↓</text>
+
+  <!-- arrows sources -> staging -->
+  <line x1="370" y1="200" x2="370" y2="232" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- ═══════════ STAGING ═══════════ -->
+  <rect x="40" y="236" width="660" height="66" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2"/>
+  <text x="58" y="259" font-size="11" font-weight="700" fill="#555" letter-spacing="2">STAGING — 00_saved/</text>
+  <g font-size="10.5" fill="#666">
+    <text x="58" y="281">_raw_&lt;site&gt;_*.json · url_list_jobs.json · _saved_index.json</text>
+    <text x="58" y="295" fill="#944040" font-weight="600">auto-ingested on every run — extraction never requires a separate step</text>
+  </g>
+
+  <!-- arrow staging -> pipeline -->
+  <line x1="370" y1="302" x2="370" y2="334" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+  <!-- arrow profile -> pipeline -->
+  <path d="M 940 276 L 940 388 L 706 388" fill="none" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- ═══════════ PIPELINE ═══════════ -->
+  <rect x="40" y="338" width="660" height="180" rx="8" fill="#ffffff" stroke="#b9b4af" stroke-width="1.4"/>
+  <text x="58" y="361" font-size="11" font-weight="700" fill="#555" letter-spacing="2">PIPELINE — run.py</text>
+
+  <g font-size="12" font-weight="700" fill="#1a1a1a" text-anchor="middle">
+    <rect x="58"  y="376" width="130" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf"/>
+    <text x="123" y="399">analyzer.py</text>
+    <text x="123" y="415" font-size="9.5" font-weight="400" fill="#777">skills · salary · level</text>
+
+    <rect x="216" y="376" width="110" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf"/>
+    <text x="271" y="399">filter.py</text>
+    <text x="271" y="415" font-size="9.5" font-weight="400" fill="#777">levels · types · salary</text>
+
+    <rect x="354" y="376" width="130" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf"/>
+    <text x="419" y="399">matcher.py</text>
+    <text x="419" y="415" font-size="9.5" font-weight="400" fill="#777">5-axis weighted score</text>
+
+    <rect x="512" y="376" width="170" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf"/>
+    <text x="597" y="399">generators</text>
+    <text x="597" y="415" font-size="9.5" font-weight="400" fill="#777">CV · cover letter · report</text>
+  </g>
+  <line x1="188" y1="405" x2="212" y2="405" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+  <line x1="326" y1="405" x2="350" y2="405" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+  <line x1="484" y1="405" x2="508" y2="405" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- LLM badges -->
+  <g font-size="9" font-weight="800" fill="#ffffff" text-anchor="middle">
+    <rect x="96"  y="368" width="34" height="15" rx="7.5" fill="#944040"/><text x="113" y="379">LLM</text>
+    <rect x="392" y="368" width="34" height="15" rx="7.5" fill="#944040"/><text x="409" y="379">LLM</text>
+    <rect x="570" y="368" width="34" height="15" rx="7.5" fill="#944040"/><text x="587" y="379">LLM</text>
+  </g>
+
+  <g font-size="10" fill="#777">
+    <text x="58" y="462">· level classification is <tspan font-weight="700" fill="#1a1a1a">title-only</tspan> + word-boundary keywords; unknown → LLM reads the description</text>
+    <text x="58" y="479">· duplicate postings merged only when descriptions match (URLs kept as duplicate_urls)</text>
+    <text x="58" y="496">· 5 axes: skills 40 · experience 25 · context 20 · location 10 · salary 5 — weights live-tunable in UI</text>
+  </g>
+
+  <!-- accent connectors pipeline -> LLM layer -->
+  <path d="M 113 518 L 113 546" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrAccent)"/>
+  <path d="M 409 518 L 409 546" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrAccent)"/>
+  <path d="M 587 518 L 587 546" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrAccent)"/>
+
+  <!-- ═══════════ LLM LAYER (accent) ═══════════ -->
+  <rect x="40" y="550" width="1100" height="128" rx="8" fill="#faf3f3" stroke="#944040" stroke-width="1.8"/>
+  <rect x="40" y="550" width="5" height="128" fill="#944040"/>
+  <text x="64" y="575" font-size="12" font-weight="800" fill="#944040" letter-spacing="2">LLM LAYER — llm_client.py · every LLM call goes through one provider chain</text>
+
+  <g text-anchor="middle">
+    <rect x="64" y="590" width="240" height="64" rx="6" fill="#ffffff" stroke="#944040" stroke-width="1.4"/>
+    <text x="184" y="612" font-size="12.5" font-weight="800" fill="#1a1a1a">① Mistral</text>
+    <text x="184" y="628" font-size="10" fill="#777">cloud · mistral-tiny</text>
+    <text x="184" y="643" font-size="10" fill="#777">fast batch, ~¥900 / 140 CVs</text>
+
+    <rect x="380" y="590" width="240" height="64" rx="6" fill="#ffffff" stroke="#944040" stroke-width="1.4"/>
+    <text x="500" y="612" font-size="12.5" font-weight="800" fill="#1a1a1a">② StepFun</text>
+    <text x="500" y="628" font-size="10" fill="#777">cloud · step-3.5-flash</text>
+    <text x="500" y="643" font-size="10" fill="#777">$0.10 / $0.30 per Mtok · 256K ctx</text>
+
+    <rect x="696" y="590" width="240" height="64" rx="6" fill="#ffffff" stroke="#944040" stroke-width="1.4"/>
+    <text x="816" y="612" font-size="12.5" font-weight="800" fill="#1a1a1a">③ Ollama</text>
+    <text x="816" y="628" font-size="10" fill="#777">local · gemma-4-26b · RTX 5080</text>
+    <text x="816" y="643" font-size="10" fill="#777">private, free, always available</text>
+  </g>
+  <line x1="304" y1="622" x2="376" y2="622" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)"/>
+  <line x1="620" y1="622" x2="692" y2="622" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)"/>
+  <text x="340" y="612" font-size="9" fill="#944040" text-anchor="middle" font-weight="700">429 / 5xx</text>
+  <text x="656" y="612" font-size="9" fill="#944040" text-anchor="middle" font-weight="700">timeout</text>
+  <g font-size="10" fill="#775">
+    <text x="960" y="605" fill="#777">tasks: skill extraction ·</text>
+    <text x="960" y="620" fill="#777">context/ethos scoring ·</text>
+    <text x="960" y="635" fill="#777">EN+JA summaries ·</text>
+    <text x="960" y="650" fill="#777">CV &amp; cover letter drafting</text>
+  </g>
+
+  <!-- arrow LLM/pipeline -> data -->
+  <line x1="370" y1="678" x2="370" y2="710" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- ═══════════ DATA & OUTPUT ═══════════ -->
+  <rect x="40" y="714" width="500" height="120" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2"/>
+  <text x="58" y="737" font-size="11" font-weight="700" fill="#555" letter-spacing="2">DATABASE — _analyzed.json</text>
+  <g font-size="10.5" fill="#666">
+    <text x="58" y="760">incremental job DB · URL-dedup against every known posting</text>
+    <text x="58" y="777">context_source: llm | tfidf · summaries preserved across re-runs</text>
+    <text x="58" y="794" font-weight="700" fill="#1a1a1a">never shrinks — filtered jobs stay in the DB</text>
+    <text x="58" y="818" fill="#999">_analyzed_full.json snapshot · timestamped backups</text>
+  </g>
+
+  <rect x="580" y="714" width="560" height="120" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2"/>
+  <text x="598" y="737" font-size="11" font-weight="700" fill="#555" letter-spacing="2">OUTPUT — 10_output/</text>
+  <g font-size="11" fill="#1a1a1a">
+    <text x="598" y="760" font-weight="600">00_matches/</text><text x="700" y="760" font-size="10" fill="#999">match reports · categories + scores in YAML frontmatter</text>
+    <text x="598" y="778" font-weight="600">10_cvs/</text><text x="700" y="778" font-size="10" fill="#999">tailored CVs (score ≥ 50%) — manual edits never overwritten</text>
+    <text x="598" y="796" font-weight="600">10_cover-letters/</text><text x="700" y="796" font-size="10" fill="#999">tailored cover letters, wikilinked to CV + report</text>
+    <text x="598" y="814" font-weight="600">20_pdfs/</text><text x="700" y="814" font-size="10" fill="#999">A4 PDFs exported on demand from the Kanban board</text>
+  </g>
+  <line x1="540" y1="774" x2="576" y2="774" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- arrows output -> surfaces -->
+  <line x1="290" y1="834" x2="290" y2="868" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)"/>
+  <line x1="860" y1="834" x2="860" y2="868" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)"/>
+
+  <!-- ═══════════ SURFACES ═══════════ -->
+  <rect x="40" y="872" width="500" height="108" rx="8" fill="#1e1c1b" stroke="#1e1c1b"/>
+  <rect x="40" y="872" width="500" height="30" rx="8" fill="#944040"/>
+  <rect x="40" y="888" width="500" height="14" fill="#944040"/>
+  <text x="58" y="892" font-size="12" font-weight="800" fill="#ffffff" letter-spacing="2">OBSIDIAN</text>
+  <g font-size="10.5" fill="#d8d4d0">
+    <text x="58" y="922">Dataview queries over YAML frontmatter — filter Match Score List</text>
+    <text x="58" y="939">by categories (design · engineering · art · marketing · branding)</text>
+    <text x="58" y="956">report ⇄ CV ⇄ cover letter wikilink graph · EN+JA job summaries</text>
+    <text x="58" y="971" fill="#a89b9b">the reading &amp; deciding surface</text>
+  </g>
+
+  <rect x="580" y="872" width="560" height="108" rx="8" fill="#1e1c1b" stroke="#1e1c1b"/>
+  <rect x="580" y="872" width="560" height="30" rx="8" fill="#944040"/>
+  <rect x="580" y="888" width="560" height="14" fill="#944040"/>
+  <text x="598" y="892" font-size="12" font-weight="800" fill="#ffffff" letter-spacing="2">STREAMLIT — :8501</text>
+  <g font-size="10.5" fill="#d8d4d0">
+    <text x="598" y="922">🔍 Scraper — config &amp; runs   ·   🎯 Weights — live re-scoring</text>
+    <text x="598" y="939">👁 Saved — url-list &amp; watched intake   ·   📋 Kanban — application pipeline</text>
+    <text x="598" y="956">📄 one-click CV/CL → A4 PDF export per job card</text>
+    <text x="598" y="971" fill="#a89b9b">the operating surface</text>
+  </g>
+</svg>

@@ -1,13 +1,13 @@
 # Job Intelligence System
 
-**An end-to-end, local-first job search pipeline** — scrape hundreds of listings, score them against your profile with a local LLM, and auto-generate tailored CVs and cover letters for every match. All running on your own hardware, zero API costs.
+**An end-to-end job search pipeline** — scrape hundreds of listings, score them against your profile with an LLM, and auto-generate tailored CVs and cover letters for every match. Cheap cloud models do the heavy batches; a local Ollama model is always there as the final fallback.
 
 ```python
 # One command runs the full pipeline
 python run.py --site all
 
 # → Scrape  → Save to 00_saved/ staging → Analyze → Match → Generate CV/CL
-#    500+ jobs   stored as raw JSON          LLM      4-axis   tailored per job
+#    500+ jobs   stored as raw JSON          LLM      5-axis   tailored per job
 
 # Re-analyze from staging only (skip scraping, use cached raw data)
 python run.py --from-saved
@@ -22,92 +22,23 @@ python run.py --saved
 
 Job hunting is a numbers game, but manual tailoring doesn't scale. This pipeline:
 
-1. **Scrapes** Indeed UK and LinkedIn at scale (500+ listings per run)
-2. **Analyzes** each job with a local LLM (Ollama Gemma-4-26b) — salary parsing, skill extraction, seniority classification
-3. **Matches** each job against your profile using weighted scoring (skills/embedding similarity, experience, location, salary)
+1. **Scrapes** five sites — Indeed UK, LinkedIn, Reed, Guardian Jobs, Adzuna — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
+2. **Analyzes** each job with an LLM — salary parsing, skill extraction, title-only seniority classification
+3. **Matches** each job against your profile using 5-axis weighted scoring (skills, experience, location, salary, context/ethos)
 4. **Generates** a tailored CV and cover letter for every job scoring ≥ 50%
-5. **Outputs** Obsidian-ready Markdown with YAML frontmatter — queryable via Dataview
+5. **Outputs** Obsidian-ready Markdown with YAML frontmatter (incl. `categories`) — queryable via Dataview, operated via a Streamlit UI
 
-**No API keys. No cloud costs. No rate limits.** Everything runs locally on an RTX 5080.
-
-> **Update (2026-07-15):** The system now supports a **2-tier LLM strategy** — Mistral (cloud, cheap) as primary, Ollama (local) as fallback. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
+All LLM calls go through one provider chain — **Mistral (cloud, primary) → StepFun step-3.5-flash (cloud, fallback) → Ollama Gemma-4 (local, last resort on an RTX 5080)** — so batches are fast and cheap, and the pipeline keeps working offline. Job text and your persona are sent to the cloud providers; switch `ANALYSIS_PROVIDER=ollama` for a fully local run. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     config.yaml                             │
-│        (keywords, locations, filters, weights)              │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-              ┌────────────────┐
-              │     run.py     │          ← Orchestration layer
-              │   (347 lines)  │
-              └──┬──────────┬──┘
-         ┌────────┘        └────────┐
-         ▼                          ▼
-  ┌──────────────┐          ┌──────────────┐
-  │ scraper_     │          │ scraper_     │
-  │ indeed.py    │          │ linkedin.py  │   ← Playwright stealth scraping
-  │ (305 lines)  │          │ (382 lines)  │
-  └──────┬───────┘          └──────┬───────┘
-         │                         │
-         └──────────┬──────────────┘
-                    ▼
-         ┌────────────────────────────────┐
-         │  save_raw_to_saved()           │  ← Raw JSON → 00_saved/ staging
-         │  load_all_from_saved()          │
-         └──────────────┬─────────────────┘
-                        │
-                        ▼
-         ┌──────────────────────────────┐
-         │  scraper_saved.py            │  ← Manual saved jobs (LinkedIn bookmarks)
-         │  → 00_saved/_saved_index.json│    merged after auto scrape
-         └──────────────┬───────────────┘
-                        │
-                        ▼
-         ┌──────────────────┐
-         │   analyzer.py    │          ← Ollama LLM extracts:
-         │   (644 lines)    │            skills, salary, seniority, work style
-         └────────┬─────────┘
-                  │
-                  ▼
-         ┌──────────────────┐
-         │    filter.py     │          ← Config-based filtering
-         │   (95 lines)     │
-         └────────┬─────────┘
-                  │
-                  ▼
-         ┌──────────────────┐
-         │   matcher.py     │          ← Weighted scoring engine
-         │   (~800 lines)   │            (embeddings, TF-IDF, 4-axis match)
-         └────────┬─────────┘
-                  │
-         ┌────────┴────────┐
-         ▼                 ▼
-  ┌──────────────┐  ┌──────────────────┐
-  │ cv_generator │  │ cover_letter_    │  ← Ollama generates tailored
-  │    .py       │  │ generator.py     │    Markdown CVs / cover letters
-  │ (133 lines)  │  │ (141 lines)      │
-  └──────────────┘  └──────────────────┘
-         │                 │
-         └────────┬────────┘
-                  ▼
-         ┌──────────────────────────────┐
-         │    10_output/ (Dataview)     │  ← Obsidian-ready Markdown
-         │  ├ 00_matches/ match reports │    YAML frontmatter + cross-links
-         │  ├ 10_cvs/ 10_cover-letters/ │    source/saved_at/type per job
-         │  └ 20_pdfs/                  │
-         └──────────────────────────────┘
+![System architecture](docs/architecture.svg)
 
-                    ┌──────────────────┐
-                    │     app.py       │          ← Streamlit UI
-                    │   (483 lines)    │            2 tabs: Scraper + Weights
-                    └──────────────────┘
-```
+**Flow in one line:** five Playwright scrapers + manual intake → `00_saved/` staging (auto-ingested every run) → `run.py` pipeline (`analyzer` → `filter` → `matcher` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit**.
+
+Every LLM task (skill extraction, context/ethos scoring, EN+JA summaries, CV & cover-letter drafting) goes through `llm_client.py`, which walks the provider chain **Mistral → StepFun → local Ollama** on rate limits, 5xx errors, timeouts, or missing API keys.
 
 ---
 
@@ -117,7 +48,7 @@ Each job is scored on five weighted axes:
 
 | Axis         | Default Weight | Method                                           |
 | ------------ | --------------- | ------------------------------------------------ |
-| **Skills**   | 40%             | Skill name embedding similarity (all-MiniLM) + TF-IDF overlap |
+| **Skills**   | 40%             | Word-boundary keyword + synonym mapping + TF-IDF name similarity |
 | **Experience** | 25%           | Seniority level matching (entry/mid/senior/director) |
 | **Location** | 10%             | City match + remote-friendliness bonus            |
 | **Salary**   | 5%              | Salary range vs. minimum expectation              |
@@ -174,12 +105,14 @@ url: "https://indeed.com/..."
 
 ## Streamlit UI
 
-Two tabs in a single app (`app.py`, 483 lines):
+Four tabs in a single app (`app.py`):
 
 | Tab | Function |
 | --- | -------- |
 | **🔍 Scraper** | Edit keywords/locations/salary/sites, run scraper, view results table |
 | **🎯 Weights** | Drag sliders to adjust scoring weights, regenerate all match reports live |
+| **👁 Saved** | url-list.md & watched-list intake — paste URLs or descriptions, extract & analyze |
+| **📋 Kanban** | Application pipeline board (Saved → Applied → … → Offer), per-card **CV/CL → A4 PDF export** |
 
 ```bash
 # Launch
@@ -194,12 +127,13 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headle
 | Layer | Technology | Why |
 | ----- | ---------- | --- |
 | Scraping | Playwright + stealth | Anti-bot evasion, headless browsing |
-| LLM Analysis | Ollama (Gemma-4-26b) | Local, free, private — runs on RTX 5080 |
-| Skill Matching | Sentence Transformers (all-MiniLM-L6-v2) | Embedding similarity beats keyword matching |
-| Scoring | Custom weighted engine | 4-axis, adjustable via UI |
-| CV/CL Generation | Ollama (Gemma-4-26b) | Tailored per job, no templates |
+| LLM calls | `llm_client.py` chain: Mistral → StepFun → Ollama (Gemma-4-26b local) | Cheap fast batches, offline-safe fallback |
+| Skill Matching | Word-boundary keywords + `SKILL_SYNONYMS` + TF-IDF (scikit-learn) | Deterministic, tunable, no model download |
+| Scoring | Custom weighted engine | 5-axis, adjustable via UI |
+| CV/CL Generation | Same LLM chain | Tailored per job, no templates |
+| PDF Export | weasyprint + markdown | One-click A4 from the Kanban board |
 | UI | Streamlit | Lightweight, 1-file, no build step |
-| Output | Obsidian Markdown + Dataview | Queryable knowledge base |
+| Output | Obsidian Markdown + Dataview | Queryable knowledge base (`categories`, scores in frontmatter) |
 | Scheduling | Cron | Nightly scrape + reanalyze |
 
 ---
@@ -211,8 +145,12 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headle
 pip install -r requirements.txt
 playwright install chromium
 
-# 2. Install Ollama + model
-ollama pull gemma3:26b
+# 2. Configure LLM providers in .env (any subset works; the chain skips missing keys)
+#    MISTRAL_API_KEY=...          primary (cloud)
+#    STEPFUN_API_KEY=...          fallback (cloud)
+#    FALLBACK_PROVIDERS=stepfun,ollama
+#    Local last resort: install Ollama and pull the model set in OLLAMA_MODEL
+#    (default: gemma-4-26b-a4b-it-gguf)
 
 # 3. Configure search
 #    Edit config.yaml — keywords, locations, salary, sites
@@ -250,21 +188,20 @@ sites:
 
 ## File Overview
 
-| File | Lines | Role |
-| ---- | ----- | ---- |
-| `matcher.py` | 794 | Scoring engine — skill embeddings, 4-axis match, report generation |
-| `analyzer.py` | 644 | Ollama-powered job analysis — skills, salary, seniority, work style |
-| `app.py` | 483 | Streamlit UI — scraper tab + weights tab |
-| `run.py` | 347 | Orchestration — scrape → analyze → filter → match → CV → CL |
-| `scraper_saved.py` | 576 | Scrape favorited/saved jobs from Indeed + LinkedIn |
-| `scraper_linkedin.py` | 382 | LinkedIn scraper with cookie persistence |
-| `scraper_indeed.py` | 305 | Indeed UK scraper with Playwright stealth |
-| `weight_adjuster.py` | 243 | Standalone weight tuning utility (integrated into app.py) |
-| `cover_letter_generator.py` | 141 | Ollama-powered cover letter generation |
-| `cv_generator.py` | 133 | Ollama-powered CV generation |
-| `filter.py` | 95 | Config-based job filtering |
-| `check_integrity.py` | 176 | Validate output consistency |
-| **Total** | **~4,420** | |
+| File | Role |
+| ---- | ---- |
+| `run.py` | Orchestration — scrape → stage → analyze → filter → match → CV/CL, dedupe, DB writes |
+| `matcher.py` | Scoring engine — 5-axis match, skill synonyms, context scoring, report generation |
+| `analyzer.py` | Job analysis — skills, salary, title-only seniority, employment type (word-boundary) |
+| `llm_client.py` | Unified LLM client — Mistral → StepFun → Ollama provider chain |
+| `app.py` | Streamlit UI — Scraper / Weights / Saved / Kanban tabs, PDF export |
+| `scraper_indeed.py` / `scraper_linkedin.py` / `scraper_reed.py` / `scraper_guardian.py` / `scraper_adzuna.py` | Site scrapers (Playwright stealth) |
+| `scraper_url_list.py` | url-list.md intake — Playwright fetch + LLM extraction |
+| `scraper_saved.py` | Scrape favorited/saved jobs from Indeed + LinkedIn |
+| `watched_matcher.py` | Match manually watched job descriptions |
+| `bulk_analyze_cloud.py` | One-shot cloud batch analysis of unanalyzed jobs |
+| `cv_generator.py` / `cover_letter_generator.py` | LLM-generated tailored CV / cover letters |
+| `filter.py` | Config-based job filtering |
 
 ---
 
@@ -425,7 +362,7 @@ cd /path/to/Job-Intelligence-System && python3 run.py --from-saved
 ## Philosophy
 
 - **Local-first** — no API keys, no cloud costs, no rate limits
-- **Privacy** — your CV, profile, and job data never leave your machine
+- **Privacy-aware** — run fully local with `ANALYSIS_PROVIDER=ollama`; the default cloud chain sends job text + persona to Mistral/StepFun (no free-tier providers that train on prompts)
 - **Composable** — each stage is a standalone module; swap any part
 - **Observable** — every output is human-readable Markdown with structured metadata
 
@@ -501,7 +438,7 @@ Kazuki identified that **Prototyping** and **Agile** are genuinely separate comp
 
 ### Background
 
-The pipeline originally used **Ollama (Gemma-4-26b)** exclusively for all LLM tasks: skill extraction, context/ethos scoring, CV generation, and job summaries. This worked but was **slow** — each Ollama call took 30-120 seconds, making full pipeline runs take hours.
+The pipeline originally used **Ollama (Gemma-4-26b)** exclusively for all LLM tasks: skill extraction, context/ethos scoring, CV generation, and job summaries. This worked but was **slow** — each Ollama call took 30-120 seconds, making full pipeline runs take hours. Batch operations (e.g. generating CVs for 140 jobs) could take 3-4 hours.
 
 ### Core Idea: Lightweight Cloud LLM First, Local Heavy LLM as Fallback
 
