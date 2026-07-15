@@ -709,7 +709,15 @@ async def main():
             except Exception as e:
                 print(f"  ❌ Reed scraper failed: {e}")
 
-    # Merge saved jobs (from --saved) into the analysis pipeline
+    if not _from_saved_mode:
+        # Always ingest staged jobs (url-list.md extracts, raw staging, manual
+        # saves) so extraction doesn't require a separate --from-saved run.
+        # URL-level dedup below (and against the existing DB) drops repeats.
+        staged = load_all_from_saved()
+        if staged:
+            _saved_jobs_to_merge.extend(staged)
+
+    # Merge saved jobs (from --saved / 00_saved staging) into the analysis pipeline
     if _saved_jobs_to_merge:
         print(f"\n{'='*60}")
         print(f"📂 MERGING {len(_saved_jobs_to_merge)} SAVED JOBS INTO ANALYSIS")

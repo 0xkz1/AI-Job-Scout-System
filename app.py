@@ -36,6 +36,7 @@ from matcher import (
     analyze_match,
     save_match_report,
     calculate_title_relevance,
+    make_safe_name,
     DEFAULT_WEIGHTS,
 )
 from filter import passes_filter
@@ -136,7 +137,7 @@ def run_scraper(site="indeed", pages=5):
 
 st.markdown('<h1 class="jis-title">Job Intelligence System</h1>', unsafe_allow_html=True)
 
-tab_scraper, tab_weights, tab_kanban, tab_watched = st.tabs(["🔍 Scraper", "🎯 Weights", "📋 Kanban", "👁 Watched & Saved"])
+tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
 
 # ═══════════════════════════════════════════════════════════
 # Tab 1: Scraper
@@ -633,6 +634,93 @@ def save_kanban_data(data):
     with open(KANBAN_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+
+# --- PDF export (CV / Cover Letter) ---
+PDF_DIR = OUTPUT_DIR / "20_pdfs"
+CV_DIR = OUTPUT_DIR / "10_cvs"
+CL_DIR = OUTPUT_DIR / "10_cover-letters"
+
+
+def _md_to_pdf_bytes(md_path: Path) -> bytes:
+    """Render a generated CV/CL markdown file to a clean A4 PDF."""
+    # Lazy imports: weasyprint is slow to load and only needed on demand
+    import markdown as _markdown
+    from weasyprint import HTML
+
+    text = md_path.read_text(encoding="utf-8")
+    # Strip YAML frontmatter (Obsidian metadata, not for the PDF)
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    # Obsidian wiki-links → plain text ([[target|label]] → label)
+    text = re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]", lambda m: m.group(2) or m.group(1), text)
+
+    # Generated CVs/CLs are near-plain text: ALL-CAPS section lines, "•" bullets,
+    # and meaningful single line breaks. Preprocess into real markdown.
+    lines = text.strip().split("\n")
+    out_lines = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if i == 0 and stripped and not stripped.startswith("#"):
+            out_lines.append(f"# {stripped}")  # first line = candidate name
+        elif re.fullmatch(r"[A-Z][A-Z &/'’\-]{2,40}", stripped):
+            out_lines.append(f"\n## {stripped}")  # ALL-CAPS section header
+        elif stripped.startswith("•"):
+            out_lines.append("- " + stripped.lstrip("• "))
+        else:
+            out_lines.append(line)
+    text = "\n".join(out_lines)
+
+    body = _markdown.markdown(text, extensions=["tables", "fenced_code", "nl2br"])
+    html = f"""<html><head><meta charset="utf-8"><style>
+        @page {{ size: A4; margin: 18mm 16mm; }}
+        body {{ font-family: "DejaVu Sans", sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; }}
+        h1 {{ font-size: 17pt; margin: 0 0 4pt; }}
+        h2 {{ font-size: 12.5pt; border-bottom: 1px solid #999; padding-bottom: 2pt; margin: 14pt 0 6pt; }}
+        h3 {{ font-size: 11pt; margin: 10pt 0 3pt; }}
+        p, li {{ margin: 3pt 0; }}
+        ul {{ padding-left: 14pt; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ccc; padding: 3pt 6pt; text-align: left; }}
+        a {{ color: #1a1a1a; text-decoration: none; }}
+    </style></head><body>{body}</body></html>"""
+    return HTML(string=html).write_pdf()
+
+
+def pdf_export_controls(company: str, title: str, key_prefix: str):
+    """Show a 📄 PDF popover on a kanban card when its CV/CL markdown exists.
+
+    Conversion is on-demand (button click); the PDF is saved to 10_output/20_pdfs/
+    and offered as a download.
+    """
+    base = make_safe_name(company, title)
+    candidates = [("CV", CV_DIR / f"{base}_CV.md"), ("CL", CL_DIR / f"{base}_CL.md")]
+    if not any(p.exists() for _, p in candidates):
+        return
+    with st.popover("📄 PDF"):
+        for label, md_path in candidates:
+            if not md_path.exists():
+                st.caption(f"{label}: not generated yet")
+                continue
+            state_key = f"pdf_ready_{key_prefix}_{label}"
+            if st.button(f"Convert {label} to PDF", key=f"conv_{key_prefix}_{label}"):
+                try:
+                    PDF_DIR.mkdir(exist_ok=True)
+                    pdf_path = PDF_DIR / f"{md_path.stem}.pdf"
+                    pdf_path.write_bytes(_md_to_pdf_bytes(md_path))
+                    st.session_state[state_key] = str(pdf_path)
+                except Exception as e:
+                    st.error(f"PDF conversion failed: {e}")
+            ready = st.session_state.get(state_key)
+            if ready and Path(ready).exists():
+                st.download_button(
+                    f"⬇ {Path(ready).name}",
+                    data=Path(ready).read_bytes(),
+                    file_name=Path(ready).name,
+                    mime="application/pdf",
+                    key=f"dl_{key_prefix}_{label}",
+                )
+                st.caption(f"saved: 20_pdfs/{Path(ready).name}")
+
+
 with tab_kanban:
     st.header("📋 Job Application Kanban")
     st.markdown("Track your job applications across the pipeline. Change status to move cards between columns.")
@@ -742,6 +830,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
+                pdf_export_controls(j["company"], j["title"], f"saved_{j['url']}")
 
     # Column 2: Active (Applied, Screening, Interviewing)
     with col_k2:
@@ -766,6 +855,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
+                pdf_export_controls(j["company"], j["title"], f"active_{j['url']}")
 
     # Column 3: Offer / Accepted
     with col_k3:
@@ -787,6 +877,7 @@ with tab_kanban:
                     kanban[j["url"]] = {"status": new_status, "updated": ""}
                     save_kanban_data(kanban)
                     st.rerun()
+                pdf_export_controls(j["company"], j["title"], f"offer_{j['url']}")
 
     # Column 4: Rejected / Archived
     with col_k4:
@@ -816,7 +907,7 @@ WATCHED_DIR = SCRAPER_DIR / "00_saved" / "watched-list"
 SAVED_DIR = SCRAPER_DIR / "00_saved"
 
 with tab_watched:
-    st.header("👁 Watched & Saved Jobs")
+    st.header("👁 Saved Jobs")
 
     st.markdown("""
     Two additional job-collection routes beyond the main scraper:
