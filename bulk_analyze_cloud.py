@@ -13,6 +13,7 @@ After this, switch back to ANALYSIS_PROVIDER=ollama for detailed CV/CL work.
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -30,6 +31,15 @@ MATCHES_DIR = ROOT / "10_output" / "00_matches"
 
 MAX_WORKERS = 3  # parallel API calls
 SAVE_EVERY = 50  # save progress every N jobs
+
+# Guards writes to shared job dicts in `analyzed` against the periodic
+# json.dumps() in the main thread. Workers hold it only for the fast local
+# dict mutation (never during the LLM network call), so contention is
+# negligible; without it, save_analyzed() can crash mid-serialization with
+# "dictionary changed size during iteration" if a worker adds a new key
+# (e.g. job["match"] = {}) while that same job is being dumped — killing the
+# whole run and losing every result since the last periodic save.
+_state_lock = threading.Lock()
 
 def load_analyzed() -> list[dict]:
     with open(ANALYZED_PATH, "r", encoding="utf-8") as f:
@@ -72,16 +82,17 @@ def process_job(job: dict) -> dict:
         return {"index": None, "url": url, "title": title, "status": "skipped", "reason": skip_reason}
     
     try:
-        # Step 1: LLM-enhanced skill extraction
+        # Step 1: LLM-enhanced skill extraction (network call — outside the lock)
         skills = job.get("analysis", {}).get("skills", [])
         if len(skills) < 3 and description.strip():
             llm_skills = extract_skills_ollama(title, description)
             if llm_skills:
                 skills = sorted(set(skills + llm_skills))
-                if "analysis" not in job:
-                    job["analysis"] = {}
-                job["analysis"]["skills"] = skills
-        
+                with _state_lock:
+                    if "analysis" not in job:
+                        job["analysis"] = {}
+                    job["analysis"]["skills"] = skills
+
         # Step 2: Context scoring via _ollama_context_score (now uses call_llm).
         # Skip if this job already has an LLM score — jobs can land here for
         # skill re-extraction only.
@@ -89,16 +100,17 @@ def process_job(job: dict) -> dict:
         from matcher import _ollama_context_score, _load_persona_summary
         persona = _load_persona_summary()
         if persona and description.strip() and not has_context_score(job):
-            ctx = _ollama_context_score(description, persona)
+            ctx = _ollama_context_score(description, persona)  # network call — outside the lock
             if ctx and "score" in ctx:
-                if "match" not in job:
-                    job["match"] = {}
-                job["match"]["context_score"] = ctx["score"]
-                job["match"]["context_reasoning"] = ctx.get("reasoning", "")
-                job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
-                job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
-                job["match"]["context_source"] = "llm"
-        
+                with _state_lock:
+                    if "match" not in job:
+                        job["match"] = {}
+                    job["match"]["context_score"] = ctx["score"]
+                    job["match"]["context_reasoning"] = ctx.get("reasoning", "")
+                    job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
+                    job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
+                    job["match"]["context_source"] = "llm"
+
         return {"index": None, "url": url, "title": title, "status": "done", "skills": len(skills), "context_score": ctx.get("score", 0) if ctx else None}
     
     except Exception as e:
@@ -132,7 +144,7 @@ def main():
             todo.append(job)
     
     print(f"Jobs needing LLM analysis: {len(todo)} / {len(analyzed)}", flush=True)
-    print(f"  - Already done (context scofed): {sum(1 for j in analyzed if has_context_score(j))}", flush=True)
+    print(f"  - Already done (context scored): {sum(1 for j in analyzed if has_context_score(j))}", flush=True)
     print(f"  - No description: {sum(1 for j in analyzed if not (j.get('description', '') or j.get('snippet', '')).strip())}", flush=True)
     print(flush=True)
     
@@ -180,12 +192,14 @@ def main():
             
             # Periodic save
             if done_count % SAVE_EVERY == 0:
-                save_analyzed(analyzed)
+                with _state_lock:
+                    save_analyzed(analyzed)
                 elapsed = time.time() - start_time
                 print(f"  💾 Saved at {done_count}/{len(todo)} ({elapsed:.0f}s elapsed, ~{elapsed/done_count:.1f}s/job avg)", flush=True)
-    
+
     # Final save
-    save_analyzed(analyzed)
+    with _state_lock:
+        save_analyzed(analyzed)
     elapsed = time.time() - start_time
     print(flush=True)
     print(f"✅ Complete: {done_count} jobs processed in {elapsed:.0f}s", flush=True)
