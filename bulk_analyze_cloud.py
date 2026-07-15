@@ -41,13 +41,16 @@ def save_analyzed(data: list[dict], path=None):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 def has_context_score(job: dict) -> bool:
-    """Check if this job already has a proper LLM context score."""
+    """Check if this job already has a proper LLM context score.
+
+    Canonical flag is match["context_source"] == "llm"; the two legacy schemas
+    (llm_context_tagged, match["context"] dict) are accepted for old data.
+    """
     match = job.get("match", {})
-    ctx = match.get("context", {})
-    score = ctx.get("score", 0) if isinstance(ctx, dict) else 0
-    # TF-IDF scores are typically < 0.3; LLM scores are > 0.3 or have reasoning
-    has_reasoning = bool(ctx.get("reasoning", "")) if isinstance(ctx, dict) else False
-    return score > 0.3 or (score > 0 and has_reasoning)
+    if match.get("context_source") == "llm" or match.get("llm_context_tagged"):
+        return True
+    ctx = match.get("context")
+    return isinstance(ctx, dict) and "score" in ctx
 
 def has_llm_skills(job: dict) -> bool:
     """Check if job already has LLM-extracted skills (not just keyword)."""
@@ -79,16 +82,22 @@ def process_job(job: dict) -> dict:
                     job["analysis"] = {}
                 job["analysis"]["skills"] = skills
         
-        # Step 2: Context scoring via _ollama_context_score (now uses call_llm)
+        # Step 2: Context scoring via _ollama_context_score (now uses call_llm).
+        # Skip if this job already has an LLM score — jobs can land here for
+        # skill re-extraction only.
         ctx = None
         from matcher import _ollama_context_score, _load_persona_summary
         persona = _load_persona_summary()
-        if persona and description.strip():
+        if persona and description.strip() and not has_context_score(job):
             ctx = _ollama_context_score(description, persona)
             if ctx and "score" in ctx:
                 if "match" not in job:
                     job["match"] = {}
-                job["match"]["context"] = ctx
+                job["match"]["context_score"] = ctx["score"]
+                job["match"]["context_reasoning"] = ctx.get("reasoning", "")
+                job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
+                job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
+                job["match"]["context_source"] = "llm"
         
         return {"index": None, "url": url, "title": title, "status": "done", "skills": len(skills), "context_score": ctx.get("score", 0) if ctx else None}
     

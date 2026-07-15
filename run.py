@@ -137,6 +137,95 @@ def load_all_from_saved() -> list[dict]:
     return all_jobs
 
 
+def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
+    """Generate match reports, tailored CVs and cover letters for filter-passed jobs.
+
+    Shared by the normal scrape path and --reanalyze. Existing CV/CL files are
+    never overwritten (manual edits are preserved); match reports are always
+    refreshed.
+    """
+    match_dir = os.path.join(output_dir, "00_matches")
+    os.makedirs(match_dir, exist_ok=True)
+    cv_dir = os.path.join(output_dir, "10_cvs")
+    os.makedirs(cv_dir, exist_ok=True)
+    letter_dir = os.path.join(output_dir, "10_cover-letters")
+    os.makedirs(letter_dir, exist_ok=True)
+
+    cv_threshold = config.get("match_score_threshold", 0.50)
+    cv_generated = 0
+    cv_skipped = 0
+    letter_generated = 0
+    letter_skipped = 0
+
+    for job in passed_jobs:
+        match = job.get("match", {})
+        if not match:
+            continue
+        base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
+        composite_score = match.get("composite_score", 0)
+
+        # Pre-calculate base filenames (without paths or extensions for Obsidian links)
+        match_filename = f"{base}"
+        cv_name = f"{base}_CV"
+        cl_name = f"{base}_CL"
+
+        cv_filename_md = f"{cv_name}.md"
+        cl_filename_md = f"{cl_name}.md"
+
+        cv_filename_link = None
+        cl_filename_link = None
+
+        # Step 1: Generate CV first (if above threshold and description is available)
+        if composite_score >= cv_threshold and not match.get("description_missing", False):
+            cv_path = os.path.join(cv_dir, cv_filename_md)
+            if not os.path.exists(cv_path):
+                role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
+                cv = generate_cv(
+                    role_type=role_type,
+                    job_title=job.get('title', ''),
+                    company=job.get('company', ''),
+                    job_description=job.get('description', ''),
+                    match_filename=match_filename,
+                    cl_filename=cl_name
+                )
+                with open(cv_path, "w") as f:
+                    f.write(cv)
+                cv_generated += 1
+            else:
+                cv_skipped += 1
+            cv_filename_link = cv_filename_md
+
+            # Step 2: Generate cover letter (skip if exists)
+            cl_path = os.path.join(letter_dir, cl_filename_md)
+            if not os.path.exists(cl_path):
+                save_cover_letter(
+                    job.get('title', ''),
+                    job.get('company', ''),
+                    job.get('location', 'Edinburgh'),
+                    job.get('description', ''),
+                    letter_dir,
+                    match_filename=match_filename,
+                    cv_filename=cv_name
+                )
+                letter_generated += 1
+            else:
+                letter_skipped += 1
+            cl_filename_link = cl_filename_md
+        else:
+            cv_skipped += 1
+            letter_skipped += 1
+
+        # Step 3: Generate match report (with links to CV/CL)
+        report = generate_match_report(job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link)
+        report_path = os.path.join(match_dir, f"{match_filename}.md")
+        with open(report_path, "w") as f:
+            f.write(report)
+
+    print(f"  📊 Saved {len(passed_jobs)} match reports to {match_dir}/")
+    print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+    print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+
+
 def print_summary(jobs: list[dict]):
     """Print a readable summary of scraped jobs."""
     print(f"\n{'='*60}")
@@ -411,9 +500,9 @@ async def main():
                 for job in llm_jobs:
                     # Skip jobs that already have an LLM-scored context (incremental mode)
                     # unless --force-reanalyze is set.
-                    # We detect LLM-scored jobs via the llm_context_tag flag.
+                    # We detect LLM-scored jobs via match["context_source"].
                     if not args.force_reanalyze:
-                        if job.get("match", {}).get("llm_context_tagged"):
+                        if job.get("match", {}).get("context_source") == "llm":
                             llm_skipped += 1
                             continue
                     if job.get("match", {}).get("description_missing"):
@@ -450,7 +539,7 @@ async def main():
                         job["match"]["context_reasoning"] = ctx.get("reasoning", "")
                         job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
                         job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
-                        job["match"]["llm_context_tagged"] = True  # mark LLM-scored
+                        job["match"]["context_source"] = "llm"  # mark LLM-scored
                         # Recompute composite with new context score
                         w = job["match"]["weights"]
                         composite = (
@@ -506,105 +595,26 @@ async def main():
             # Save FULL data (including filtered-out jobs) for future refetch
             with open(full_data_path, "w") as f:
                 json.dump(analyzed, f, indent=2)
-            analyzed = passed  # Only keep filtered results for report generation
-            
-            # Save match reports
-            match_dir = os.path.join(output_dir, "00_matches")
-            os.makedirs(match_dir, exist_ok=True)
-            cv_dir = os.path.join(output_dir, "10_cvs")
-            os.makedirs(cv_dir, exist_ok=True)
-            letter_dir = os.path.join(output_dir, "10_cover-letters")
-            os.makedirs(letter_dir, exist_ok=True)
-            
+
             # NOTE: Previously this block deleted old reports/CVs not in the current filtered set.
             # Removed to preserve high-match reports across runs.
-            
-            import re
-            cv_threshold = config.get("match_score_threshold", 0.50)
-            cv_generated = 0
-            cv_skipped = 0
-            letter_generated = 0
-            letter_skipped = 0
-            
-            for job in analyzed:
-                match = job.get("match", {})
-                if match:
-                    base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
-                    composite_score = match.get("composite_score", 0)
-
-                    # Pre-calculate base filenames (without paths or extensions for Obsidian links)
-                    match_filename = f"{base}"
-                    cv_name = f"{base}_CV"
-                    cl_name = f"{base}_CL"
-                    
-                    cv_filename_md = f"{cv_name}.md"
-                    cl_filename_md = f"{cl_name}.md"
-                    
-                    cv_filename_link = None
-                    cl_filename_link = None
-
-                    # Step 1: Generate CV first (if above threshold and description is available)
-                    if composite_score >= cv_threshold and not match.get("description_missing", False):
-                        cv_path = os.path.join(cv_dir, cv_filename_md)
-                        if not os.path.exists(cv_path):
-                            role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
-                            cv = generate_cv(
-                                role_type=role_type, 
-                                job_title=job.get('title', ''), 
-                                company=job.get('company', ''),
-                                job_description=job.get('description', ''),
-                                match_filename=match_filename,
-                                cl_filename=cl_name
-                            )
-                            with open(cv_path, "w") as f:
-                                f.write(cv)
-                            cv_generated += 1
-                        else:
-                            cv_skipped += 1
-                        cv_filename_link = cv_filename_md
-
-                        # Step 2: Generate cover letter (skip if exists)
-                        cl_path = os.path.join(letter_dir, cl_filename_md)
-                        if not os.path.exists(cl_path):
-                            save_cover_letter(
-                                job.get('title', ''),
-                                job.get('company', ''),
-                                job.get('location', 'Edinburgh'),
-                                job.get('description', ''),
-                                letter_dir,
-                                match_filename=match_filename,
-                                cv_filename=cv_name
-                            )
-                            letter_generated += 1
-                        else:
-                            letter_skipped += 1
-                        cl_filename_link = cl_filename_md
-                    else:
-                        cv_skipped += 1
-                        letter_skipped += 1
-
-                    # Step 3: Generate match report (with links to CV/CL)
-                    report = generate_match_report(job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link)
-                    report_path = os.path.join(match_dir, f"{match_filename}.md")
-                    with open(report_path, "w") as f:
-                        f.write(report)
-            
-            print(f"  📊 Saved {len(analyzed)} match reports to {match_dir}/")
-            print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
-            print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+            generate_outputs(passed, config, output_dir)
 
             # Warn about missing descriptions
-            missing_desc = [j for j in analyzed if j.get("match", {}).get("description_missing")]
+            missing_desc = [j for j in passed if j.get("match", {}).get("description_missing")]
             if missing_desc:
                 print(f"\n  ⚠️  WARNING: {len(missing_desc)} jobs had missing descriptions (unreliable match score, no CV/CL generated):")
                 for j in missing_desc:
                     print(f"     - {j.get('company', 'Unknown')}: {j.get('title', 'Unknown')} ({j.get('url', 'No URL')})")
 
-            # Save updated _analyzed.json with new match scores
+            # Save updated _analyzed.json with new match scores.
+            # Must contain ALL jobs (not just filter-passed): this file is the
+            # incremental-dedup DB — shrinking it makes the next scrape re-fetch
+            # and re-analyze every filtered-out job.
             raw_path = os.path.join(output_dir, "_analyzed.json")
             with open(raw_path, "w") as f:
                 json.dump(analyzed, f, indent=2, ensure_ascii=False, default=str)
-            print(f"  💾 Saved updated scores to {raw_path}")
+            print(f"  💾 Saved updated scores for {len(analyzed)} jobs ({len(passed)} passed filters) to {raw_path}")
 
             print(f"{'='*60}\n")
             return
@@ -786,10 +796,6 @@ async def main():
         print("\n  ⚠ Skipping filter (--no-filter)")
 
     # --- Save filtered results as job-description.md files ---
-    
-    # Score threshold for CV generation (default 0.50 = 50%)
-    cv_threshold = config.get("match_score_threshold", 0.50)
-    
     if passed:
         print(f"\n{'='*60}")
         print(f"💾 SAVING FILTERED JOBS...")
@@ -798,85 +804,8 @@ async def main():
         matches_dir = os.path.join(output_dir, "00_matches")
         os.makedirs(matches_dir, exist_ok=True)
         save_indeed(passed, matches_dir)
-        # Save match reports
-        match_dir = os.path.join(output_dir, "00_matches")
-        os.makedirs(match_dir, exist_ok=True)
-        cv_dir = os.path.join(output_dir, "10_cvs")
-        os.makedirs(cv_dir, exist_ok=True)
-        letter_dir = os.path.join(output_dir, "10_cover-letters")
-        os.makedirs(letter_dir, exist_ok=True)
-        
-        cv_generated = 0
-        cv_skipped = 0
-        letter_generated = 0
-        letter_skipped = 0
-        
-        for job in passed:
-            match = job.get("match", {})
-            if match:
-                base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
-                composite_score = match.get("composite_score", 0)
-
-                # Pre-calculate base filenames (without paths or extensions for Obsidian links)
-                match_filename = f"{base}"
-                cv_name = f"{base}_CV"
-                cl_name = f"{base}_CL"
-                
-                cv_filename_md = f"{cv_name}.md"
-                cl_filename_md = f"{cl_name}.md"
-                
-                cv_filename_link = None
-                cl_filename_link = None
-
-                # Step 1: Generate CV first (if above threshold and description is available)
-                if composite_score >= cv_threshold and not match.get("description_missing", False):
-                    cv_path = os.path.join(cv_dir, cv_filename_md)
-                    if not os.path.exists(cv_path):
-                        role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
-                        cv = generate_cv(
-                            role_type=role_type, 
-                            job_title=job.get('title', ''), 
-                            company=job.get('company', ''),
-                            job_description=job.get('description', ''),
-                            match_filename=match_filename,
-                            cl_filename=cl_name
-                        )
-                        with open(cv_path, "w") as f:
-                            f.write(cv)
-                        cv_generated += 1
-                    else:
-                        cv_skipped += 1
-                    cv_filename_link = cv_filename_md
- 
-                    # Step 2: Generate cover letter
-                    cl_path = os.path.join(letter_dir, cl_filename_md)
-                    if not os.path.exists(cl_path):
-                        save_cover_letter(
-                            job.get('title', ''),
-                            job.get('company', ''),
-                            job.get('location', 'Edinburgh'),
-                            job.get('description', ''),
-                            letter_dir,
-                            match_filename=match_filename,
-                            cv_filename=cv_name
-                        )
-                        letter_generated += 1
-                    else:
-                        letter_skipped += 1
-                    cl_filename_link = cl_filename_md
-                else:
-                    cv_skipped += 1
-                    letter_skipped += 1
-
-                # Step 3: Generate match report (with links to CV/CL)
-                report = generate_match_report(job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link)
-                report_path = os.path.join(match_dir, f"{match_filename}.md")
-                with open(report_path, "w") as f:
-                    f.write(report)
-        
-        print(f"  📊 Saved {len(passed)} match reports to {match_dir}/")
-        print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
-        print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+        # Save match reports, CVs and cover letters
+        generate_outputs(passed, config, output_dir)
 
     # --- Summary ---
     if args.summary:

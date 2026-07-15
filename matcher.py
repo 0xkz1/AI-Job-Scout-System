@@ -1027,21 +1027,35 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     exp_match = calculate_experience_match(job_level, user_exp)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
-    # Check for pre-existing LLM context score from batch analysis
-    existing_ctx = job.get("match", {}).get("context", {})
-    if isinstance(existing_ctx, dict) and "score" in existing_ctx:
-        ctx_match = existing_ctx
+    # Reuse pre-existing LLM context score instead of re-scoring: LLM scores
+    # are expensive and must survive plain --reanalyze runs. Accepts the
+    # canonical flag (context_source == "llm") plus both legacy schemas
+    # (llm_context_tagged from run.py, match["context"] dict from
+    # bulk_analyze_cloud.py).
+    old_match = job.get("match") or {}
+    legacy_ctx = old_match.get("context")
+    ctx_source = "llm"
+    if old_match.get("context_source") == "llm" or old_match.get("llm_context_tagged"):
+        ctx_match = {
+            "score": old_match.get("context_score", 0),
+            "reasoning": old_match.get("context_reasoning", ""),
+            "reasoning_en": old_match.get("context_reasoning_en", ""),
+            "reasoning_ja": old_match.get("context_reasoning_ja", ""),
+            "top_terms": old_match.get("context_top_terms", []),
+        }
+    elif isinstance(legacy_ctx, dict) and "score" in legacy_ctx:
+        ctx_match = legacy_ctx
     else:
         # Use LLM for context scoring (or TF-IDF fallback)
         persona = _load_persona_summary()
+        llm_ctx = None
         if persona and job_description:
             llm_ctx = _ollama_context_score(job_description, persona)
-            if llm_ctx:
-                ctx_match = llm_ctx
-            else:
-                ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if Ollama fails
+        if llm_ctx:
+            ctx_match = llm_ctx
         else:
-            ctx_match = calculate_context_match(job_description)
+            ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if LLM fails
+            ctx_source = "tfidf"
 
     # Weighted composite — accept custom weights from config or parameter
     w = weights or config.get("weights", DEFAULT_WEIGHTS)
@@ -1095,10 +1109,11 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "location": loc_match,
         "salary": sal_match,
         "context_score": ctx_match["score"],
-        "context_reasoning": ctx_match["reasoning"],
+        "context_reasoning": ctx_match.get("reasoning", ""),
         "context_reasoning_en": ctx_match.get("reasoning_en", ""),
         "context_reasoning_ja": ctx_match.get("reasoning_ja", ""),
         "context_top_terms": ctx_match.get("top_terms", []),
+        "context_source": ctx_source,
         "title_relevance": relevance,
         "weights": weights,
         "summary_en": summary_en,

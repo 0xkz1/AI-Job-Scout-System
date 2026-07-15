@@ -31,6 +31,12 @@ import time
 import requests
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# Load the project .env so MISTRAL_API_KEY / ANALYSIS_PROVIDER etc. work
+# without manually sourcing the file. Existing shell env vars take precedence.
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
 
 call_llm_counter = 0  # module-level call counter for structured logging
 

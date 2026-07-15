@@ -217,7 +217,7 @@ def run_llm_context(jobs: list[dict], limit: int | None = None) -> None:
                 job["match"]["context_reasoning"] = ctx.get("reasoning", "")
                 job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
                 job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
-                job["match"]["llm_context_tagged"] = True
+                job["match"]["context_source"] = "llm"
 
                 # Recompute composite
                 w = job["match"]["weights"]
