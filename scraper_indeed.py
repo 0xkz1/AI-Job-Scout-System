@@ -468,6 +468,24 @@ def save_jobs(jobs: list[dict], output_dir: str = OUTPUT_DIR):
     return index
 
 
+def filter_jobs_by_keywords(jobs: list[dict], keywords: list[str]) -> list[dict]:
+    """Filter jobs to only keep those whose title or description contains any keyword."""
+    if not keywords:
+        return jobs
+    kw_lower = [k.lower() for k in keywords]
+    kept = []
+    removed = 0
+    for j in jobs:
+        text = f"{j.get('title', '')} {j.get('description', '')} {j.get('snippet', '')}".lower()
+        if any(kw in text for kw in kw_lower):
+            kept.append(j)
+        else:
+            removed += 1
+    if removed:
+        print(f"  🗑️ Filtered out {removed} jobs (no keyword match)")
+    return kept
+
+
 def _format_job_md(job: dict) -> str:
     return f"""# Job Description: {job['title']}
 

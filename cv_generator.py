@@ -3,6 +3,19 @@
 # Source: Merged from Rockstar North (Dev Support) + Paper Tiger (Data Input)
 # Generated for automated CV customization per job
 
+DEFAULT_TECHNICAL_TOOLKIT = """Systems & Infrastructure
+Linux (Ubuntu), tmux (process monitoring and session management), Docker, custom PC build, system configuration
+Workflow & Troubleshooting
+Process monitoring, system stability management, debugging under changing external conditions, root cause analysis
+Automation & Data
+Python, Excel VBA, web scraping, browser automation (Selenium), PostgreSQL, Pandas, NumPy, Heroku, n8n, SQL
+Digital Content Tools
+Blender (working knowledge), ComfyUI, Stable Diffusion (actively learning), Procreate, Krita, Affinity Suite
+AI & Local Tools
+Opencode + local LLM (daily use), NotebookLM, local VLM for image tagging
+Documentation & Tracking
+Obsidian (structured note-taking, workflow organisation, Zettelkasten-style decomposition)"""
+
 MASTER_CV = """Kazuki Yunome
 Edinburgh, Scotland, UK (Local Resident) | CANDIDATE_EMAIL | CANDIDATE_PHONE
 Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
@@ -14,18 +27,7 @@ CORE STRENGTHS
 {core_strengths}
 
 TECHNICAL TOOLKIT
-Systems & Infrastructure
-Linux (Ubuntu), tmux (process monitoring and session management), Docker, custom PC build, system configuration
-Workflow & Troubleshooting
-Process monitoring, system stability management, debugging under changing external conditions, root cause analysis
-Automation & Data
-Python, Excel VBA, web scraping, browser automation (Selenium), PostgreSQL, Pandas, NumPy, Heroku, n8n, SQL
-Digital Content Tools
-Blender (working knowledge), ComfyUI, Stable Diffusion (actively learning), Procreate, Krita, Affinity Suite
-AI & Local Tools
-Opencode + local LLM (daily use), NotebookLM, local VLM for image tagging
-Documentation & Tracking
-Obsidian (structured note-taking, workflow organisation, Zettelkasten-style decomposition)
+{technical_toolkit}
 
 EXPERIENCE
 {experience}
@@ -44,9 +46,9 @@ ADDITIONAL INFORMATION
 LANGUAGES
 Japanese: Native | English: Professional working proficiency | Spanish: Daily conversation level"""
 
-def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
+def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, str]:
     """
-    Dynamically load profile text and core strengths from:
+    Dynamically load profile text, core strengths, and technical toolkit from:
     00_Kazuki/career/cv/profile/{role_type}.md
     """
     from pathlib import Path
@@ -67,7 +69,7 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
     if not profile_path.exists():
         if role_type != "general":
             return load_profile_and_strengths("general")
-        return "", ""
+        return "", "", ""
 
     try:
         content = profile_path.read_text(encoding="utf-8")
@@ -76,6 +78,7 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
         
         profile_text = ""
         strengths_text = ""
+        toolkit_text = ""
         
         current_section = None
         current_lines = []
@@ -87,12 +90,16 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
                     profile_text = "\n".join(current_lines).strip()
                 elif current_section == "strengths":
                     strengths_text = "\n".join(current_lines).strip()
+                elif current_section == "toolkit":
+                    toolkit_text = "\n".join(current_lines).strip()
                 
                 sec_name = line_stripped[3:].lower()
                 if "profile" in sec_name:
                     current_section = "profile"
                 elif "strength" in sec_name:
                     current_section = "strengths"
+                elif "toolkit" in sec_name or "technical" in sec_name:
+                    current_section = "toolkit"
                 else:
                     current_section = None
                 current_lines = []
@@ -104,6 +111,8 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
             profile_text = "\n".join(current_lines).strip()
         elif current_section == "strengths":
             strengths_text = "\n".join(current_lines).strip()
+        elif current_section == "toolkit":
+            toolkit_text = "\n".join(current_lines).strip()
             
         # Convert markdown list markers (- or *) to bullet points (•) to maintain original formatting
         if strengths_text:
@@ -118,22 +127,30 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str]:
                     formatted_strengths.append(f"• {stripped}")
             strengths_text = "\n".join(formatted_strengths)
             
-        return profile_text, strengths_text
+        if not toolkit_text:
+            toolkit_text = DEFAULT_TECHNICAL_TOOLKIT
+            
+        return profile_text, strengths_text, toolkit_text
     except Exception as e:
-        print(f"  ⚠ Error loading profile/strengths for {role_type}: {e}")
+        print(f"  ⚠ Error loading profile/strengths/toolkit for {role_type}: {e}")
         if role_type != "general":
             return load_profile_and_strengths("general")
-        return "", ""
+        return "", "", ""
 
 def get_profile(role_type: str = "general") -> str:
     """Get profile text for a role type."""
-    p, _ = load_profile_and_strengths(role_type)
+    p, _, _ = load_profile_and_strengths(role_type)
     return p
 
 def get_strengths(role_type: str = "general") -> str:
     """Get core strengths for a role type."""
-    _, s = load_profile_and_strengths(role_type)
+    _, s, _ = load_profile_and_strengths(role_type)
     return s
+
+def get_toolkit(role_type: str = "general") -> str:
+    """Get technical toolkit for a role type."""
+    _, _, t = load_profile_and_strengths(role_type)
+    return t
 
 # Role type detection from job title/description
 ROLE_KEYWORDS = {
@@ -313,8 +330,7 @@ def _build_project_summaries() -> str:
 
 
 def _generate_experience_ollama(job_title: str, job_description: str, role_type: str) -> str | None:
-    """
-    Use Ollama LLM to generate a tailored Experience section.
+    """Use LLM (Mistral→Ollama fallback) to generate a tailored Experience section.
     Returns formatted Experience text, or None on failure.
     """
     if not job_title and not job_description:
@@ -347,37 +363,21 @@ INSTRUCTIONS:
 
 Write ONLY the Experience section content. No "EXPERIENCE" header."""
 
-    payload = {
-        "model": _OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a professional CV writer. Output ONLY the requested content, no preface or commentary."},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "keep_alive": _OLLAMA_KEEP_ALIVE,
-        "options": {"temperature": 0.4},
-    }
-
-    max_retries = 2
-    for attempt in range(max_retries + 1):
-        try:
-            resp = _requests.post(
-                _OLLAMA_ENDPOINT,
-                json=payload,
-                timeout=_OLLAMA_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            if content.strip():
-                return content.strip()
-            return None
-        except (_requests.RequestException, _json.JSONDecodeError, KeyError) as e:
-            if attempt < max_retries:
-                _time.sleep(5)
-                continue
-            print(f"  ⚠ Ollama CV error (after {max_retries + 1} attempts): {e}")
-            return None
+    try:
+        from llm_client import call_llm
+        content = call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a professional CV writer. Output ONLY the requested content, no preface or commentary.",
+            temperature=0.4,
+            max_tokens=2048,
+            retries=1,
+        )
+        if content and content.strip():
+            return content.strip()
+        return None
+    except Exception as e:
+        print(f"  ⚠ CV experience generation error: {e}")
+        return None
 
 
 def generate_experience(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
@@ -417,9 +417,26 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
 
     profile = get_profile(role_type)
     strengths = get_strengths(role_type)
+    toolkit = get_toolkit(role_type)
     experience = generate_experience(job_title, job_description, role_type)
     
-    cv_body = MASTER_CV.format(profile=profile, core_strengths=strengths, experience=experience)
+    cv_body = MASTER_CV.format(
+        profile=profile, 
+        core_strengths=strengths, 
+        technical_toolkit=toolkit, 
+        experience=experience
+    )
+    
+    # Scan experience text to determine which projects were used
+    used_projects = []
+    for p in PROJECTS:
+        p_title = p.get("title", "")
+        p_id = p.get("id", "")
+        if p_title and p_id and p_title.lower().strip() in experience.lower():
+            used_projects.append(f"[[career/cv/projects/{p_id}]]")
+            
+    import json
+    source_projects_yaml = f"\nsource_projects: {json.dumps(used_projects, ensure_ascii=False)}" if used_projects else ""
     
     frontmatter = f"""---
 title: "{company} - {job_title} (CV)"
@@ -427,7 +444,7 @@ type: "cv"
 company: "{company}"
 match_report: "[[{match_filename}]]"
 cover_letter: "[[{cl_filename}]]"
-source_profile: "[[career/cv/profile/{resolved_role}]]"
+source_profile: "[[career/cv/profile/{resolved_role}]]"{source_projects_yaml}
 ---
 """
     

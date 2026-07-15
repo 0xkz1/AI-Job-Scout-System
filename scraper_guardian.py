@@ -224,7 +224,6 @@ async def scrape_guardian(
         next_url = f"https://jobs.theguardian.com/jobs/{current_page_num}/?q={kw_q}"
         if loc_q:
             next_url += f"&location={loc_q}"
-
         try:
             await page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
@@ -269,6 +268,10 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
                     if dedup_key not in seen:
                         seen.add(dedup_key)
                         all_jobs.append(j)
+
+    # --- Filter by keywords ---
+    from scraper_indeed import filter_jobs_by_keywords
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
 
     return all_jobs
 

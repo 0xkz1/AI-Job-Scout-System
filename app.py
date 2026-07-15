@@ -35,6 +35,7 @@ sys.path.insert(0, str(SCRAPER_DIR))
 from matcher import (
     analyze_match,
     save_match_report,
+    calculate_title_relevance,
     DEFAULT_WEIGHTS,
 )
 from filter import passes_filter
@@ -87,9 +88,17 @@ st.markdown("""
 :root {
     --primary-color: #944040;
 }
-/* Target Streamlit's internal CSS variable for primary color */
 [data-testid="stAppViewContainer"] {
     --primary-color: #944040;
+}
+/* Custom Title Style resembling Hermes Agent */
+.jis-title {
+    text-align: left;
+    font-size: clamp(1.5rem, 5vw, 2.5rem);
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    margin-bottom: 1.5rem;
+    line-height: 1.2;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -122,8 +131,10 @@ def run_scraper(site="indeed", pages=5):
 
 
 # ─────────────────────────────────────────────
-# Tabs
+# Title & Tabs
 # ─────────────────────────────────────────────
+
+st.markdown('<h1 class="jis-title">Job Intelligence System</h1>', unsafe_allow_html=True)
 
 tab_scraper, tab_weights, tab_kanban, tab_watched = st.tabs(["🔍 Scraper", "🎯 Weights", "📋 Kanban", "👁 Watched & Saved"])
 
@@ -359,7 +370,6 @@ with tab_scraper:
             else:
                 st.warning("No jobs match the selected score filter.")
 
-            st.info("No jobs scraped yet. Run the scraper above.")
     elif index_path.exists():
         st.info("Run the scraper again to enable match analysis.")
         with open(index_path) as f:
@@ -408,24 +418,26 @@ with tab_weights:
     @st.cache_data(ttl=60)
     def get_base_scores(jobs_json_str: str):
         """Pre-calculate individual dimension scores (without weights) so we can
-        re-compute the weighted composite instantly when sliders change."""
+        re-compute the weighted composite instantly when sliders change.
+        Uses pre-computed scores from _analyzed.json instead of re-running analyze_match
+        (which would invoke Ollama LLM for every job — extremely slow)."""
         jobs = json.loads(jobs_json_str)
-        config = {"output_dir": str(OUTPUT_DIR), "min_salary_gbp": MIN_SALARY_GBP}
         results = []
         for job in jobs:
-            match = analyze_match(job, config)
+            match = job.get("match", {})
+            # Use pre-computed scores from _analyzed.json
             results.append({
                 "company": job.get("company", "Unknown"),
                 "title": job.get("title", "Unknown"),
                 "location": job.get("location", "Unknown"),
                 "url": job.get("url", ""),
-                "skill_raw": match["skills"]["score"],
-                "exp_raw": match["experience"]["score"],
-                "loc_raw": match["location"]["score"],
-                "sal_raw": match["salary"]["score"],
+                "skill_raw": match.get("skills", {}).get("score", 0),
+                "exp_raw": match.get("experience", {}).get("score", 0),
+                "loc_raw": match.get("location", {}).get("score", 0),
+                "sal_raw": match.get("salary", {}).get("score", 0),
                 "ctx_raw": match.get("context_score", 0.5),
-                "title_relevance": match.get("title_relevance", 1.0),
-                "tier": match["tier"],
+                "title_relevance": calculate_title_relevance(job.get("title", "")),
+                "tier": match.get("tier", ""),
             })
         return results
 
@@ -651,11 +663,10 @@ with tab_kanban:
     if changed:
         save_kanban_data(kanban)
 
-    # Compute scores for each job
-    config = {"output_dir": str(OUTPUT_DIR), "min_salary_gbp": MIN_SALARY_GBP}
+    # Compute scores for each job (use pre-computed scores from _analyzed.json)
     scored_jobs = []
     for url, j in job_map.items():
-        match = analyze_match(j, config)
+        match = j.get("match", {})
         score = match.get("composite_score", 0)
         ctx = match.get("context_score", 0)
         scored_jobs.append({
@@ -869,10 +880,15 @@ with tab_watched:
             pass
 
     col_b1, col_b2, col_b3 = st.columns([1.5, 1.5, 3])
+
+    # ── Mutual exclusion: scrape and analysis can't run simultaneously ──
+    scrape_running = st.session_state.saved_proc is not None and st.session_state.saved_proc.poll() is None
+    analysis_running = st.session_state.analysis_proc is not None and st.session_state.analysis_proc.poll() is None
+    _any_b_running = scrape_running or analysis_running
+
     with col_b1:
-        scrape_running = st.session_state.saved_proc is not None and st.session_state.saved_proc.poll() is None
         if not scrape_running:
-            if st.button("▶ Start URL List Scrape", type="primary", key="start_saved", disabled=scrape_running):
+            if st.button("▶ Start URL List Scrape", type="primary", key="start_saved", disabled=_any_b_running):
                 cmd = [sys.executable, "-u", "scraper_url_list.py"]
                 st.session_state.saved_proc = subprocess.Popen(
                     cmd, cwd=str(SCRAPER_DIR),
@@ -887,9 +903,8 @@ with tab_watched:
                 st.rerun()
 
     with col_b2:
-        analysis_running = st.session_state.analysis_proc is not None and st.session_state.analysis_proc.poll() is None
         if not analysis_running:
-            if st.button("🎯 Run Match Analysis", type="primary", key="start_analysis", disabled=analysis_running):
+            if st.button("🎯 Run Match Analysis", type="primary", key="start_analysis", disabled=_any_b_running):
                 cmd = [sys.executable, "-u", "run.py", "--from-saved"]
                 st.session_state.analysis_proc = subprocess.Popen(
                     cmd, cwd=str(SCRAPER_DIR),
@@ -903,18 +918,18 @@ with tab_watched:
                 _kill_process("analysis_proc")
                 st.rerun()
 
+    # Show lock warning
+    if _any_b_running:
+        _running_label = "Scrape" if scrape_running else "Analysis"
+        st.caption(f"⏳ {_running_label} is running — the other action is disabled to prevent file conflicts.")
+
     with col_b3:
         # Show status/output for scrape
         if st.session_state.saved_proc is not None:
             proc = st.session_state.saved_proc
-            st.info(f"Scraper running (PID {proc.pid})")
+            # Drain available output lines (non-blocking)
             try:
-                import select as _select
-                fd = proc.stdout.fileno()
                 while True:
-                    ready, _, _ = _select.select([fd], [], [], 0.05)
-                    if not ready:
-                        break
                     line = proc.stdout.readline()
                     if not line:
                         break
@@ -922,13 +937,15 @@ with tab_watched:
             except Exception:
                 pass
 
+            st.info(f"Scraper running (PID {proc.pid})" if proc.poll() is None else f"Scraper finished (exit code {proc.returncode})")
+
             if st.session_state.saved_proc_output:
                 with st.expander("Scraper Output", expanded=True):
                     st.code("\n".join(st.session_state.saved_proc_output[-100:]))
 
             if proc.poll() is None:
                 import time
-                time.sleep(1)
+                time.sleep(2)
                 st.rerun()
             else:
                 st.success(f"✅ Scraper Finished (exit code {proc.returncode})")
@@ -937,14 +954,9 @@ with tab_watched:
         # Show status/output for analysis
         elif st.session_state.analysis_proc is not None:
             proc = st.session_state.analysis_proc
-            st.info(f"Analyzer running (PID {proc.pid})")
+            # Drain available output lines (non-blocking)
             try:
-                import select as _select
-                fd = proc.stdout.fileno()
                 while True:
-                    ready, _, _ = _select.select([fd], [], [], 0.05)
-                    if not ready:
-                        break
                     line = proc.stdout.readline()
                     if not line:
                         break
@@ -952,13 +964,15 @@ with tab_watched:
             except Exception:
                 pass
 
+            st.info(f"Analyzer running (PID {proc.pid})" if proc.poll() is None else f"Analyzer finished (exit code {proc.returncode})")
+
             if st.session_state.analysis_proc_output:
                 with st.expander("Analyzer Output", expanded=True):
                     st.code("\n".join(st.session_state.analysis_proc_output[-100:]))
 
             if proc.poll() is None:
                 import time
-                time.sleep(1)
+                time.sleep(2)
                 st.rerun()
             else:
                 st.success(f"✅ Analysis Finished (exit code {proc.returncode})")
@@ -1009,14 +1023,9 @@ with tab_watched:
     with col_c2:
         proc = st.session_state.watched_proc
         if proc is not None:
-            st.info(f"Process running (PID {proc.pid})")
+            # Drain available output lines (non-blocking)
             try:
-                import select as _select
-                fd = proc.stdout.fileno()
                 while True:
-                    ready, _, _ = _select.select([fd], [], [], 0.05)
-                    if not ready:
-                        break
                     line = proc.stdout.readline()
                     if not line:
                         break
@@ -1024,13 +1033,15 @@ with tab_watched:
             except Exception:
                 pass
 
+            st.info(f"Process running (PID {proc.pid})" if proc.poll() is None else f"Process finished (exit code {proc.returncode})")
+
             if st.session_state.watched_proc_output:
                 with st.expander("Output", expanded=True):
                     st.code("\n".join(st.session_state.watched_proc_output[-100:]))
 
             if proc.poll() is None:
                 import time
-                time.sleep(1)
+                time.sleep(2)
                 st.rerun()
             else:
                 st.success(f"✅ Finished (exit code {proc.returncode})")

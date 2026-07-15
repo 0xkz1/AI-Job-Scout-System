@@ -14,7 +14,9 @@ import asyncio
 import json
 import os
 import re
+import requests as _requests_sync
 from datetime import datetime
+from html import unescape
 from urllib.parse import quote_plus
 
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
@@ -137,41 +139,73 @@ async def _extract_reed_jobs(page) -> list[dict]:
         return []
 
 
-async def _fetch_job_description(page, job_url: str) -> str:
-    """Navigate to a job's detail page and extract the full description."""
+def _fetch_reed_description_sync(job_url: str) -> str:
+    """
+    Fetch full job description from a Reed detail page via HTTP (no browser needed).
+    Extracts from Schema.org JSON-LD (type=JobPosting) which Reed always includes
+    in its server-rendered HTML. Falls back to data-qa="job-description" HTML parsing.
+    """
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+    }
     try:
-        await page.goto(job_url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2000)
+        resp = _requests_sync.get(job_url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
 
-        # Try multiple selectors for the job description
-        desc = await page.evaluate("""() => {
-            const selectors = [
-                '[class*="job-description"]',
-                '[class*="description"]',
-                '[data-qa="job-description"]',
-                '.job-detail__description',
-                '.job-description__content',
-                'main section:last-child',
-                'article [class*="body"]',
-                'article [class*="content"]',
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.textContent.trim().length > 100) {
-                    return el.textContent.trim().slice(0, 5000);
-                }
-            }
-            // Fallback: grab main content
-            const main = document.querySelector('main');
-            if (main) {
-                const text = main.textContent.trim();
-                if (text.length > 200) return text.slice(0, 5000);
-            }
-            return '';
-        }""")
-        return desc or ""
-    except Exception:
+        # 1) Try JSON-LD (Schema.org JobPosting) — most reliable
+        ld_blocks = re.findall(
+            r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
+            html, re.DOTALL
+        )
+        for block in ld_blocks:
+            try:
+                data = json.loads(block)
+                if isinstance(data, dict) and data.get("@type") == "JobPosting":
+                    raw_desc = data.get("description", "")
+                    if raw_desc:
+                        # Strip HTML tags, unescape entities
+                        clean = re.sub(r"<[^>]+>", " ", raw_desc)
+                        clean = unescape(clean)
+                        clean = re.sub(r"\s+", " ", clean).strip()
+                        if len(clean) > 100:
+                            return clean[:6000]
+            except (json.JSONDecodeError, Exception):
+                continue
+
+        # 2) Fallback: data-qa="job-description" HTML block
+        m = re.search(
+            r'data-qa=["\']job-description["\'][^>]*>(.*?)</(?:div|section|article)>',
+            html, re.DOTALL
+        )
+        if m:
+            raw = m.group(1)
+            clean = re.sub(r"<[^>]+>", " ", raw)
+            clean = unescape(clean)
+            clean = re.sub(r"\s+", " ", clean).strip()
+            if len(clean) > 100:
+                return clean[:6000]
+
         return ""
+    except Exception as e:
+        print(f"  ⚠ Reed HTTP fetch error for {job_url}: {e}")
+        return ""
+
+
+async def _fetch_job_description(page, job_url: str) -> str:
+    """
+    Async wrapper for Reed description fetch — uses synchronous HTTP (not Playwright)
+    for reliability. The `page` arg is kept for interface compatibility but not used.
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_reed_description_sync, job_url)
 
 
 async def scrape_reed(
@@ -332,6 +366,10 @@ async def scrape_reed_all(config: dict) -> list[dict]:
                     if dedup_key not in seen:
                         seen.add(dedup_key)
                         all_jobs.append(j)
+
+    # --- Filter by keywords ---
+    from scraper_indeed import filter_jobs_by_keywords
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
 
     return all_jobs
 

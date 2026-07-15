@@ -15,6 +15,7 @@ import json
 import requests
 import os
 import time
+from llm_client import call_llm
 
 
 # --- Salary parsing ---
@@ -433,6 +434,49 @@ SKILL_SYNONYMS = {
 }
 
 
+# Common job-extracted "skills" that are too generic / ambiguous to be meaningful.
+NON_SKILL_FILTER: set[str] = {
+    # Short ambiguous words — match non-skill usage
+    "make", "less",
+    # Soft skills / generic attributes
+    "problem solving", "creative", "innovation", "innovative",
+    "interpersonal", "communication", "teamwork", "leadership",
+    "time management", "critical thinking", "analytical",
+    "analytical skills", "attention to detail", "problem solver",
+    "proactive", "self motivated", "self-starter", "fast learner",
+    "adaptability", "flexible", "multitasking", "multitask",
+    "organizational", "organized", "planning", "prioritization",
+    "customer service", "presentation", "presentation skills",
+    "negotiation", "mentoring",
+    # Broad industry terms
+    "marketing", "sales", "administration", "management",
+    "operations", "strategy", "business development",
+}
+
+
+def _is_non_skill(skill_name: str) -> bool:
+    """Check if a skill name is in the non-skill filter (case-insensitive)."""
+    return skill_name.lower().strip() in NON_SKILL_FILTER
+
+
+def _appears_capitalized(text: str, term: str) -> bool:
+    """Check if a term appears with uppercase first letter in original text.
+    
+    Concrete skills (Python, React, Agile) are typically capitalized in job 
+    descriptions, while generic words (make, less) usually stay lowercase.
+    """
+    import re
+    if not term or not term[0].isalpha():
+        return True  # Non-alpha starts can't be checked this way
+    capitalized = term[0].upper() + term[1:]
+    pattern = re.escape(capitalized)
+    if capitalized[0].isalnum():
+        pattern = r'(?<![a-zA-Z0-9_])' + pattern
+    if capitalized[-1].isalnum() or capitalized[-1] == '_':
+        pattern = pattern + r'(?![a-zA-Z0-9_])'
+    return bool(re.search(pattern, text))
+
+
 def normalize_skill(skill: str) -> str:
     """Normalize skill name using synonyms map."""
     skill_lower = skill.lower().strip()
@@ -458,7 +502,8 @@ def extract_skills(text: str) -> list[str]:
             _SKILL_REGEX_CACHE[skill] = re.compile(pattern)
         
         if _SKILL_REGEX_CACHE[skill].search(text_lower):
-            found.add(normalize_skill(skill))
+            if not _is_non_skill(skill) and _appears_capitalized(text, skill):
+                found.add(normalize_skill(skill))
     return sorted(found)
 
 
@@ -503,37 +548,39 @@ def _extract_json_object(text: str) -> dict | None:
 
 def _ollama_chat(messages: list[dict], expect: str = "array") -> list | dict | None:
     """
-    Call Ollama /api/chat endpoint.
+    Call LLM for extraction/classification.
+    Uses provider from env ANALYSIS_PROVIDER (ollama/mistral/openrouter).
     expect: "array" for skill extraction (returns list), "object" for classification (returns dict)
     """
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,  # keep model loaded for batch processing
-    }
+    # Extract system prompt if present
+    system_prompt = ""
+    chat_messages = []
+    for m in messages:
+        if m.get("role") == "system":
+            system_prompt = m.get("content", "")
+        else:
+            chat_messages.append(m)
 
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
-            resp = requests.post(
-                OLLAMA_ENDPOINT,
-                json=payload,
-                timeout=OLLAMA_TIMEOUT,
+            content = call_llm(
+                messages=chat_messages,
+                system_prompt=system_prompt,
+                temperature=0.1,
+                max_tokens=2048,
+                retries=0,  # we handle retries in this wrapper
             )
-            resp.raise_for_status()
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            
+
             if expect == "array":
                 return _extract_json_array(content)
             else:
                 return _extract_json_object(content)
-        except (requests.RequestException, json.JSONDecodeError, KeyError) as e:
+        except Exception as e:
             if attempt < max_retries:
-                time.sleep(5)  # wait before retry
+                time.sleep(5)
                 continue
-            print(f"  ⚠ Ollama error (after {max_retries + 1} attempts): {e}")
+            print(f"  ⚠ LLM error (after {max_retries + 1} attempts): {e}")
             return None
 
 
@@ -562,11 +609,13 @@ Example: ["Python", "Docker", "AWS", "TypeScript", "React", "Figma", "Design Sys
     ], expect="array")
 
     if isinstance(result, list):
-        # Normalize using SKILL_SYNONYMS
+        # Normalize using SKILL_SYNONYMS and filter non-skills
         normalized = []
         for skill in result:
             if isinstance(skill, str):
-                normalized.append(normalize_skill(skill))
+                skill_norm = normalize_skill(skill)
+                if not _is_non_skill(skill_norm):
+                    normalized.append(skill_norm)
         return sorted(set(normalized))
 
     return []

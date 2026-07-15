@@ -308,6 +308,10 @@ async def scrape_adzuna_all(config: dict) -> list[dict]:
                         seen.add(dedup_key)
                         all_jobs.append(j)
 
+    # --- Filter by keywords ---
+    from scraper_indeed import filter_jobs_by_keywords
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
+
     return all_jobs
 
 

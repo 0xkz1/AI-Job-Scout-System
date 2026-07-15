@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+import fcntl
 from datetime import datetime
 
 import yaml
@@ -34,6 +35,19 @@ from cv_generator import generate_cv, detect_role_type
 from cover_letter_generator import save_cover_letter
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+
+
+def _try_acquire_lock(name="url_list_jobs"):
+    """Try to acquire an exclusive file lock (non-blocking).
+    Returns the lock file handle (keep open while locked) or None if already locked."""
+    lock_path = f"/tmp/jis_{name}.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except (IOError, OSError, BlockingIOError):
+        lock_file.close()
+        return None
 
 
 def load_config() -> dict:
@@ -318,7 +332,15 @@ async def main():
 
     # --- Load from 00_saved/ staging (skip scraping) ---
     _from_saved_mode = False
+    _saved_lock = None  # file lock handle — released on exit
     if args.from_saved:
+        # ── File lock: prevent concurrent access with scraper_url_list.py ──
+        _saved_lock = _try_acquire_lock()
+        if _saved_lock is None:
+            print("⚠ Another process is already using url_list_jobs.json (scrape or analysis).")
+            print("  Wait for it to finish before running again.")
+            return
+
         print(f"\n{'='*60}")
         print("📂 LOADING FROM 00_SAVED/ STAGING")
         print(f"{'='*60}")
@@ -327,6 +349,7 @@ async def main():
         print(f"  → Loaded {len(all_jobs)} jobs from staging")
         if not all_jobs:
             print("  ⚠ No jobs found in 00_saved/. Run scraper first or check path.")
+            _saved_lock.close()
             return
         print(f"{'='*60}\n")
         _from_saved_mode = True
@@ -359,7 +382,7 @@ async def main():
             total_skills = sum(len(s) for s in user_skills.values())
             print(f"  📋 Loaded profile: {total_skills} skills, {user_exp.get('years_python', 0)}y Python, {user_exp.get('years_linux', 0)}y Linux")
             for job in analyzed:
-                job["match"] = analyze_match(job, config)
+                job["match"] = analyze_match(job, config, skip_summary=True)
 
             # --- LLM Context Match (optional, slow but accurate) ---
             if args.llm_context:
@@ -393,6 +416,9 @@ async def main():
                         if job.get("match", {}).get("llm_context_tagged"):
                             llm_skipped += 1
                             continue
+                    if job.get("match", {}).get("description_missing"):
+                        llm_skipped += 1
+                        continue
                     # Build description (with fallback to pseudo-description from analysis metadata)
                     desc = job.get("description", "") or job.get("snippet", "")
                     if not desc or len(desc) <= 50:
@@ -457,6 +483,8 @@ async def main():
                 summary_done = 0
                 print(f"  📋 Generating bilingual summaries for top {top_30_pct} jobs...")
                 for job in summary_jobs:
+                    if job.get("match", {}).get("description_missing"):
+                        continue
                     desc = job.get("description", "") or job.get("snippet", "")
                     if desc and len(desc) > 50:
                         if not job.get("match", {}).get("summary_en"):
@@ -515,8 +543,8 @@ async def main():
                     cv_filename_link = None
                     cl_filename_link = None
 
-                    # Step 1: Generate CV first (if above threshold)
-                    if composite_score >= cv_threshold:
+                    # Step 1: Generate CV first (if above threshold and description is available)
+                    if composite_score >= cv_threshold and not match.get("description_missing", False):
                         cv_path = os.path.join(cv_dir, cv_filename_md)
                         if not os.path.exists(cv_path):
                             role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
@@ -562,8 +590,15 @@ async def main():
                         f.write(report)
             
             print(f"  📊 Saved {len(analyzed)} match reports to {match_dir}/")
-            print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold)")
-            print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold)")
+            print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+            print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+
+            # Warn about missing descriptions
+            missing_desc = [j for j in analyzed if j.get("match", {}).get("description_missing")]
+            if missing_desc:
+                print(f"\n  ⚠️  WARNING: {len(missing_desc)} jobs had missing descriptions (unreliable match score, no CV/CL generated):")
+                for j in missing_desc:
+                    print(f"     - {j.get('company', 'Unknown')}: {j.get('title', 'Unknown')} ({j.get('url', 'No URL')})")
 
             # Save updated _analyzed.json with new match scores
             raw_path = os.path.join(output_dir, "_analyzed.json")
@@ -793,8 +828,8 @@ async def main():
                 cv_filename_link = None
                 cl_filename_link = None
 
-                # Step 1: Generate CV first (if above threshold)
-                if composite_score >= cv_threshold:
+                # Step 1: Generate CV first (if above threshold and description is available)
+                if composite_score >= cv_threshold and not match.get("description_missing", False):
                     cv_path = os.path.join(cv_dir, cv_filename_md)
                     if not os.path.exists(cv_path):
                         role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
@@ -812,7 +847,7 @@ async def main():
                     else:
                         cv_skipped += 1
                     cv_filename_link = cv_filename_md
-
+ 
                     # Step 2: Generate cover letter
                     cl_path = os.path.join(letter_dir, cl_filename_md)
                     if not os.path.exists(cl_path):
@@ -840,8 +875,8 @@ async def main():
                     f.write(report)
         
         print(f"  📊 Saved {len(passed)} match reports to {match_dir}/")
-        print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold)")
-        print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold)")
+        print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+        print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
 
     # --- Summary ---
     if args.summary:
@@ -857,7 +892,19 @@ async def main():
     print(f"  Passed:    {len(passed)}")
     print(f"  Filtered:  {len(locals().get('filtered', []))}")
     print(f"  Output:    {output_dir}/")
+    
+    # Warn about missing descriptions
+    missing_desc = [j for j in passed if j.get("match", {}).get("description_missing")]
+    if missing_desc:
+        print(f"\n  ⚠️  WARNING: {len(missing_desc)} matched jobs had missing descriptions (unreliable match score, no CV/CL generated):")
+        for j in missing_desc:
+            print(f"     - {j.get('company', 'Unknown')}: {j.get('title', 'Unknown')} ({j.get('url', 'No URL')})")
+            
     print(f"{'='*60}\n")
+
+    # Release file lock if held (--from-saved mode)
+    if _saved_lock is not None:
+        _saved_lock.close()
 
 
 if __name__ == "__main__":

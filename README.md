@@ -30,6 +30,8 @@ Job hunting is a numbers game, but manual tailoring doesn't scale. This pipeline
 
 **No API keys. No cloud costs. No rate limits.** Everything runs locally on an RTX 5080.
 
+> **Update (2026-07-15):** The system now supports a **2-tier LLM strategy** — Mistral (cloud, cheap) as primary, Ollama (local) as fallback. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
+
 ---
 
 ## Architecture
@@ -493,3 +495,79 @@ A running record of non-obvious decisions, bugs, and design pivots — written f
 #### Key Design Decision — Prototyping vs Agile as Separate Skills
 
 Kazuki identified that **Prototyping** and **Agile** are genuinely separate competencies in his profile, not synonyms of each other. Prototyping is a core creative/technical practice (physical + digital); Agile is a process methodology he uses but doesn't specialize in. This is why they have different proficiency levels (Advanced vs Intermediate) in `skills.md`.
+---
+
+## 2-Tier LLM Strategy (2026-07-15)
+
+### Background
+
+The pipeline originally used **Ollama (Gemma-4-26b)** exclusively for all LLM tasks: skill extraction, context/ethos scoring, CV generation, and job summaries. This worked but was **slow** — each Ollama call took 30-120 seconds, making full pipeline runs take hours.
+
+A prior attempt to use **Mistral Small Latest** as a cloud accelerator hit **rate limits almost immediately**, making it unreliable for batch processing.
+
+### Solution: Mistral Tiny + Ollama Fallback
+
+The key discovery: **mistral-tiny does NOT hit rate limits** even when generating 140 CVs consecutively (~8 minutes of continuous API calls). This is likely because mistral-tiny is the cheapest tier with the most generous rate limits.
+
+**Architecture:**
+
+```
+┌──────────────────────────────────────────────────┐
+│                llm_client.py                      │
+│         (Unified LLM client with fallback)        │
+│                                                  │
+│  ANALYSIS_PROVIDER=mistral  (primary)            │
+│  CLOUD_MODEL=mistral-tiny                        │
+│  FALLBACK_PROVIDER=ollama   (auto on 429/5xx)    │
+│                                                  │
+│  All LLM calls go through call_llm():            │
+│  - _ollama_context_score()  -> context/ethos     │
+│  - _ollama_job_summary()     -> bilingual summary │
+│  - _generate_experience_ollama() -> CV experience │
+│                                                  │
+│  If Mistral returns 429/5xx/timeout:             │
+│  -> Auto-retry on Ollama (gemma-4-26b)           │
+└──────────────────────────────────────────────────┘
+```
+
+**.env configuration:**
+
+```bash
+ANALYSIS_PROVIDER=mistral
+CLOUD_MODEL=mistral-tiny
+FALLBACK_PROVIDER=ollama
+MISTRAL_API_KEY=<your-api-key>
+```
+
+**Code changes:**
+
+1. **matcher.py** — analyze_match() gained skip_summary=True parameter. In --reanalyze mode, this skips per-job LLM summary generation (summaries are generated separately in the --llm-context path). This reduces 295 jobs x ~5s/job summary = ~25 minutes of API calls to zero during batch matching.
+
+2. **run.py** — --reanalyze path now calls analyze_match(job, config, skip_summary=True) instead of analyze_match(job, config).
+
+3. **llm_client.py** — Unified LLM client (already existed, documented here). Routes to Mistral/OpenRouter/Ollama based on env vars. Auto-fallback on transient errors (429, 5xx, timeout).
+
+4. **cover_letter_generator.py** — Template-based, no LLM needed. Instant.
+
+### Performance Results (2026-07-15)
+
+| Metric | Ollama Only | Mistral Tiny |
+|--------|-------------|-------------|
+| CV generation (1 job) | ~60-120s | ~3-5s |
+| 140 CVs + 140 CLs batch | ~3-4 hours | ~8 minutes |
+| Rate limit hits | N/A (local) | 0 (mistral-tiny) |
+| Ollama fallback triggered | N/A | 0 times |
+| API cost | free | ~900 JPY (~5 GBP) |
+| Context score reuse | N/A | Cached scores reused, no re-scoring |
+
+### Key Lessons
+
+1. **mistral-tiny vs mistral-small-latest**: The "tiny" model has significantly more generous rate limits. For batch CV/CL generation where quality bar is "good enough", tiny is the right choice. Small-latest throttles quickly and is better suited for single-shot high-quality tasks.
+
+2. **skip_summary optimization**: The analyze_match() function was calling _ollama_job_summary() for every job scoring >=0.50, even during batch re-analysis where existing summaries could be reused. The skip_summary flag cuts this to zero in batch mode.
+
+3. **Context score caching**: All 295 jobs already had LLM-generated context scores from a prior bulk_analyze_cloud.py run. analyze_match() correctly detects and reuses these (job.match.context.score), avoiding redundant LLM calls.
+
+4. **Cover letters are template-based**: cover_letter_generator.py uses role-type templates (no LLM), so generating 140 cover letters is near-instant. Only CV experience section needs LLM.
+
+5. **Fallback never triggered**: The Ollama fallback was configured but never activated. Mistral-tiny handled the entire batch without a single rate limit or timeout.

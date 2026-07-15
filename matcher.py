@@ -256,6 +256,28 @@ SKILL_SYNONYMS = {
 }
 
 
+# Common job-extracted terms that are too generic/ambiguous to be treated as skills.
+NON_SKILL_FILTER: set[str] = {
+    "make", "less",
+    "problem solving", "creative", "innovation", "innovative",
+    "interpersonal", "communication", "teamwork", "leadership",
+    "time management", "critical thinking", "analytical",
+    "analytical skills", "attention to detail", "problem solver",
+    "proactive", "self motivated", "self-starter", "fast learner",
+    "adaptability", "flexible", "multitasking", "multitask",
+    "organizational", "organized", "planning", "prioritization",
+    "customer service", "presentation", "presentation skills",
+    "negotiation", "mentoring",
+    "marketing", "sales", "administration", "management",
+    "operations", "strategy", "business development",
+}
+
+
+def _is_non_skill(skill_name: str) -> bool:
+    """Check if skill name is in non-skill filter (case-insensitive)."""
+    return skill_name.lower().strip() in NON_SKILL_FILTER
+
+
 def normalize_skill_name(name: str) -> str:
     """Normalize skill name for comparison."""
     return name.lower().strip().replace("-", " ").replace("_", " ")
@@ -357,6 +379,9 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict) -> dict:
     matched_weight = 0.0
 
     for job_skill in job_skills:
+        # Skip non-skill terms (too generic/ambiguous)
+        if _is_non_skill(job_skill):
+            continue
         level = get_user_skill_level(user_skills, job_skill)
         total_weight += 1.0
 
@@ -717,32 +742,24 @@ def _ollama_context_score(job_description: str, persona_summary: str) -> dict | 
 Score the alignment on 0-100 (0 = completely misaligned, 100 = perfect fit).
 Consider: work philosophy, values, creative vs corporate culture, autonomy, local-first/open-source ethos, multi-disciplinary creative-engineer fit.
 
+Note: The candidate is highly pragmatic in professional environments. Their personal ethos (e.g., running local AI, private agents, local-first workflows) represents their independent creative ideals and personal research preferences, but they are fully open to, and capable of, working with standard enterprise cloud services, third-party APIs, and corporate workflows. Do not penalize the score simply because a job uses cloud/enterprise systems instead of local-first tools; instead, focus on whether the candidate's core problem-solving ethos (e.g., reducing friction, automating pipelines, bridging design and engineering) aligns with the job's requirements.
+
 Respond ONLY with JSON:
 {{"score": <number 0-100>, "reasoning_en": "<detailed explanation in English — as long as needed to justify the score>", "reasoning_ja": "<日本語での説明 — スコアの根拠を詳しく書く>"}}
 
 The reasoning should explain WHY this score, citing specific aspects of the job and candidate profile. Length is up to your judgment — write more for complex/nuanced cases, less for obvious ones. Be specific about what aligns or misaligns.
 """
 
-    payload = {
-        "model": _OLLAMA_CTX_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a career alignment scoring engine. Output ONLY valid JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "keep_alive": _OLLAMA_CTX_KEEP_ALIVE,
-    }
-
     try:
-        resp = _requests.post(
-            _OLLAMA_CTX_ENDPOINT,
-            json=payload,
-            timeout=_OLLAMA_CTX_TIMEOUT,
+        from llm_client import call_llm as _call_llm
+        content = _call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a career alignment scoring engine. Output ONLY valid JSON.",
+            temperature=0.1,
+            max_tokens=4096,
         )
-        resp.raise_for_status()
-        content = resp.json().get("message", {}).get("content", "")
 
-        import json
+        import json, re
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
@@ -971,10 +988,11 @@ def calculate_title_relevance(title: str) -> float:
         
     return 1.0
 
-def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
+def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_summary: bool = False) -> dict:
     """
     Run all match analyses and return combined result.
     Pass custom weights via config['weights'] or weights parameter.
+    If skip_summary=True, skip LLM job summary generation (faster batch mode).
     """
     user_skills = load_user_skills()
     user_exp = load_user_experience()
@@ -986,7 +1004,12 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     job_salary = analysis.get("salary", {})
     job_location = job.get("location", "")
     job_description = job.get("description", "") or job.get("snippet", "")
-    if not job_description:
+
+    # Detect if description is genuinely missing (< 100 chars means nothing useful)
+    description_missing = not job_description or len(job_description.strip()) < 100
+
+    if description_missing:
+        # Build a minimal pseudo-description from metadata only (for partial scoring)
         parts = [job.get("title", ""), job.get("company", "")]
         if job_skills:
             parts.append("Skills: " + ", ".join(job_skills))
@@ -1004,16 +1027,21 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     exp_match = calculate_experience_match(job_level, user_exp)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
-    # Always use Ollama LLM for context scoring (not TF-IDF fallback)
-    persona = _load_persona_summary()
-    if persona and job_description:
-        llm_ctx = _ollama_context_score(job_description, persona)
-        if llm_ctx:
-            ctx_match = llm_ctx
-        else:
-            ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if Ollama fails
+    # Check for pre-existing LLM context score from batch analysis
+    existing_ctx = job.get("match", {}).get("context", {})
+    if isinstance(existing_ctx, dict) and "score" in existing_ctx:
+        ctx_match = existing_ctx
     else:
-        ctx_match = calculate_context_match(job_description)
+        # Use LLM for context scoring (or TF-IDF fallback)
+        persona = _load_persona_summary()
+        if persona and job_description:
+            llm_ctx = _ollama_context_score(job_description, persona)
+            if llm_ctx:
+                ctx_match = llm_ctx
+            else:
+                ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if Ollama fails
+        else:
+            ctx_match = calculate_context_match(job_description)
 
     # Weighted composite — accept custom weights from config or parameter
     w = weights or config.get("weights", DEFAULT_WEIGHTS)
@@ -1049,10 +1077,10 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     else:
         tier = "🔴 Weak Match"
 
-    # A) Generate bilingual job summary via LLM for 50%+ matches
+    # A) Generate bilingual job summary via LLM for 50%+ matches (skippable for batch mode)
     summary_en = ""
     summary_ja = ""
-    if composite >= 0.50 and job_description and len(job_description) >= 50:
+    if not skip_summary and composite >= 0.50 and job_description and len(job_description) >= 50:
         summary = _ollama_job_summary(job_description)
         if summary:
             summary_en = summary.get("summary_en", "")
@@ -1061,6 +1089,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None) -> dict:
     return {
         "composite_score": round(composite, 2),
         "tier": tier,
+        "description_missing": description_missing,
         "skills": skill_match,
         "experience": exp_match,
         "location": loc_match,
@@ -1129,6 +1158,19 @@ context_score: {int(match.get('context_score', 0) * 100)}
 url: "{url}"{cv_link}{cl_link}
 ---"""
 
+    # Warning banner if description was missing
+    description_missing = match.get("description_missing", False)
+    desc_warning = []
+    if description_missing:
+        desc_warning = [
+            f"",
+            f"> [!WARNING]",
+            f"> **⚠️ 求人説明文が取得できませんでした / Job description unavailable**",
+            f"> スコアはタイトル・会社名・メタデータのみをもとにした推定値です。信頼性は低いため参考程度にとどめてください。",
+            f"> *(Scores are estimated from title/company/metadata only — treat as unreliable.)*",
+            f"",
+        ]
+
     lines = [
         frontmatter,
         f"",
@@ -1136,6 +1178,7 @@ url: "{url}"{cv_link}{cl_link}
         f"**Company:** {company}  |  **Location:** {location}",
         f"**URL:** {url}",
         f"",
+        *desc_warning,
         f"## 🎯 Overall Match: {match['tier']} ({score_pct}%)",
         f"",
         f"---",

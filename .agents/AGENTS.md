@@ -119,3 +119,67 @@ update the profile files first, then verify the generators still reference them 
 This repo was not pushed regularly during the July 2026 session.
 When pushing, remember to check `git status` — `00_saved/` and `10_output/` are untracked
 (not in `.gitignore` by default — confirm before committing large output directories).
+
+---
+
+## 2026-07-14 追加ルール
+
+### 9. 説明文なしのジョブはマッチ分析しない
+
+説明文 (`description`) が空のジョブに対して LLM 分析を実行すると、
+スコアが過剰に高い/低い値になり、ミスリードを引き起こす。
+
+`run.py` では以下のガードが実装済み:
+- 説明文が空 → LLM 分析・サマリー生成・CV/CL 生成を全てスキップ
+- パイプライン終了時に WARNING 一覧を出力
+
+説明文が取れていないジョブを再分析したい場合は `re_scrape_morgan.py` を参考に
+対象ジョブ専用の強制再スクレイプスクリプトを作成すること。
+
+### 10. Reed の説明文取得は requests + JSON-LD が正解
+
+Reed のジョブページでは `<script type="application/ld+json">` に
+完全な `JobPosting` スキーマが含まれている。
+
+Playwright を使う必要はない。`requests` で同期取得し BeautifulSoup でパースする:
+
+```python
+resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0 ..."})
+soup = BeautifulSoup(resp.text, "html.parser")
+for tag in soup.find_all("script", type="application/ld+json"):
+    data = json.loads(tag.string or "{}")
+    if data.get("@type") == "JobPosting":
+        description = data.get("description", "")
+        break
+```
+
+### 11. プロファイル MD が CV の Single Source of Truth
+
+`cv_generator.py` に PROFILE / CORE STRENGTHS / TECHNICAL TOOLKIT を直書きしない。
+これらは `00_Kazuki/career/cv/profile/{role_type}.md` の各セクションから動的ロードする:
+
+```
+## Profile        → get_profile(role_type)
+## Core Strengths → get_strengths(role_type)
+## Technical Toolkit → get_toolkit(role_type)   ← 2026-07-14 追加
+```
+
+`## Technical Toolkit` セクションがない場合は `DEFAULT_TECHNICAL_TOOLKIT` にフォールバック。
+新しいロールタイプを追加する場合は `.md` ファイルを追加するだけでよい。
+
+### 12. LLM の挙動はソースデータで制御する（プロンプトハックより優先）
+
+LLM の分析結果がおかしい場合、まずプロンプトに `Note: ...` を追加したくなるが、
+**ソースデータ（ethos.md / profile/*.md）を正しく記述することを優先すること。**
+
+例: コンテキスト分析が「ローカルファーストとエンタープライズは相容れない」と判断した場合
+→ `ethos.md` に `Professional Pragmatism` セクションを追加して事実を明示する
+→ プロンプトのガイドライン注記は補助として残してよい
+
+### 13. python3 コマンドがターミナルで詰まる場合の回避策
+
+バックグラウンドタスクで `python3 -c "..."` が「Last progress: never」で詰まる場合:
+- `grep_search` を使い JSON を直接検索（python3 なしで確認）
+- `view_file` で JSON の先頭数十行を直接読む
+- `RunPersistent: true` のターミナルを使い回す（一度確立した Terminal ID は安定している）
+- `WaitMsBeforeAsync` は 8000ms 以上に設定する

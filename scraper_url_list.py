@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import requests
+import fcntl
 from datetime import datetime
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
@@ -13,6 +14,19 @@ OUTPUT_FILE = os.path.join(SAVED_DIR, "url_list_jobs.json")
 
 OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434/api/chat")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")
+
+
+def _try_acquire_lock(name="url_list_jobs"):
+    """Try to acquire an exclusive file lock (non-blocking).
+    Returns the lock file handle (keep open while locked) or None if already locked."""
+    lock_path = f"/tmp/jis_{name}.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_file
+    except (IOError, OSError, BlockingIOError):
+        lock_file.close()
+        return None
 
 def extract_job_from_text(text: str) -> dict:
     prompt = f"""
@@ -82,6 +96,41 @@ def get_source_site(url: str) -> str:
     elif "glassdoor" in domain:
         return "Glassdoor"
     return domain.replace("www.", "")
+
+def normalize_url(url: str) -> str:
+    """Normalize URL for robust duplicate detection.
+
+    - Lowercase scheme + netloc (domain)
+    - Remove trailing slash from path
+    - Strip known tracking parameters (Indeed, LinkedIn, etc.)
+    - Sort remaining query params so different ordering doesn't cause dup false-negatives
+    """
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    netloc = parts.netloc.lower()
+    path = parts.path.rstrip("/") or "/"
+
+    # Strip tracking params — keep only the core job-identifying param
+    TRACKING_PARAMS = {
+        # Indeed
+        "from", "SP", "pos", "sid", "tk", "rq", "rl", "vjs", "iaai", "ad",
+        # LinkedIn
+        "refId", "trk", "trkInfo", "utm_source", "utm_medium", "utm_campaign",
+        # Generic
+        "utm_content", "utm_term", "gclid", "fbclid", "msclkid",
+    }
+    if parts.query:
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        kept = [(k, v) for k, v in pairs if k not in TRACKING_PARAMS]
+        kept.sort()
+        query = urlencode(kept)
+    else:
+        query = ""
+
+    return urlunsplit((scheme, netloc, path, query, ""))
+
 
 def get_source_key(url: str) -> str:
     """Lowercase source key for the source field (used in reports/filters)."""
@@ -180,8 +229,16 @@ async def scrape_urls(urls):
     return jobs
 
 def main():
+    # ── File lock: prevent concurrent access to url_list_jobs.json ──
+    lock = _try_acquire_lock()
+    if lock is None:
+        print("⚠ Another process is already using url_list_jobs.json (scrape or analysis).")
+        print("  Wait for it to finish before running again.")
+        return
+
     if not os.path.exists(URL_LIST_FILE):
         print(f"File not found: {URL_LIST_FILE}")
+        lock.close()
         return
 
     with open(URL_LIST_FILE, "r", encoding="utf-8") as f:
@@ -189,16 +246,32 @@ def main():
 
     # Extract all http/https URLs
     urls = re.findall(r'(https?://[^\s)\]]+)', content)
-    # De-duplicate while preserving order
-    unique_urls = list(dict.fromkeys(urls))
-    
-    print(f"Found {len(unique_urls)} URLs in url-list.md")
+
+    # De-duplicate using normalized URL (strips tracking params, normalizes case/slash)
+    # so "indeed.com/viewjob?jk=abc&from=xxx" and "indeed.com/viewjob?jk=abc" match
+    seen = set()
+    unique_urls = []
+    removed = 0
+    for u in urls:
+        key = normalize_url(u)
+        if key not in seen:
+            seen.add(key)
+            unique_urls.append(u)
+        else:
+            removed += 1
+
+    print(f"Found {len(urls)} URLs in url-list.md")
+    if removed:
+        print(f"  → Removed {removed} duplicate(s) after URL normalization (tracking params stripped, case/slash normalized)")
+    print(f"  → {len(unique_urls)} unique URLs to process")
     
     if unique_urls:
         asyncio.run(scrape_urls(unique_urls))
         print("\nDone.")
     else:
         print("No URLs found in the markdown file.")
+
+    lock.close()
 
 if __name__ == "__main__":
     main()
