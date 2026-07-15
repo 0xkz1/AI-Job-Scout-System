@@ -1,15 +1,17 @@
 """Unified LLM client — supports Ollama (local), Mistral, and OpenRouter (cloud).
 
 Provider selection:
-  env ANALYSIS_PROVIDER   = "mistral" | "openrouter" | "ollama" (default)
+  env ANALYSIS_PROVIDER   = "mistral" | "stepfun" | "openrouter" | "ollama" (default)
   env FALLBACK_PROVIDERS  = comma-separated chain to try in order when the
                             primary hits rate limit / 5xx / missing API key,
-                            e.g. "openrouter,ollama"
+                            e.g. "stepfun,ollama"
   env FALLBACK_PROVIDER   = legacy single-provider form (used when
                             FALLBACK_PROVIDERS is unset)
   env MISTRAL_MODEL       = model for the mistral provider (else CLOUD_MODEL, else mistral-tiny)
-  env OPENROUTER_MODEL    = model for the openrouter provider (else CLOUD_MODEL,
-                            else stepfun/step-3.5-flash)
+  env STEPFUN_MODEL       = model for the stepfun provider (else CLOUD_MODEL, else step-3.5-flash)
+  env STEPFUN_API_KEY     = StepFun direct API key (native endpoint, not OpenRouter)
+  env STEPFUN_REGION      = "international" (default, api.stepfun.ai) | "china" (api.stepfun.com)
+  env OPENROUTER_MODEL    = model for the openrouter provider (else CLOUD_MODEL)
   env OLLAMA_MODEL        = model for the ollama provider
   env CLOUD_MODEL         = shared model override (legacy)
   env CLOUD_API_KEY       = optional key override (else MISTRAL_API_KEY / OPENROUTER_API_KEY)
@@ -17,8 +19,8 @@ Provider selection:
 Chained fallback:
   call_llm() tries the primary provider; on a transient error (429 rate limit,
   5xx server error, timeout) or a missing API key it moves down the fallback
-  chain. Set FALLBACK_PROVIDERS=openrouter,ollama to spill over to a cheap
-  cloud model first and local Ollama last.
+  chain. Set FALLBACK_PROVIDERS=stepfun,ollama to spill over to a cheap cloud
+  model first and local Ollama last.
 
 Usage:
   from llm_client import call_llm
@@ -55,7 +57,7 @@ def _is_transient_error(e: Exception) -> bool:
     markers = [
         "429", "rate limit", "too many requests", "quota",
         "502", "503", "504", "500", "bad gateway", "service unavailable",
-        "timeout", "connection", "eof", "refused", "reset",
+        "timeout", "timed out", "connection", "eof", "refused", "reset",
     ]
     return any(m in err_str for m in markers)
 
@@ -127,6 +129,8 @@ def _call_provider(
     """Route to the appropriate provider implementation."""
     if provider == "mistral":
         return _call_mistral(messages, system_prompt, temperature, max_tokens, retries)
+    elif provider == "stepfun":
+        return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries)
     elif provider == "openrouter":
         return _call_openrouter(messages, system_prompt, temperature, max_tokens, retries)
     else:
@@ -170,6 +174,48 @@ def _call_mistral(
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"Mistral API error after {retries+1} attempts: {e}")
+
+
+def _call_stepfun(
+    messages: list[dict],
+    system_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+) -> str:
+    """StepFun native API (OpenAI-compatible) — not routed via OpenRouter."""
+    api_key = os.environ.get("STEPFUN_API_KEY") or os.environ.get("CLOUD_API_KEY")
+    if not api_key:
+        raise ValueError("STEPFUN_API_KEY not set (nor CLOUD_API_KEY)")
+
+    region = os.environ.get("STEPFUN_REGION", "international").strip().lower()
+    base_url = "https://api.stepfun.com/v1" if region == "china" else "https://api.stepfun.ai/v1"
+    model = os.environ.get("STEPFUN_MODEL") or os.environ.get("CLOUD_MODEL", "step-3.5-flash")
+    full_messages = _build_messages(messages, system_prompt)
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": full_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"StepFun API error after {retries+1} attempts: {e}")
 
 
 def _call_openrouter(
