@@ -860,6 +860,9 @@ Respond ONLY with JSON:
                 data = json.loads(match.group())
                 summary_en = data.get("summary_en", "")
                 summary_ja = data.get("summary_ja", "")
+                # LLMs occasionally nest the value (dict/list) — only accept strings
+                if not isinstance(summary_en, str) or not isinstance(summary_ja, str):
+                    continue
                 if summary_en or summary_ja:
                     return {"summary_en": summary_en, "summary_ja": summary_ja}
             except (json.JSONDecodeError, ValueError, TypeError):
@@ -1379,9 +1382,14 @@ url: "{url}"{cv_link}{cl_link}
         f"",
     ])
 
-    # Job Summary section (bilingual)
-    summary_en = match.get("summary_en", "")
-    summary_ja = match.get("summary_ja", "")
+    # Job Summary section (bilingual) — coerce to str: legacy data may hold
+    # non-string values from LLM JSON quirks, and "\n".join() crashes on those
+    summary_en = match.get("summary_en", "") or ""
+    summary_ja = match.get("summary_ja", "") or ""
+    if not isinstance(summary_en, str):
+        summary_en = ""
+    if not isinstance(summary_ja, str):
+        summary_ja = ""
     if summary_en or summary_ja:
         lines.extend([
             f"## 📋 求人概要 (Job Summary)",

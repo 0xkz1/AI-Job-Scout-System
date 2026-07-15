@@ -666,6 +666,12 @@ async def main():
                         pass
                 print(f"  ✅ Generated {summary_done} job summaries")
 
+            # Checkpoint save BEFORE report/CV generation: LLM context scores and
+            # summaries are expensive — a crash below must not lose them.
+            raw_path = os.path.join(output_dir, "_analyzed.json")
+            with open(raw_path, "w") as f:
+                json.dump(analyzed, f, indent=2, ensure_ascii=False, default=str)
+
             # Apply filters (title exclusion etc.) even in reanalyze mode
             passed, filtered_out = filter_jobs(analyzed, config)
             print_filter_summary(passed, filtered_out)
