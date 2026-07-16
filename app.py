@@ -92,25 +92,30 @@ st.markdown("""
 [data-testid="stAppViewContainer"] {
     --primary-color: #944040;
 }
-/* Theme toggle: pin into the header bar, left of the ⋮ menu.
-   Streamlit gives the widget container class st-key-<key>. */
-.st-key-theme_toggle {
-    position: fixed;
-    top: 0.45rem;
-    right: 3.4rem;
-    z-index: 999991;
-    width: auto;
-}
-.st-key-theme_toggle button {
-    border: none;
-    background: transparent;
-    font-size: 1.05rem;
-    padding: 0.15rem 0.4rem;
-    min-height: 0;
-}
-/* Hide the Deploy button (meaningless for a local app) so the toggle
-   sits directly next to the ⋮ menu */
+/* Hide the Deploy button (meaningless for a local app) */
 .stAppDeployButton { display: none; }
+/* Accent survives the NATIVE theme picker (⋮ → Settings): the built-in
+   Light/Dark themes use Streamlit's default red primary, so pin #944040
+   on every primary-colored widget regardless of selected theme. */
+[data-baseweb="tab-highlight"] { background-color: #944040 !important; }
+[data-baseweb="checkbox"]:has(input[aria-checked="true"]) > span:first-of-type {
+    background-color: #944040 !important;
+    border-color: #944040 !important;
+}
+[data-baseweb="radio"]:has(input:checked) > div:first-of-type {
+    border-color: #944040 !important;
+    background-color: #944040 !important;
+}
+[data-baseweb="slider"] [role="slider"] {
+    background-color: #944040 !important;
+    border-color: #944040 !important;
+}
+[data-baseweb="input"]:focus-within,
+[data-baseweb="select"] > div:focus-within,
+[data-baseweb="textarea"]:focus-within {
+    border-color: #944040 !important;
+}
+.stProgress > div > div > div > div { background-color: #944040 !important; }
 /* Custom Title Style resembling Hermes Agent */
 .jis-title {
     text-align: left;
@@ -154,39 +159,9 @@ def run_scraper(site="indeed", pages=5):
 # Title & Tabs
 # ─────────────────────────────────────────────
 
-def _active_theme_base() -> str:
-    """The theme actually rendered in THIS browser session.
-
-    st.context.theme reports what the frontend is showing — the config
-    value (theme.base) can disagree with it when the browser picked a
-    theme via the settings menu or system preference, which made the
-    toggle icon/tooltip appear inverted.
-    """
-    try:
-        t = st.context.theme.type
-        if t in ("light", "dark"):
-            return t
-    except Exception:
-        pass
-    return st._config.get_option("theme.base") or "dark"
-
-
-def _toggle_theme():
-    """Flip theme.base at runtime. Only `base` changes — primaryColor
-    (#944040) is an independent option and survives the toggle in both
-    modes. set_option is server-global, which is fine for this
-    single-user app."""
-    new_base = "light" if _active_theme_base() == "dark" else "dark"
-    st._config.set_option("theme.base", new_base)
-
-
-_is_dark = _active_theme_base() == "dark"
-st.button(
-    "☀️" if _is_dark else "🌙",
-    on_click=_toggle_theme,
-    help="Switch to Light" if _is_dark else "Switch to Dark",
-    key="theme_toggle",
-)
+# Theme switching lives in the native ⋮ menu (Settings → "Choose app
+# theme"). The CSS block above pins the #944040 accent regardless of
+# which theme (Custom/Light/Dark) is selected there.
 st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
 tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
