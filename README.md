@@ -1,4 +1,4 @@
-# Job Intelligence System
+# AI Job Scout System
 
 **An end-to-end job search pipeline** — scrape hundreds of listings, score them against your profile with an LLM, and auto-generate tailored CVs and cover letters for every match. Cheap cloud models do the heavy batches; a local Ollama model is always there as the final fallback.
 
@@ -434,78 +434,78 @@ A running record of non-obvious decisions, bugs, and design pivots — written f
 Kazuki identified that **Prototyping** and **Agile** are genuinely separate competencies in his profile, not synonyms of each other. Prototyping is a core creative/technical practice (physical + digital); Agile is a process methodology he uses but doesn't specialize in. This is why they have different proficiency levels (Advanced vs Intermediate) in `skills.md`.
 ---
 
-## 2-Tier LLM Strategy (2026-07-15)
+## 2段階LLM戦略 (2026-07-15)
 
-### Background
+### 背景
 
-The pipeline originally used **Ollama (Gemma-4-26b)** exclusively for all LLM tasks: skill extraction, context/ethos scoring, CV generation, and job summaries. This worked but was **slow** — each Ollama call took 30-120 seconds, making full pipeline runs take hours. Batch operations (e.g. generating CVs for 140 jobs) could take 3-4 hours.
+当初パイプラインは全LLM処理（スキル抽出、コンテキスト/エソス採点、CV生成、求人要約）に **Ollama (Gemma-4-26b)** のみを使用していた。これは動作するが**遅かった** — Ollama 1回あたり30-120秒かかり、フル実行で数時間を要した。バッチ処理（例: 140件のCV生成）は3-4時間かかることもあった。
 
-### Core Idea: Lightweight Cloud LLM First, Local Heavy LLM as Fallback
+### 核心: 軽量クラウドLLMを主軸に、ローカル重LLMはフォールバック
 
-For lightweight, high-volume tasks (CV generation, batch scoring), use a **cheap cloud LLM** as the primary provider. Only fall back to the **local heavy model (Ollama)** when the cloud API fails (rate limits, timeouts, 5xx errors). This cuts batch processing time from hours to minutes at trivial cost (~¥900 for 140 CVs).
+CV生成やバッチ採点など軽量・大量のタスクでは、**安価なクラウドLLM** を主要プロバイダとして使う。クラウドAPIが失敗した場合（レート制限、タイムアウト、5xxエラー）のみ **ローカル重モデル (Ollama)** にフォールバックする。これによりバッチ処理時間を数時間から数分に削減し、コストも微少（140件のCVで約¥900）。
 
-The cloud provider is **interchangeable** — any cheap, fast API (Mistral Tiny, GPT-4o mini, Gemini Flash, etc.) works. The strategy is provider-agnostic.
+クラウドプロバイダは **交換可能** — 安価で高速なAPIなら何でも動く（Mistral Tiny、GPT-4o mini、Gemini Flash 等）。本戦略はプロバイダ非依存である。
 
-**Architecture:**
+**アーキテクチャ:**
 
 ```
 ┌──────────────────────────────────────────────────┐
 │                llm_client.py                      │
-│         (Unified LLM client with fallback)        │
+│         (統合LLMクライアント + フォールバック)      │
 │                                                  │
-│  ANALYSIS_PROVIDER=<cloud>   (primary, cheap)    │
+│  ANALYSIS_PROVIDER=<cloud>   (主軸, 安価)         │
 │  CLOUD_MODEL=<lightweight model>                  │
-│  FALLBACK_PROVIDER=ollama   (auto on 429/5xx)    │
+│  FALLBACK_PROVIDER=ollama   (429/5xxで自動切替)    │
 │                                                  │
-│  All LLM calls go through call_llm():            │
-│  - _ollama_context_score()  -> context/ethos     │
-│  - _ollama_job_summary()     -> bilingual summary │
-│  - _generate_experience_ollama() -> CV experience │
+│  全LLM呼び出しは call_llam() 経由:               │
+│  - _ollama_context_score()  -> コンテキスト/エソス  │
+│  - _ollama_job_summary()     -> 日英バイリンガル要約 │
+│  - _generate_experience_ollama() -> CV職歴        │
 │                                                  │
-│  If cloud returns 429/5xx/timeout:                │
-│  -> Auto-retry on Ollama (gemma-4-26b)           │
+│  クラウドが429/5xx/タイムアウトを返した場合:       │
+│  -> Ollama (gemma-4-26b) で自動リトライ           │
 └──────────────────────────────────────────────────┘
 ```
 
-**.env configuration (provider-agnostic):**
+**.env 設定 (プロバイダ非依存):**
 
 ```bash
-ANALYSIS_PROVIDER=mistral          # or openrouter, openai, etc.
-CLOUD_MODEL=mistral-tiny           # any lightweight, cheap model
+ANALYSIS_PROVIDER=mistral          # openrouter, openai 等·でも可
+CLOUD_MODEL=mistral-tiny           # 軽量·安価なモデルなら何でも可
 FALLBACK_PROVIDER=ollama
-MISTRAL_API_KEY=<your-api-key>     # provider-specific key
+MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 ```
 
-**Code changes:**
+**コード変更点:**
 
-1. **matcher.py** — `analyze_match()` gained `skip_summary=True` parameter. In `--reanalyze` mode, this skips per-job LLM summary generation. This reduces 295 jobs × ~5s/job = ~25 minutes of API calls to zero during batch matching.
+1. **matcher.py** — `analyze_match()` に `skip_summary=True` パラメータ追加。`--reanalyze` モードで求人ごとのLLM要約生成をスキップ。295件 × ~5s/件 = ~25分のAPI呼び出しをバッチマッチ時にゼロ化。
 
-2. **run.py** — `--reanalyze` path now calls `analyze_match(job, config, skip_summary=True)`.
+2. **run.py** — `--reanalyze` パスが `analyze_match(job, config, skip_summary=True)` を呼ぶよう変更。
 
-3. **llm_client.py** — Unified LLM client (already existed, documented here). Routes to any cloud provider / Ollama based on env vars. Auto-fallback on transient errors (429, 5xx, timeout).
+3. **llm_client.py** — 統合LLMクライアント（既存、ここに文書化）。環境変数に基づき任意のクラウドプロバイダ / Ollama にルーティング。429/5xx/タイムアウトで自動フォールバック。
 
-4. **cover_letter_generator.py** — Template-based, no LLM needed. Instant.
+4. **cover_letter_generator.py** — テンプレート式、LLM不要。即座に生成完了。
 
-### Performance Results (2026-07-15)
+### パフォーマンス結果 (2026-07-15)
 
-| Metric | Ollama Only | Lightweight Cloud |
-|--------|-------------|-------------------|
-| CV generation (1 job) | ~60-120s | ~3-5s |
-| 140 CVs + 140 CLs batch | ~3-4 hours | **~8 minutes** |
-| Cloud rate limit hits | N/A (local) | 0 |
-| Ollama fallback triggered | N/A | 0 times |
-| API cost | free | ~900 JPY (~5 GBP) |
+| 指標 | Ollama単独 | 軽量クラウド |
+|------|-----------|------------|
+| CV生成 (1件) | ~60-120秒 | ~3-5秒 |
+| 140件のCV+CL一括 | ~3-4時間 | **~8分** |
+| クラウドレート制限 | N/A (ローカル) | 0回 |
+| Ollamaフォールバック発動 | N/A | 0回 |
+| APIコスト | 無料 | ~900円 (~£5) |
 
-*(Benchmarked with Mistral Tiny; other lightweight models should give similar results.)*
+*(Mistral Tiny で計測。他の軽量モデルでも同程度の結果が期待できる。)*
 
-### Key Lessons
+### 重要な知見
 
-1. **Use the cheapest cloud tier for batch tasks**: Lightweight models (e.g. Mistral Tiny) have significantly more generous rate limits than mid-tier models (e.g. Mistral Small Latest). For batch CV/CL generation where quality bar is "good enough", the cheapest tier is the right choice. Mid-tier throttles quickly and is better for single-shot high-quality tasks.
+1. **バッチ処理には最安クラウドティアを使う**: 軽量モデル（例: Mistral Tiny）は中位ティア（例: Mistral Small Latest）よりレート制限が大幅に緩い。「十分な品質」で済むバッチCV/CL生成には最安ティアが正解。中位ティアはすぐ制限に掛かり、単発高品質タスク向け。
 
-2. **`skip_summary` optimization**: `analyze_match()` was calling `_ollama_job_summary()` for every job scoring ≥0.50, even during batch re-analysis where existing summaries could be reused. The `skip_summary` flag cuts this to zero in batch mode.
+2. **`skip_summary` 最適化**: `analyze_match()` はスコア≥0.50の全求人に対し `_ollama_job_summary()` を呼んでいた。既存要約を再利用できるバッチ再解析時にも。`skip_summary` フラグでこれをゼロ化。
 
-3. **Context score caching**: `analyze_match()` correctly detects and reuses cached LLM context scores (`job.match.context.score`), avoiding redundant LLM calls.
+3. **コンテキストスコアキャッシュ**: `analyze_match()` はキャッシュ済みLLMコンテキストスコア (`job.match.context.score`) を検出・再利用し、冗長なLLM呼び出しを回避。
 
-4. **Cover letters are template-based**: `cover_letter_generator.py` uses role-type templates (no LLM), so generating 140 cover letters is near-instant. Only CV experience section needs LLM.
+4. **カバーレターはテンプレート式**: `cover_letter_generator.py` はロール型テンプレートを使用（LLM不要）。140件でもほぼ瞬時に完了。LLMが必要なのはCV職歴セクションのみ。
 
-5. **Fallback never triggered**: The Ollama fallback was configured but never activated. The cloud model handled the entire batch without a single rate limit or timeout — but the fallback is there as a safety net.
+5. **フォールバック未発動**: Ollamaフォールバックを設定したが一度も発動しなかった。クラウドモデルがバッチ全体を1回のレート制限・タイムアウトなしで処理 — ただしフォールバックはセーフティネットとして常備。

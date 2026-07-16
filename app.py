@@ -45,7 +45,7 @@ MIN_SALARY_GBP = 30000
 
 # --- Page Setup (must be first Streamlit call) ---
 st.set_page_config(
-    page_title="Job Scraper Pipeline",
+    page_title="AI Job Scout System",
     page_icon="🔍",
     layout="wide",
 )
@@ -135,7 +135,7 @@ def run_scraper(site="indeed", pages=5):
 # Title & Tabs
 # ─────────────────────────────────────────────
 
-st.markdown('<h1 class="jis-title">Job Intelligence System</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
 tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
 
