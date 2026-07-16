@@ -825,12 +825,25 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
                 except Exception as e:
                     st.error(f"PDF conversion failed: {e}")
 
-            # List every version (newest first) as a download link.
+            # List every version (newest first) as a download link. The
+            # highest-numbered version is only labeled "latest" if it was
+            # actually generated from the CURRENT .md content — otherwise the
+            # .md was edited since that PDF was made and the link is stale
+            # (this is exactly the bug that shipped once: editing the CV and
+            # re-downloading the old, unconverted PDF without noticing).
             versions = _pdf_versions(md_path.stem)
             if versions:
-                latest_n = versions[-1][0]
+                latest_n, latest_path = versions[-1]
+                current_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+                meta = _load_pdf_meta()
+                is_current = meta.get(latest_path.name) == current_sha
+                if not is_current:
+                    st.caption(f"⚠️ {label} source .md has changed since v{latest_n} — click Convert to update")
                 for n, pdf_path in reversed(versions):
-                    suffix = " (latest)" if n == latest_n else ""
+                    if n == latest_n:
+                        suffix = " (latest)" if is_current else " (outdated)"
+                    else:
+                        suffix = ""
                     link = _static_pdf_link(pdf_path, f"⬇ {label} v{n}{suffix}")
                     st.markdown(link, unsafe_allow_html=True)
 
