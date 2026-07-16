@@ -47,4 +47,4 @@ playwright-report/
 test-results/
 
 # Debug output
-debug_*.py
+debug_*.pystatic/

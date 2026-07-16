@@ -92,6 +92,25 @@ st.markdown("""
 [data-testid="stAppViewContainer"] {
     --primary-color: #944040;
 }
+/* Theme toggle: pin into the header bar, left of the ⋮ menu.
+   Streamlit gives the widget container class st-key-<key>. */
+.st-key-theme_toggle {
+    position: fixed;
+    top: 0.45rem;
+    right: 3.4rem;
+    z-index: 999991;
+    width: auto;
+}
+.st-key-theme_toggle button {
+    border: none;
+    background: transparent;
+    font-size: 1.05rem;
+    padding: 0.15rem 0.4rem;
+    min-height: 0;
+}
+/* Hide the Deploy button (meaningless for a local app) so the toggle
+   sits directly next to the ⋮ menu */
+.stAppDeployButton { display: none; }
 /* Custom Title Style resembling Hermes Agent */
 .jis-title {
     text-align: left;
@@ -135,26 +154,40 @@ def run_scraper(site="indeed", pages=5):
 # Title & Tabs
 # ─────────────────────────────────────────────
 
+def _active_theme_base() -> str:
+    """The theme actually rendered in THIS browser session.
+
+    st.context.theme reports what the frontend is showing — the config
+    value (theme.base) can disagree with it when the browser picked a
+    theme via the settings menu or system preference, which made the
+    toggle icon/tooltip appear inverted.
+    """
+    try:
+        t = st.context.theme.type
+        if t in ("light", "dark"):
+            return t
+    except Exception:
+        pass
+    return st._config.get_option("theme.base") or "dark"
+
+
 def _toggle_theme():
     """Flip theme.base at runtime. Only `base` changes — primaryColor
     (#944040) is an independent option and survives the toggle in both
     modes. set_option is server-global, which is fine for this
     single-user app."""
-    new_base = "light" if st._config.get_option("theme.base") == "dark" else "dark"
+    new_base = "light" if _active_theme_base() == "dark" else "dark"
     st._config.set_option("theme.base", new_base)
 
 
-_title_col, _theme_col = st.columns([0.93, 0.07])
-with _title_col:
-    st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
-with _theme_col:
-    _is_dark = st._config.get_option("theme.base") == "dark"
-    st.button(
-        "☀️" if _is_dark else "🌙",
-        on_click=_toggle_theme,
-        help="Switch to light theme" if _is_dark else "Switch to dark theme",
-        key="theme_toggle",
-    )
+_is_dark = _active_theme_base() == "dark"
+st.button(
+    "☀️" if _is_dark else "🌙",
+    on_click=_toggle_theme,
+    help="Switch to Light" if _is_dark else "Switch to Dark",
+    key="theme_toggle",
+)
+st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
 tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
 
@@ -656,6 +689,8 @@ def save_kanban_data(data):
 
 # --- PDF export (CV / Cover Letter) ---
 PDF_DIR = OUTPUT_DIR / "20_pdfs"
+# Static-serving copy dir: files under ./static are served at <app>/app/static/
+STATIC_PDF_DIR = SCRAPER_DIR / "static" / "pdfs"
 CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
 
@@ -735,17 +770,20 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
                     st.error(f"PDF conversion failed: {e}")
             ready = st.session_state.get(state_key)
             if ready and Path(ready).exists():
-                # on_click="ignore": a download click must NOT trigger a
-                # rerun — inside a popover the rerun closes the popover and
-                # aborts the browser's file transfer mid-download (stuck
-                # "Unconfirmed ....crdownload" that never opens).
-                st.download_button(
-                    f"⬇ {Path(ready).name}",
-                    data=Path(ready).read_bytes(),
-                    file_name=Path(ready).name,
-                    mime="application/pdf",
-                    key=f"dl_{key_prefix}_{label}",
-                    on_click="ignore",
+                # Serve via static file serving instead of st.download_button:
+                # download_button uses a session-bound in-memory media URL
+                # that reruns / websocket reconnects invalidate mid-transfer
+                # (the stuck "Unconfirmed ....crdownload" symptom). A static
+                # URL is a plain file GET — nothing can invalidate it.
+                import shutil
+                import urllib.parse
+                STATIC_PDF_DIR.mkdir(parents=True, exist_ok=True)
+                static_copy = STATIC_PDF_DIR / Path(ready).name
+                shutil.copyfile(ready, static_copy)
+                href = "./app/static/pdfs/" + urllib.parse.quote(static_copy.name)
+                st.markdown(
+                    f'<a href="{href}" download="{static_copy.name}" target="_self">⬇ {static_copy.name}</a>',
+                    unsafe_allow_html=True,
                 )
                 st.caption(f"saved: 20_pdfs/{Path(ready).name}")
 
