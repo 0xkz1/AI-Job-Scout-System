@@ -135,7 +135,26 @@ def run_scraper(site="indeed", pages=5):
 # Title & Tabs
 # ─────────────────────────────────────────────
 
-st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
+def _toggle_theme():
+    """Flip theme.base at runtime. Only `base` changes — primaryColor
+    (#944040) is an independent option and survives the toggle in both
+    modes. set_option is server-global, which is fine for this
+    single-user app."""
+    new_base = "light" if st._config.get_option("theme.base") == "dark" else "dark"
+    st._config.set_option("theme.base", new_base)
+
+
+_title_col, _theme_col = st.columns([0.93, 0.07])
+with _title_col:
+    st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
+with _theme_col:
+    _is_dark = st._config.get_option("theme.base") == "dark"
+    st.button(
+        "☀️" if _is_dark else "🌙",
+        on_click=_toggle_theme,
+        help="Switch to light theme" if _is_dark else "Switch to dark theme",
+        key="theme_toggle",
+    )
 
 tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
 
