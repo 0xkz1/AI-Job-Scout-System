@@ -435,6 +435,10 @@ NON_SKILL_FILTER: set[str] = {
     # Broad industry terms
     "marketing", "sales", "administration", "management",
     "operations", "strategy", "business development",
+    # Generic nouns an LLM sometimes hallucinates as "skills" from a job
+    # title or misextracted description (e.g. a scraper bug that captured
+    # a university's "About Us" boilerplate instead of the actual posting)
+    "college", "coordinator", "experiment", "university", "department",
 }
 
 

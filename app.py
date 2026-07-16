@@ -716,12 +716,17 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
                     st.error(f"PDF conversion failed: {e}")
             ready = st.session_state.get(state_key)
             if ready and Path(ready).exists():
+                # on_click="ignore": a download click must NOT trigger a
+                # rerun — inside a popover the rerun closes the popover and
+                # aborts the browser's file transfer mid-download (stuck
+                # "Unconfirmed ....crdownload" that never opens).
                 st.download_button(
                     f"⬇ {Path(ready).name}",
                     data=Path(ready).read_bytes(),
                     file_name=Path(ready).name,
                     mime="application/pdf",
                     key=f"dl_{key_prefix}_{label}",
+                    on_click="ignore",
                 )
                 st.caption(f"saved: 20_pdfs/{Path(ready).name}")
 

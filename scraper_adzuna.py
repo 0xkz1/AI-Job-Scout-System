@@ -138,6 +138,17 @@ async def _fetch_job_description(page, job_url: str) -> str:
         await page.wait_for_timeout(2000)
 
         desc = await page.evaluate("""() => {
+            // textContent includes the raw source of <script>/<style> tags,
+            // and '[data-js*="description"]' can match Adzuna's tracking
+            // scripts (they tag JS hooks with data-js site-wide) — this
+            // once caused the "description" to be a client-side analytics
+            // snippet (window.addEventListener(...tokenData...)) instead
+            // of the actual job posting. Reject non-content tags and any
+            // text that looks like inline JS rather than prose.
+            const looksLikeJs = (t) => /^\\s*(window\\.|var |const |let |function\\s*\\(|\\(function|document\\.)/.test(t)
+                || t.includes('addEventListener') || t.includes('tokenData');
+            const isContentEl = (el) => !['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(el.tagName);
+
             // Adzuna detail page selectors
             const selectors = [
                 '[class*="job-description"]',
@@ -152,8 +163,10 @@ async def _fetch_job_description(page, job_url: str) -> str:
             for (const sel of selectors) {
                 const els = document.querySelectorAll(sel);
                 for (const el of els) {
-                    if (el.textContent.trim().length > 150) {
-                        return el.textContent.trim().slice(0, 5000);
+                    if (!isContentEl(el)) continue;
+                    const text = el.textContent.trim();
+                    if (text.length > 150 && !looksLikeJs(text)) {
+                        return text.slice(0, 5000);
                     }
                 }
             }
@@ -161,7 +174,7 @@ async def _fetch_job_description(page, job_url: str) -> str:
             const main = document.querySelector('main');
             if (main) {
                 const text = main.textContent.trim();
-                if (text.length > 200) return text.slice(0, 5000);
+                if (text.length > 200 && !looksLikeJs(text)) return text.slice(0, 5000);
             }
             return '';
         }""")

@@ -230,6 +230,12 @@ SKILL_SYNONYMS = {
     "art direction": "visual design",
     "visual communication": "visual design",
     # Workflow / methodology synonyms
+    "workflow": "workflow automation",
+    "workflows": "workflow automation",
+    "automation": "workflow automation",
+    "workflow optimization": "workflow automation",
+    "process automation": "workflow automation",
+    "pipeline": "workflow automation",
     "agile methodology": "agile",
     "agile development": "agile",
     "scrum": "agile",
@@ -1002,10 +1008,19 @@ DEFAULT_WEIGHTS = {
 }
 
 
-def calculate_title_relevance(title: str) -> float:
+def calculate_title_relevance(
+    title: str, context_score: float | None = None, context_source: str | None = None
+) -> float:
     """
     Check if the job title is relevant to target roles.
     Returns 1.0 if relevant, 0.0-0.1 if completely irrelevant.
+
+    context_score/context_source let a confident LLM read of the full
+    description (which understands e.g. "Specialist Technician" at an art
+    school is relevant even though "technician" isn't in target_words)
+    rescue titles the keyword whitelist doesn't recognize. The whitelist is
+    a blunt safety net for when there's no LLM signal to rely on — it
+    shouldn't override a full-context read that disagrees with it.
     """
     if not title:
         return 0.5
@@ -1040,11 +1055,15 @@ def calculate_title_relevance(title: str) -> float:
     has_exclusion = any(w in exclusion_words for w in words) or any(cw in title_lower for cw in construction_words)
     
     if has_exclusion:
-        return 0.0
-        
+        return 0.0  # Hard exclusion (nurse, driver, etc.) always applies
+
     if not has_target:
+        # No keyword hit — let a confident LLM context read rescue it
+        # before falling back to the harsh 0.1 penalty.
+        if context_source == "llm" and context_score is not None and context_score >= 0.6:
+            return 1.0
         return 0.1  # Low score for completely unrelated titles
-        
+
     return 1.0
 
 def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_summary: bool = False) -> dict:
@@ -1135,7 +1154,9 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     )
 
     # Title relevance filter
-    relevance = calculate_title_relevance(job.get("title", ""))
+    relevance = calculate_title_relevance(
+        job.get("title", ""), context_score=ctx_match.get("score"), context_source=ctx_source
+    )
     composite = composite * relevance
 
     # Determine tier

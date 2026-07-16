@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path("/media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System")
 sys.path.insert(0, str(ROOT))
 
-from analyzer import analyze_job, extract_skills_ollama
+from analyzer import analyze_job, extract_skills_ollama, _is_non_skill
 from matcher import analyze_match
 
 ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
@@ -65,8 +65,14 @@ def has_context_score(job: dict) -> bool:
 def has_llm_skills(job: dict) -> bool:
     """Check if job already has LLM-extracted skills (not just keyword)."""
     skills = job.get("analysis", {}).get("skills", [])
-    # LLM-extracted skills typically have 5+ items with proper casing
-    return len(skills) >= 5
+    # LLM-extracted skills typically have 5+ items with proper casing.
+    # A list dominated by generic non-skill words (e.g. "College",
+    # "Coordinator" — leaked from a bad description scrape or a title-only
+    # extraction) isn't real extraction; don't let it block re-extraction.
+    if len(skills) < 5:
+        return False
+    junk = sum(1 for s in skills if _is_non_skill(s))
+    return junk < len(skills) / 2
 
 def process_job(job: dict) -> dict:
     """Run LLM analysis on a single job. Returns updated job dict."""

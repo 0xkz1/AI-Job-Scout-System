@@ -95,21 +95,31 @@ async def _fetch_job_description(page, job_url: str) -> str:
         await page.wait_for_timeout(2000)
 
         desc = await page.evaluate("""() => {
+            // Guardian's job page uses an mds-tabs component with a
+            // "Job Details" tab (id=\"job-description\") and a hidden
+            // \"Company\" tab (id=\"company-information\") — a generic
+            // 'main section:last-child' selector used to grab whichever
+            // section happened to be last in the DOM, which was often the
+            // hidden company blurb, not the actual job posting.
             const selectors = [
-                '[class*=\"job-description\"]',
-                '[class*=\"description\"]',
+                '#job-description',
                 '[data-qa=\"job-description\"]',
                 '.job-detail__description',
                 '.job-description__content',
-                'main section:last-child',
+                '[class*=\"job-description\"]',
                 'article [class*=\"body\"]',
                 'article [class*=\"content\"]',
                 '.lister__description--full',
+                '[class*=\"description\"]',
             ];
             for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.textContent.trim().length > 100) {
-                    return el.textContent.trim().slice(0, 5000);
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    if (el.id === 'company-information') continue;
+                    if (/hidden/i.test(el.className)) continue;
+                    if (el.textContent.trim().length > 100) {
+                        return el.textContent.trim().slice(0, 5000);
+                    }
                 }
             }
             // Fallback: grab main content
