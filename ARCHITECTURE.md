@@ -1,6 +1,6 @@
-# Job Intelligence System — Architecture Spec
+# AI Job Scout System — Architecture Spec
 
-This document describes the system architecture, data flow, staging layer, and dynamic LLM components of the Job-Intelligence-System.
+This document describes the system architecture, data flow, staging layer, and dynamic LLM components of the AI Job Scout System.
 
 ---
 

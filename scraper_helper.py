@@ -1,7 +1,7 @@
 """
 Scraper Optimization Helper
 ===========================
-Provides high-performance, ethical, and speed optimizations for Job-Intelligence-System scrapers:
+Provides high-performance, ethical, and speed optimizations for AI Job Scout System scrapers:
 1. Cache-based deduplication: Load historical job descriptions to completely skip HTTP requests.
 2. Resource blocking: Intercept images, CSS, fonts, and trackers in Playwright to load detail pages 6x faster.
 3. Concurrent fetching: Fetch multiple descriptions concurrently using Playwright browser contexts with Semaphore.

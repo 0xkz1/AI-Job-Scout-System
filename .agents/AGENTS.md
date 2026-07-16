@@ -1,4 +1,4 @@
-# AGENTS.md — Job Intelligence System
+# AGENTS.md — AI Job Scout System
 
 Project-scoped rules for AI agents working in this directory.
 These complement the global `AGENTS.md` at `/home/kz003/atelier/AGENTS.md`.
