@@ -1,4 +1,16 @@
+# Two custom sub-themes (light + dark) so Streamlit's native theme switcher
+# (⋮ → Settings) has more than one option to offer — with a single [theme]
+# block it hides the switcher entirely (frontend gate: availableThemes<=1).
+# Both sub-themes keep the #944040 accent, so the color survives either mode.
 [theme]
+base = "dark"
+primaryColor = "#944040"
+
+[theme.light]
+base = "light"
+primaryColor = "#944040"
+
+[theme.dark]
 base = "dark"
 primaryColor = "#944040"
 

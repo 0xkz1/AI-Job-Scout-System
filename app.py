@@ -755,9 +755,14 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
                 STATIC_PDF_DIR.mkdir(parents=True, exist_ok=True)
                 static_copy = STATIC_PDF_DIR / Path(ready).name
                 shutil.copyfile(ready, static_copy)
-                href = "./app/static/pdfs/" + urllib.parse.quote(static_copy.name)
+                # Absolute path (leading slash) so it resolves to the server
+                # root regardless of the current page route; target=_blank as a
+                # fallback in case a sanitizer drops the download attribute (the
+                # PDF then just opens in a tab to save from).
+                href = "/app/static/pdfs/" + urllib.parse.quote(static_copy.name)
                 st.markdown(
-                    f'<a href="{href}" download="{static_copy.name}" target="_self">⬇ {static_copy.name}</a>',
+                    f'<a href="{href}" download="{static_copy.name}" target="_blank" rel="noopener">'
+                    f'⬇ Download {label} PDF</a>',
                     unsafe_allow_html=True,
                 )
                 st.caption(f"saved: 20_pdfs/{Path(ready).name}")
