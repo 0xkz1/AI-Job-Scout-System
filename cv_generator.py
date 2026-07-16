@@ -16,35 +16,35 @@ Opencode + local LLM (daily use), NotebookLM, local VLM for image tagging
 Documentation & Tracking
 Obsidian (structured note-taking, workflow organisation, Zettelkasten-style decomposition)"""
 
-MASTER_CV = """Kazuki Yunome
+MASTER_CV = """# Kazuki Yunome
 Edinburgh, Scotland, UK (Local Resident) | CANDIDATE_EMAIL | CANDIDATE_PHONE
 Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
 
-PROFILE
+## PROFILE
 {profile}
 
-CORE STRENGTHS
+## CORE STRENGTHS
 {core_strengths}
 
-TECHNICAL TOOLKIT
+## TECHNICAL TOOLKIT
 {technical_toolkit}
 
-EXPERIENCE
+## EXPERIENCE
 {experience}
 
-EDUCATION
-Hokkai University, Sapporo, Hokkaido | 2013 – 2017
+## EDUCATION
+**Hokkai University, Sapporo, Hokkaido | 2013 – 2017**
 Faculty of Humanities, Department of English and American Culture
-Escuela Falcon, Guanajuato, México | 2016 (3 months)
+**Escuela Falcon, Guanajuato, México | 2016 (3 months)**
 Spanish Language School
 
-ADDITIONAL INFORMATION
+## ADDITIONAL INFORMATION
 • Strong motivation to support development teams by diagnosing technical issues and improving tool and workflow reliability in production environments.
 • Actively learning industry-standard tools, including JIRA and production tracking systems.
 • Interested in game development pipelines and large-scale creative production.
 
-LANGUAGES
-Japanese: Native | English: Professional working proficiency | Spanish: Daily conversation level"""
+## LANGUAGES
+**Japanese:** Native | **English:** Professional working proficiency | **Spanish:** Daily conversation level"""
 
 def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, str]:
     """
@@ -282,9 +282,53 @@ STATIC_EXPERIENCE = {
 }
 
 
+def _bold_toolkit_headers(toolkit_text: str) -> str:
+    """Bold category headers in the Technical Toolkit.
+
+    Structure is "Category\\ncomma,separated,list" pairs. A header is a line
+    with no comma immediately followed by a comma-bearing list line — bold it
+    so it stands out from the tool list beneath it.
+    """
+    lines = toolkit_text.split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        is_header = (
+            s
+            and not s.startswith("**")
+            and "," not in s
+            and "," in nxt
+        )
+        out.append(f"**{s}**" if is_header else line)
+    return "\n".join(out)
+
+
+def _bold_experience_titles(experience_text: str) -> str:
+    """Make entry-title lines (e.g. "Project | Role | Period") fully bold.
+
+    Covers both the static path and the LLM path — the LLM often bolds only
+    the project name, leaving "| Role | Period" unbolded; normalise so the
+    whole title line is bold. Title lines are identified by having 2+ " | "
+    separators; description/bullet lines never do.
+    """
+    out = []
+    for line in experience_text.split("\n"):
+        s = line.strip()
+        is_title = s.count(" | ") >= 2 and not s.startswith(("•", "-", "#"))
+        if is_title:
+            # drop partial bold + literal [ ] the LLM copies from the prompt's
+            # "[Project Title] | [Role] | [Period]" template, then bold the line
+            inner = s.replace("**", "").replace("[", "").replace("]", "").strip()
+            out.append(f"**{inner}**")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _format_project_entry(project: dict) -> str:
-    """Format a single project dict into a CV Experience entry."""
-    return f"{project['title']} | {project['role']} | {project['period']}\n{project['description']}"
+    """Format a single project dict into a CV Experience entry (bold header line)."""
+    return f"**{project['title']} | {project['role']} | {project['period']}**\n{project['description']}"
 
 
 def _get_static_experience(role_type: str) -> str:
@@ -389,10 +433,10 @@ def generate_experience(job_title: str = "", job_description: str = "", role_typ
     if job_description and len(job_description) > 50:
         llm_result = _generate_experience_ollama(job_title, job_description, role_type)
         if llm_result:
-            return llm_result
+            return _bold_experience_titles(llm_result)
 
     # Fallback: static experience
-    return _get_static_experience(role_type)
+    return _bold_experience_titles(_get_static_experience(role_type))
 
 
 def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "") -> str:
@@ -421,9 +465,9 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     experience = generate_experience(job_title, job_description, role_type)
     
     cv_body = MASTER_CV.format(
-        profile=profile, 
-        core_strengths=strengths, 
-        technical_toolkit=toolkit, 
+        profile=profile,
+        core_strengths=strengths,
+        technical_toolkit=_bold_toolkit_headers(toolkit),
         experience=experience
     )
     
@@ -448,9 +492,9 @@ source_profile: "[[career/cv/profile/{resolved_role}]]"{source_projects_yaml}
 ---
 """
     
-    # Prepend frontmatter and H1
-    display_title = f"{company} - {job_title} (CV)" if company and job_title else "Curriculum Vitae"
-    return f"{frontmatter}\n# {display_title}\n\n{cv_body}"
+    # The CV body now leads with "# Kazuki Yunome" as the H1 — the job/company
+    # is kept in the frontmatter `title:` for Obsidian, not as a giant heading.
+    return f"{frontmatter}\n{cv_body}"
 
 if __name__ == "__main__":
     import sys

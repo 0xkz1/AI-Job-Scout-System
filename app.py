@@ -94,9 +94,8 @@ st.markdown("""
 }
 /* Hide the Deploy button (meaningless for a local app) */
 .stAppDeployButton { display: none; }
-/* Accent survives the NATIVE theme picker (⋮ → Settings): the built-in
-   Light/Dark themes use Streamlit's default red primary, so pin #944040
-   on every primary-colored widget regardless of selected theme. */
+/* Accent pinned on every primary-colored widget so #944040 holds in both
+   light and dark modes (Streamlit's built-in primary is red otherwise). */
 [data-baseweb="tab-highlight"] { background-color: #944040 !important; }
 [data-baseweb="checkbox"]:has(input[aria-checked="true"]) > span:first-of-type {
     background-color: #944040 !important;
@@ -159,9 +158,8 @@ def run_scraper(site="indeed", pages=5):
 # Title & Tabs
 # ─────────────────────────────────────────────
 
-# Theme switching lives in the native ⋮ menu (Settings → "Choose app
-# theme"). The CSS block above pins the #944040 accent regardless of
-# which theme (Custom/Light/Dark) is selected there.
+# Theme switching is done via the native ⋮ menu; config.toml pins the dark
+# base and the #944040 accent.
 st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
 tab_scraper, tab_weights, tab_watched, tab_kanban = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📋 Kanban"])
@@ -714,11 +712,94 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     return HTML(string=html).write_pdf()
 
 
+_PDF_VERSIONS_META = PDF_DIR / ".pdf_versions.json"
+
+
+def _version_filename(stem: str, n: int) -> str:
+    """v1 keeps the bare name (backward compatible); v2+ gets a _vN suffix."""
+    return f"{stem}.pdf" if n == 1 else f"{stem}_v{n}.pdf"
+
+
+def _pdf_versions(stem: str) -> list[tuple[int, Path]]:
+    """Existing PDF versions for a stem, ascending: [(1, stem.pdf), (2, stem_v2.pdf), ...]."""
+    import re
+    out = []
+    p1 = PDF_DIR / f"{stem}.pdf"
+    if p1.exists():
+        out.append((1, p1))
+    for p in PDF_DIR.glob(f"{stem}_v*.pdf"):
+        m = re.fullmatch(rf"{re.escape(stem)}_v(\d+)\.pdf", p.name)
+        if m:
+            out.append((int(m.group(1)), p))
+    out.sort()
+    return out
+
+
+def _load_pdf_meta() -> dict:
+    import json
+    try:
+        return json.loads(_PDF_VERSIONS_META.read_text())
+    except Exception:
+        return {}
+
+
+def _save_pdf_meta(meta: dict):
+    import json
+    PDF_DIR.mkdir(exist_ok=True)
+    _PDF_VERSIONS_META.write_text(json.dumps(meta, indent=2))
+
+
+def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
+    """Render md_path to a PDF, versioning by source-MD content.
+
+    If the current markdown is identical to the newest existing version's
+    source, reuse that PDF (no pointless duplicate). Otherwise mint the
+    next sequential version (highest existing number + 1). Returns
+    (pdf_path, version_number, is_new).
+    """
+    import hashlib
+    stem = md_path.stem
+    md_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+    versions = _pdf_versions(stem)
+    meta = _load_pdf_meta()
+
+    if versions:
+        latest_n, latest_path = versions[-1]
+        if meta.get(latest_path.name) == md_sha and latest_path.exists():
+            return latest_path, latest_n, False  # unchanged — reuse
+        n = latest_n + 1
+    else:
+        n = 1
+
+    PDF_DIR.mkdir(exist_ok=True)
+    target = PDF_DIR / _version_filename(stem, n)
+    target.write_bytes(_md_to_pdf_bytes(md_path))
+    meta[target.name] = md_sha
+    _save_pdf_meta(meta)
+    return target, n, True
+
+
+def _static_pdf_link(pdf_path: Path, label: str) -> str:
+    """Copy a PDF into the static-served dir and return an <a download> tag."""
+    import shutil
+    import urllib.parse
+    STATIC_PDF_DIR.mkdir(parents=True, exist_ok=True)
+    static_copy = STATIC_PDF_DIR / pdf_path.name
+    if not static_copy.exists() or static_copy.stat().st_mtime < pdf_path.stat().st_mtime:
+        shutil.copyfile(pdf_path, static_copy)
+    href = "/app/static/pdfs/" + urllib.parse.quote(static_copy.name)
+    return (
+        f'<a href="{href}" download="{static_copy.name}" target="_blank" rel="noopener">'
+        f'{label}</a>'
+    )
+
+
 def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""):
     """Show a 📄 PDF popover on a kanban card when its CV/CL markdown exists.
 
-    Conversion is on-demand (button click); the PDF is saved to 10_output/20_pdfs/
-    and offered as a download.
+    Conversion is on-demand (button click); PDFs are saved to 10_output/20_pdfs/
+    with sequential versioning — editing the source .md and re-converting mints
+    v2, v3, … while identical re-conversions reuse the latest version.
     """
     import hashlib
     base = make_safe_name(company, title)
@@ -734,38 +815,24 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
             if not md_path.exists():
                 st.caption(f"{label}: not generated yet")
                 continue
-            state_key = f"pdf_ready_{key_prefix}_{label}"
             if st.button(f"Convert {label} to PDF", key=f"conv_{key_prefix}_{label}"):
                 try:
-                    PDF_DIR.mkdir(exist_ok=True)
-                    pdf_path = PDF_DIR / f"{md_path.stem}.pdf"
-                    pdf_path.write_bytes(_md_to_pdf_bytes(md_path))
-                    st.session_state[state_key] = str(pdf_path)
+                    _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
+                    if is_new:
+                        st.success(f"{label} → v{ver} created")
+                    else:
+                        st.info(f"{label} unchanged since v{ver} — reusing")
                 except Exception as e:
                     st.error(f"PDF conversion failed: {e}")
-            ready = st.session_state.get(state_key)
-            if ready and Path(ready).exists():
-                # Serve via static file serving instead of st.download_button:
-                # download_button uses a session-bound in-memory media URL
-                # that reruns / websocket reconnects invalidate mid-transfer
-                # (the stuck "Unconfirmed ....crdownload" symptom). A static
-                # URL is a plain file GET — nothing can invalidate it.
-                import shutil
-                import urllib.parse
-                STATIC_PDF_DIR.mkdir(parents=True, exist_ok=True)
-                static_copy = STATIC_PDF_DIR / Path(ready).name
-                shutil.copyfile(ready, static_copy)
-                # Absolute path (leading slash) so it resolves to the server
-                # root regardless of the current page route; target=_blank as a
-                # fallback in case a sanitizer drops the download attribute (the
-                # PDF then just opens in a tab to save from).
-                href = "/app/static/pdfs/" + urllib.parse.quote(static_copy.name)
-                st.markdown(
-                    f'<a href="{href}" download="{static_copy.name}" target="_blank" rel="noopener">'
-                    f'⬇ Download {label} PDF</a>',
-                    unsafe_allow_html=True,
-                )
-                st.caption(f"saved: 20_pdfs/{Path(ready).name}")
+
+            # List every version (newest first) as a download link.
+            versions = _pdf_versions(md_path.stem)
+            if versions:
+                latest_n = versions[-1][0]
+                for n, pdf_path in reversed(versions):
+                    suffix = " (latest)" if n == latest_n else ""
+                    link = _static_pdf_link(pdf_path, f"⬇ {label} v{n}{suffix}")
+                    st.markdown(link, unsafe_allow_html=True)
 
 
 with tab_kanban:
