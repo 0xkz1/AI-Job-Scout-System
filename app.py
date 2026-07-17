@@ -886,8 +886,10 @@ def review_doc_controls(label: str, md_path: Path, job: dict, key_prefix: str):
     if not md_path.exists():
         st.caption(f"{label}: —")
         return
+    # "CV"/"CL" differ by one letter with the same icon — visually confusable
+    display = "CV" if label == "CV" else "Cover Letter"
     is_cur, rpath = review_is_current(md_path)
-    if st.button(f"🧐 Review {label}", key=f"rev_{key_prefix}_{label}"):
+    if st.button(f"{'📄' if label == 'CV' else '✉️'} Review {display}", key=f"rev_{key_prefix}_{label}"):
         with st.spinner(f"Reviewing {label} with {REVIEW_MODEL}…"):
             try:
                 rpath = run_review(label, md_path, job)
@@ -898,7 +900,7 @@ def review_doc_controls(label: str, md_path: Path, job: dict, key_prefix: str):
                 st.error(f"Review failed: {e}")
     if rpath and rpath.exists():
         status = "current" if is_cur else "⚠️ doc edited since this review"
-        with st.expander(f"{label} review ({status})"):
+        with st.expander(f"{display} review ({status})"):
             text = rpath.read_text(encoding="utf-8")
             m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
             st.markdown(text[m.end():] if m else text)

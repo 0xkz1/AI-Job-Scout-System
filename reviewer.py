@@ -53,21 +53,28 @@ Description (excerpt):
 {document}
 
 ## YOUR TASK
-Produce a findings list in markdown. Do NOT rewrite the document. Categories:
+Produce a findings list in markdown. Do NOT rewrite the document.
 
-### ❗ Factual
-Claims not supported by the verified facts (fabrication/inflation risk). Quote the exact phrase.
+LANGUAGE RULES (important):
+- Write ALL explanations, problem descriptions, and the verdict in JAPANESE.
+- Quote the document's original ENGLISH sentences verbatim when referencing a passage.
+- Suggested replacement sentences must be in ENGLISH (they will be pasted into the English document as-is).
 
-### 🎯 Job fit
-Top requirements from the posting that the document fails to address, and document content irrelevant to this posting.
+Categories:
 
-### ✍️ Style
-UK English issues, clichés, redundancy, inconsistent dates, awkward phrasing. Quote each.
+### ❗ 事実
+検証済み事実で裏付けられない主張（捏造・誇張リスク）。該当箇所を英語原文のまま引用すること。
 
-For every finding: quote → why it's a problem → a concrete suggested fix (a replacement sentence the candidate can accept or reject).
-If a category has no findings, write "No issues found."
-End with a 2-3 sentence **Verdict**: is this document ready to send after the suggested fixes?
-Be specific and honest — a polite empty review helps nobody."""
+### 🎯 求人適合
+求人票の主要な要求のうちドキュメントが触れていないもの、および今回の求人に無関係な記述。
+
+### ✍️ 文体
+UK英語の問題、クリシェ、冗長表現、日付の不整合、不自然な言い回し。各指摘に英語原文の引用を付けること。
+
+各指摘の形式: 英語原文の引用 → 何が問題か（日本語）→ 具体的な修正案（英語の置き換え文。候補者がそのまま採用/却下できるもの）。
+指摘がないカテゴリには「問題なし」と書くこと。
+最後に2〜3文の **総評**（日本語）: 修正案を反映すればこのドキュメントは提出可能か。
+具体的かつ正直に — 社交辞令だけの空のレビューは誰の役にも立たない。"""
 
 
 def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
