@@ -305,12 +305,12 @@ def _bold_toolkit_headers(toolkit_text: str) -> str:
 
 
 def _bold_experience_titles(experience_text: str) -> str:
-    """Make entry-title lines (e.g. "Project | Role | Period") fully bold.
+    """Normalise Experience formatting: title lines fully bold, body plain.
 
-    Covers both the static path and the LLM path — the LLM often bolds only
-    the project name, leaving "| Role | Period" unbolded; normalise so the
-    whole title line is bold. Title lines are identified by having 2+ " | "
-    separators; description/bullet lines never do.
+    Covers both the static path and the LLM path. Title lines (2+ " | "
+    separators) get whole-line bold — the LLM often bolds only the project
+    name. Description/bullet lines get their inline bold stripped: skill
+    proper-noun bolding (**Python**, **ComfyUI**, …) was deemed noisy.
     """
     out = []
     for line in experience_text.split("\n"):
@@ -322,7 +322,7 @@ def _bold_experience_titles(experience_text: str) -> str:
             inner = s.replace("**", "").replace("[", "").replace("]", "").strip()
             out.append(f"**{inner}**")
         else:
-            out.append(line)
+            out.append(line.replace("**", ""))
     return "\n".join(out)
 
 

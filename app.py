@@ -794,6 +794,37 @@ def _static_pdf_link(pdf_path: Path, label: str) -> str:
     )
 
 
+def _set_report_pdf_property(md_path: Path, pdf_name: str):
+    """Record the freshly generated PDF in the match report's frontmatter.
+
+    md_path is the CV/CL markdown (…_CV.md / …_CL.md); the report shares its
+    base name. Sets/updates `cv_pdf:` or `cl_pdf:` to an Obsidian wikilink so
+    the PDF is reachable (and Dataview-queryable) from the report.
+    """
+    import re
+    stem = md_path.stem
+    if stem.endswith("_CV"):
+        key, base = "cv_pdf", stem[:-3]
+    elif stem.endswith("_CL"):
+        key, base = "cl_pdf", stem[:-3]
+    else:
+        return
+    report = MATCH_DIR / f"{base}.md"
+    if not report.exists():
+        return
+    text = report.read_text(encoding="utf-8")
+    m = re.match(r"\A---\n(.*?)\n---\n", text, flags=re.DOTALL)
+    if not m:
+        return
+    line = f'{key}: "[[{pdf_name}]]"'
+    fm = m.group(1)
+    if re.search(rf"^{key}:.*$", fm, flags=re.MULTILINE):
+        fm = re.sub(rf"^{key}:.*$", line, fm, flags=re.MULTILINE)
+    else:
+        fm = fm + "\n" + line
+    report.write_text(f"---\n{fm}\n---\n" + text[m.end():], encoding="utf-8")
+
+
 def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""):
     """Show a 📄 PDF popover on a kanban card when its CV/CL markdown exists.
 
@@ -818,6 +849,7 @@ def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""
             if st.button(f"Convert {label} to PDF", key=f"conv_{key_prefix}_{label}"):
                 try:
                     _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
+                    _set_report_pdf_property(md_path, _pdf_path.name)
                     if is_new:
                         st.success(f"{label} → v{ver} created")
                     else:
