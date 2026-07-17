@@ -125,6 +125,62 @@ reviewed_at: {date.today().isoformat()}
     return review_path
 
 
+def parse_review_fixes(review_path: Path) -> list[tuple[str, str]]:
+    """Extract (original_quote, replacement) pairs from a review's findings.
+
+    The review format quotes the document verbatim (**"..."**) and offers a
+    replacement after 修正案:/Fix:. Only pairs with BOTH parts present are
+    returned — applying them is then a deterministic string replacement, no
+    second LLM call, no chance of the model rewriting anything else.
+    """
+    import re
+    text = review_path.read_text(encoding="utf-8")
+    pairs = []
+    # Findings look like:  - **"<quote>"** ... 修正案: **"<fix>"**  (fix may
+    # use *...* or **...**, with or without quotes)
+    blocks = re.split(r"\n- ", text)
+    for block in blocks:
+        mq = re.match(r'\*\*"(.+?)"\*\*', block.strip(), flags=re.DOTALL)
+        if not mq:
+            continue
+        mf = re.search(
+            r'(?:修正案|Fix)\s*[::]\s*\*{1,2}"?(.+?)"?\*{1,2}(?:\s|$)',
+            block, flags=re.DOTALL,
+        )
+        if not mf:
+            continue
+        original = mq.group(1).strip()
+        replacement = mf.group(1).strip()
+        if original and replacement and original != replacement:
+            pairs.append((original, replacement))
+    return pairs
+
+
+def apply_review_fixes(md_path: Path, review_path: Path) -> tuple[int, list[str]]:
+    """Apply the review's suggested replacements to the document.
+
+    Deterministic: each quoted original is replaced only where it matches the
+    document verbatim. Returns (applied_count, unmatched_originals) — the
+    unmatched ones need manual editing (the model paraphrased its quote, or
+    the doc changed since the review). A pre-apply backup is written next to
+    the review as <stem>.pre_apply.md.
+    """
+    doc = md_path.read_text(encoding="utf-8")
+    backup = REVIEWS_DIR / f"{md_path.stem}.pre_apply.md"
+    applied, unmatched = 0, []
+    for original, replacement in parse_review_fixes(review_path):
+        if original in doc:
+            doc = doc.replace(original, replacement, 1)
+            applied += 1
+        else:
+            unmatched.append(original)
+    if applied:
+        REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+        backup.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
+        md_path.write_text(doc, encoding="utf-8")
+    return applied, unmatched
+
+
 def review_is_current(md_path: Path) -> tuple[bool, Path | None]:
     """(is_current, review_path): whether a review exists for md_path's CURRENT
     content. False+path = review exists but the doc was edited afterwards."""

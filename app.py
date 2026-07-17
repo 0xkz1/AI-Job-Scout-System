@@ -898,6 +898,29 @@ def show_review(label: str, md_path: Path):
         m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
         st.markdown(text[m.end():] if m else text)
 
+        # One-click apply — but only for a review of the CURRENT doc content,
+        # and only as deterministic verbatim replacements (no LLM involved):
+        # quotes that no longer match are listed for manual editing instead.
+        from reviewer import parse_review_fixes, apply_review_fixes
+        fixes = parse_review_fixes(rpath)
+        if fixes and is_cur:
+            st.caption(f"抽出された修正案: {len(fixes)}件 (原文一致箇所のみ置換されます)")
+            if st.button(
+                f"✅ 修正案を{display}に一括適用",
+                key=f"apply_{md_path.stem}",
+                help="レビューの引用と完全一致する箇所だけを修正案で置換。適用前の版は 15_reviews/*.pre_apply.md に保存",
+            ):
+                applied, unmatched = apply_review_fixes(md_path, rpath)
+                if applied:
+                    st.success(f"{applied}件適用しました (バックアップ: 15_reviews/{md_path.stem}.pre_apply.md)")
+                if unmatched:
+                    st.warning(
+                        f"{len(unmatched)}件は原文と一致せず未適用 — 手動で対応してください:\n"
+                        + "\n".join(f"- {u[:80]}…" if len(u) > 80 else f"- {u}" for u in unmatched[:5])
+                    )
+                if applied:
+                    st.rerun()
+
 
 def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
     """Inline convert-button + versioned download links for ONE document
