@@ -116,18 +116,87 @@ PERSONAL_INFO = {
 
 from datetime import date
 
-def generate_cover_letter(job_title: str, company: str, job_location: str = "Edinburgh", job_description: str = "") -> str:
-    """Generate a tailored cover letter."""
+
+def _generate_opening_hook(job_title: str, company: str, job_description: str) -> str | None:
+    """LLM-write a company-specific opening paragraph ("why this company").
+
+    Template cover letters are recognisable at a glance; the one paragraph
+    that must feel written-for-this-application is the opening hook. Uses the
+    same persona summary as the matcher; returns None on any failure so the
+    caller falls back to the template opening. Output must be reviewed by the
+    user before sending (opening_source: llm is recorded in the frontmatter).
+    """
+    if not job_description or len(job_description.strip()) < 200:
+        return None
+    try:
+        from llm_client import call_llm
+        from matcher import _load_persona_summary
+        persona = _load_persona_summary()
+        if not persona:
+            return None
+        prompt = f"""Write the OPENING paragraph of a cover letter (3-4 sentences, at most 80 words).
+
+THE JOB:
+Company: {company}
+Title: {job_title}
+Posting (excerpt): {job_description[:2000]}
+
+THE CANDIDATE:
+{persona[:2500]}
+
+RULES:
+- First person, UK English, plain prose. No markdown, no bullet points, no heading.
+- Reference something CONCRETE and specific from this posting (their product, mission, tech stack, or the role's actual focus) and connect it to the candidate's real background.
+- Do NOT fabricate experience or qualifications not in the candidate profile.
+- No clichés ("I was excited to see", "I am writing to apply", "passionate about"), no flattery filler.
+- Do not include the greeting line; the letter template already has "Dear Hiring Team".
+
+Output ONLY the paragraph."""
+        text = call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You write concise, specific, honest cover-letter openings. Output only the requested paragraph.",
+            temperature=0.5,
+            max_tokens=300,
+        )
+        text = (text or "").strip().strip('"')
+        # Sanity gate: single plain paragraph that actually names the company.
+        # Use the first word of the company name — models naturally write
+        # "Wordsmith's" rather than the full registered name "Wordsmith AI".
+        if not (120 <= len(text) <= 1000):
+            return None
+        if any(m in text for m in ("\n\n", "- ", "• ", "#", "Dear ")):
+            return None
+        company_word = (company.split()[0].lower() if company and company.split() else "")
+        if len(company_word) >= 3 and company_word not in text.lower():
+            return None
+        return text
+    except Exception as e:
+        print(f"  ⚠ CL opening hook generation failed ({e}); using template opening")
+        return None
+
+
+def generate_cover_letter(job_title: str, company: str, job_location: str = "Edinburgh", job_description: str = "") -> tuple[str, str]:
+    """Generate a tailored cover letter.
+
+    Returns (letter_text, opening_source) where opening_source is "llm" when
+    the opening paragraph was written for this specific posting, else
+    "template".
+    """
     role_type = detect_role_type(job_title, job_description)
     template = load_cover_template(role_type)
-    
+
     today = date.today().strftime("%d %B %Y")
     team_name = template["team_name"]
-    
+
     # For general template, use empty team_name
     closing_para = template["closing"].format(company=company, job_title=job_title, job_location=job_location)
-    
-    return MASTER_COVER_LETTER.format(
+
+    opening = _generate_opening_hook(job_title, company, job_description)
+    opening_source = "llm" if opening else "template"
+    if not opening:
+        opening = template["opening"].format(company=company, job_title=job_title, job_location=job_location)
+
+    letter = MASTER_COVER_LETTER.format(
         name=PERSONAL_INFO["name"],
         location=PERSONAL_INFO["location"],
         email=PERSONAL_INFO["email"],
@@ -136,12 +205,13 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
         company=company,
         job_location=job_location,
         job_title=job_title,
-        opening_paragraph=template["opening"].format(company=company, job_title=job_title, job_location=job_location),
+        opening_paragraph=opening,
         experience_paragraph=template["experience"],
         skills_paragraph=template["skills"],
         closing_paragraph=closing_para,
         team_name=team_name
     )
+    return letter, opening_source
 
 def save_cover_letter(job_title: str, company: str, job_location: str, job_description: str, output_dir: str, match_filename: str = "", cv_filename: str = "") -> str:
     """Generate and save cover letter as Markdown."""
@@ -169,7 +239,7 @@ def save_cover_letter(job_title: str, company: str, job_location: str, job_descr
     if not exists:
         resolved_role = "general"
         
-    letter = generate_cover_letter(job_title, company, job_location, job_description)
+    letter, opening_source = generate_cover_letter(job_title, company, job_location, job_description)
     
     safe_company = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
     safe_title = re.sub(r"[^\w\s-]", "", job_title).strip().replace(" ", "_")[:50]
@@ -183,6 +253,7 @@ company: "{company}"
 match_report: "[[{match_filename}]]"
 cv: "[[{cv_filename}]]"
 source_template: "[[career/cover-letter/{resolved_role}]]"
+opening_source: "{opening_source}"
 ---
 """
     
@@ -199,7 +270,7 @@ if __name__ == "__main__":
         co = sys.argv[2]
         loc = sys.argv[3] if len(sys.argv) > 3 else "Edinburgh"
         desc = sys.argv[4] if len(sys.argv) > 4 else ""
-        print(generate_cover_letter(jt, co, loc, desc))
+        print(generate_cover_letter(jt, co, loc, desc)[0])
     else:
         # Demo
-        print(generate_cover_letter("Development Support", "Rockstar North", "Edinburgh"))
+        print(generate_cover_letter("Development Support", "Rockstar North", "Edinburgh")[0])
