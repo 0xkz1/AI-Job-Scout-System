@@ -16,6 +16,10 @@ Opencode + local LLM (daily use), NotebookLM, local VLM for image tagging
 Documentation & Tracking
 Obsidian (structured note-taking, workflow organisation, Zettelkasten-style decomposition)"""
 
+# Evidence before claims: employment history right after the profile (the
+# thin-employment weakness is countered by structure — a continuous
+# 2017→present work timeline), independent work as a named studio practice,
+# keyword lists (toolkit) after the evidence, no separate strengths list.
 MASTER_CV = """# Kazuki Yunome
 Edinburgh, Scotland, UK (Local Resident) | CANDIDATE_EMAIL | CANDIDATE_PHONE
 Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
@@ -23,25 +27,20 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 ## PROFILE
 {profile}
 
-## CORE STRENGTHS
-{core_strengths}
+## EXPERIENCE
+{employment}
+
+## SELECTED PROJECTS — Taifunomé (Independent Studio, 2023 – Present)
+{experience}
 
 ## TECHNICAL TOOLKIT
 {technical_toolkit}
-
-## EXPERIENCE
-{experience}
 
 ## EDUCATION
 **Hokkai University, Sapporo, Hokkaido | 2013 – 2017**
 Faculty of Humanities, Department of English and American Culture
 **Escuela Falcon, Guanajuato, México | 2016 (3 months)**
 Spanish Language School
-
-## ADDITIONAL INFORMATION
-• Strong motivation to support development teams by diagnosing technical issues and improving tool and workflow reliability in production environments.
-• Actively learning industry-standard tools, including JIRA and production tracking systems.
-• Interested in game development pipelines and large-scale creative production.
 
 ## LANGUAGES
 **Japanese:** Native | **English:** Professional working proficiency | **Spanish:** Daily conversation level"""
@@ -220,10 +219,13 @@ def load_projects_from_md() -> list[dict]:
                     "id": frontmatter.get("id", fpath.stem),
                     "title": frontmatter.get("title", ""),
                     "role": frontmatter.get("role", ""),
-                    "period": frontmatter.get("period", ""),
+                    "period": str(frontmatter.get("period", "")),
                     "description": description,
                     "tags": frontmatter.get("tags", []),
                     "skills": frontmatter.get("skills", []),
+                    # type: employment entries render in the fixed EXPERIENCE
+                    # section; everything else is a selectable project.
+                    "type": str(frontmatter.get("type", "project")).lower(),
                 }
                 projects.append(project)
         except Exception as e:
@@ -231,7 +233,20 @@ def load_projects_from_md() -> list[dict]:
             
     return projects
 
-PROJECTS = load_projects_from_md()
+_ALL_ENTRIES = load_projects_from_md()
+# Employment history (fixed, always shown, newest first) vs selectable projects
+EMPLOYMENT = sorted(
+    (p for p in _ALL_ENTRIES if p["type"] == "employment"),
+    key=lambda p: p.get("period", ""), reverse=True,
+)
+PROJECTS = [p for p in _ALL_ENTRIES if p["type"] != "employment"]
+
+
+def get_employment_section() -> str:
+    """Fixed employment/freelance history — never LLM-selected. For a
+    portfolio-led CV this is the structural proof of work history; omitting
+    the one real employer is the last thing this CV can afford."""
+    return "\n\n".join(_format_project_entry(p) for p in EMPLOYMENT)
 
 # ─────────────────────────────────────────────
 # Fallback: Static experience per role type
@@ -247,11 +262,9 @@ STATIC_EXPERIENCE = {
     "development_support": [
         "independent_development",
         "linux_systems",
-        "terra_drone",
     ],
     "data_analysis": [
         "independent_development",
-        "terra_drone",
     ],
     "creative_technologist": [
         "feral",
@@ -274,7 +287,6 @@ STATIC_EXPERIENCE = {
         "portfolio_website",
         "independent_development",
         "linux_systems",
-        "terra_drone",
         "feral",
         "arch_viz",
         "hive_floral_pod",
@@ -320,6 +332,9 @@ def _bold_experience_titles(experience_text: str) -> str:
             # drop partial bold + literal [ ] the LLM copies from the prompt's
             # "[Project Title] | [Role] | [Period]" template, then bold the line
             inner = s.replace("**", "").replace("[", "").replace("]", "").strip()
+            # the studio name lives in the SELECTED PROJECTS section header —
+            # repeating it on every entry line is noise
+            inner = inner.replace(" | Taifunomé — Independent Studio", "")
             out.append(f"**{inner}**")
         else:
             out.append(line.replace("**", ""))
@@ -382,7 +397,7 @@ def _generate_experience_ollama(job_title: str, job_description: str, role_type:
 
     project_summaries = _build_project_summaries()
 
-    prompt = f"""You are a CV writer for a job applicant. Your task is to select and order the most relevant projects for a specific job posting, then write the EXPERIENCE section of a CV.
+    prompt = f"""You are a CV writer for a job applicant. Your task is to select and order the most relevant projects for a specific job posting, then write the SELECTED PROJECTS section of a CV (employment history is a separate, fixed section — do not include it).
 
 JOB DETAILS:
 Title: {job_title}
@@ -466,7 +481,7 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     
     cv_body = MASTER_CV.format(
         profile=profile,
-        core_strengths=strengths,
+        employment=_bold_experience_titles(get_employment_section()),
         technical_toolkit=_bold_toolkit_headers(toolkit),
         experience=experience
     )
