@@ -878,32 +878,25 @@ def _tier_icon(tier: str) -> str:
     )
 
 
-def review_doc_controls(label: str, md_path: Path, job: dict, key_prefix: str):
-    """Run/show the LLM review for ONE document (CV or CL). The review is a
-    findings list, never a rewrite — the user's manual edit stays final."""
+def show_review(label: str, md_path: Path):
+    """Display-only: the stored review for one document with freshness status.
+    Reviews are produced by the batch runner (skips unchanged docs), not by
+    per-row buttons."""
     import re
-    from reviewer import run_review, review_is_current, REVIEW_MODEL
-    if not md_path.exists():
-        st.caption(f"{label}: —")
-        return
-    # "CV"/"CL" differ by one letter with the same icon — visually confusable
+    from reviewer import review_is_current
     display = "CV" if label == "CV" else "Cover Letter"
+    if not md_path.exists():
+        st.caption(f"{display}: —")
+        return
     is_cur, rpath = review_is_current(md_path)
-    if st.button(f"{'📄' if label == 'CV' else '✉️'} Review {display}", key=f"rev_{key_prefix}_{label}"):
-        with st.spinner(f"Reviewing {label} with {REVIEW_MODEL}…"):
-            try:
-                rpath = run_review(label, md_path, job)
-                _set_report_doc_property(md_path, "review", rpath.stem)
-                is_cur = True
-                st.success(f"{label} review saved → 15_reviews/{rpath.name}")
-            except Exception as e:
-                st.error(f"Review failed: {e}")
-    if rpath and rpath.exists():
-        status = "current" if is_cur else "⚠️ doc edited since this review"
-        with st.expander(f"{display} review ({status})"):
-            text = rpath.read_text(encoding="utf-8")
-            m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
-            st.markdown(text[m.end():] if m else text)
+    if not rpath or not rpath.exists():
+        st.caption(f"{display}: レビュー未実施")
+        return
+    status = "✅ current" if is_cur else "⚠️ 編集済み — 次回バッチで再レビュー"
+    with st.expander(f"{'📄' if label == 'CV' else '✉️'} {display} review ({status})"):
+        text = rpath.read_text(encoding="utf-8")
+        m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
+        st.markdown(text[m.end():] if m else text)
 
 
 def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
@@ -955,7 +948,9 @@ with tab_review:
         "LLM proofreading BEFORE PDF export: checks your (hand-edited) CV/CL "
         "against the job posting and your verified profile — factual claims, "
         "job-fit gaps, style. Findings only; it never rewrites your text. "
-        "Reviews are saved to `15_reviews/` and linked from the match report."
+        "Reviews are saved to `15_reviews/` and linked from the match report. "
+        "**Batch mode**: reviews the top X% in one go; documents unchanged "
+        "since their last review are skipped (no wasted LLM calls)."
     )
 
     try:
@@ -965,24 +960,64 @@ with tab_review:
         st.stop()
 
     rows = ranked_job_rows(all_jobs)
+    scored_rows = [r for r in rows if r["score"] > 0]
 
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        min_score = st.slider("Min score", 0, 100, 50, key="review_min_score")
-    with col_f2:
-        search_query = st.text_input("🔍 Search company/title", key="review_search")
+    from reviewer import review_is_current, REVIEW_MODEL
 
-    filtered = [
-        r for r in rows
-        if r["score"] * 100 >= min_score
-        and r["has_docs"]
-        and (not search_query
-             or search_query.lower() in r["company"].lower()
-             or search_query.lower() in r["title"].lower())
+    import math
+    c_pct, c_docs, c_pending = st.columns(3)
+    with c_pct:
+        top_pct = st.number_input("Top %", 1, 100, 5, key="review_top_pct")
+    targets = [r for r in scored_rows[:math.ceil(len(scored_rows) * top_pct / 100)] if r["has_docs"]]
+
+    # Collect (label, md_path, job) for every existing doc in scope, and
+    # which of them actually need a (re-)review.
+    doc_jobs = []
+    for r in targets:
+        for label, path in (("CV", CV_DIR / f"{r['base']}_CV.md"), ("CL", CL_DIR / f"{r['base']}_CL.md")):
+            if path.exists():
+                doc_jobs.append((label, path, r["job"]))
+    pending = [(l, p, j) for l, p, j in doc_jobs if not review_is_current(p)[0]]
+
+    with c_docs:
+        st.metric("対象ドキュメント", f"{len(doc_jobs)} ({len(targets)} jobs)")
+    with c_pending:
+        st.metric("要レビュー (未変更はスキップ)", f"{len(pending)}")
+
+    if pending and st.button(f"🧐 Review {len(pending)} documents", type="primary", key="review_batch"):
+        from reviewer import run_review
+        import time as _time
+        prog = st.progress(0.0)
+        status = st.empty()
+        ok, failed = 0, []
+        for i, (label, path, job) in enumerate(pending):
+            status.text(f"[{i+1}/{len(pending)}] {job.get('company','?')} — {label} … ({REVIEW_MODEL})")
+            try:
+                rpath = run_review(label, path, job)
+                _set_report_doc_property(path, "review", rpath.stem)
+                ok += 1
+            except Exception as e:
+                failed.append(f"{path.stem}: {e}")
+            prog.progress((i + 1) / len(pending))
+            _time.sleep(1)  # be polite to the API
+        status.empty()
+        if failed:
+            st.error(f"{ok} done, {len(failed)} failed:\n" + "\n".join(failed[:5]))
+        else:
+            st.success(f"✅ {ok} reviews completed → 15_reviews/")
+        st.rerun()
+    elif not pending and doc_jobs:
+        st.success("✅ 全ドキュメントのレビューが最新です (編集すると自動で再レビュー対象になります)")
+
+    st.divider()
+    search_query = st.text_input("🔍 Search company/title", key="review_search")
+    shown = [
+        r for r in targets
+        if not search_query
+        or search_query.lower() in r["company"].lower()
+        or search_query.lower() in r["title"].lower()
     ]
-    st.metric("Showing", f"{len(filtered)} jobs")
-
-    for r in filtered[:50]:
+    for r in shown[:50]:
         c_score, c_job = st.columns([1, 7])
         with c_score:
             st.markdown(f"{_tier_icon(r['tier'])} `{r['score']*100:.0f}%`")
@@ -990,12 +1025,10 @@ with tab_review:
             st.markdown(f"**{r['company']}** — {r['title'][:70]}")
         c_cv, c_cl = st.columns(2)
         with c_cv:
-            review_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", r["job"], f"rv_{r['url']}")
+            show_review("CV", CV_DIR / f"{r['base']}_CV.md")
         with c_cl:
-            review_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", r["job"], f"rv_{r['url']}")
+            show_review("CL", CL_DIR / f"{r['base']}_CL.md")
         st.divider()
-    if len(filtered) > 50:
-        st.caption(f"…and {len(filtered)-50} more — raise Min score or search to narrow down.")
 
 
 with tab_pdf:
