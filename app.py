@@ -825,59 +825,58 @@ def _set_report_pdf_property(md_path: Path, pdf_name: str):
     report.write_text(f"---\n{fm}\n---\n" + text[m.end():], encoding="utf-8")
 
 
-def pdf_export_controls(company: str, title: str, key_prefix: str, url: str = ""):
-    """Show a 📄 PDF popover on a kanban card when its CV/CL markdown exists.
-
-    Conversion is on-demand (button click); PDFs are saved to 10_output/20_pdfs/
-    with sequential versioning — editing the source .md and re-converting mints
-    v2, v3, … while identical re-conversions reuse the latest version.
-    """
+def resolve_doc_base(company: str, title: str, url: str = "") -> str:
+    """Filename base for a job's CV/CL/report; falls back to the URL-hash
+    suffixed variant generate_outputs() uses on company+title collisions."""
     import hashlib
     base = make_safe_name(company, title)
-    # generate_outputs() suffixes colliding basenames with a URL hash — check both
     hashed = f"{base}_{hashlib.md5((url or '').encode()).hexdigest()[:6]}"
     if not (CV_DIR / f"{base}_CV.md").exists() and (CV_DIR / f"{hashed}_CV.md").exists():
-        base = hashed
-    candidates = [("CV", CV_DIR / f"{base}_CV.md"), ("CL", CL_DIR / f"{base}_CL.md")]
-    if not any(p.exists() for _, p in candidates):
-        return
-    with st.popover("📄 PDF"):
-        for label, md_path in candidates:
-            if not md_path.exists():
-                st.caption(f"{label}: not generated yet")
-                continue
-            if st.button(f"Convert {label} to PDF", key=f"conv_{key_prefix}_{label}"):
-                try:
-                    _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
-                    _set_report_pdf_property(md_path, _pdf_path.name)
-                    if is_new:
-                        st.success(f"{label} → v{ver} created")
-                    else:
-                        st.info(f"{label} unchanged since v{ver} — reusing")
-                except Exception as e:
-                    st.error(f"PDF conversion failed: {e}")
+        return hashed
+    return base
 
-            # List every version (newest first) as a download link. The
-            # highest-numbered version is only labeled "latest" if it was
-            # actually generated from the CURRENT .md content — otherwise the
-            # .md was edited since that PDF was made and the link is stale
-            # (this is exactly the bug that shipped once: editing the CV and
-            # re-downloading the old, unconverted PDF without noticing).
-            versions = _pdf_versions(md_path.stem)
-            if versions:
-                latest_n, latest_path = versions[-1]
-                current_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
-                meta = _load_pdf_meta()
-                is_current = meta.get(latest_path.name) == current_sha
-                if not is_current:
-                    st.caption(f"⚠️ {label} source .md has changed since v{latest_n} — click Convert to update")
-                for n, pdf_path in reversed(versions):
-                    if n == latest_n:
-                        suffix = " (latest)" if is_current else " (outdated)"
-                    else:
-                        suffix = ""
-                    link = _static_pdf_link(pdf_path, f"⬇ {label} v{n}{suffix}")
-                    st.markdown(link, unsafe_allow_html=True)
+
+def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
+    """Inline convert-button + versioned download links for ONE document
+    (a CV or a CL). PDFs are saved to 10_output/20_pdfs/ with sequential
+    versioning — editing the source .md and re-converting mints v2, v3, …
+    while identical re-conversions reuse the latest version."""
+    import hashlib
+    if not md_path.exists():
+        st.caption(f"{label}: —")
+        return
+    if st.button(f"{label} → PDF", key=f"conv_{key_prefix}_{label}"):
+        try:
+            _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
+            _set_report_pdf_property(md_path, _pdf_path.name)
+            if is_new:
+                st.success(f"{label} → v{ver} created")
+            else:
+                st.info(f"{label} unchanged since v{ver} — reusing")
+        except Exception as e:
+            st.error(f"PDF conversion failed: {e}")
+
+    # List every version (newest first) as a download link. The
+    # highest-numbered version is only labeled "latest" if it was
+    # actually generated from the CURRENT .md content — otherwise the
+    # .md was edited since that PDF was made and the link is stale
+    # (this is exactly the bug that shipped once: editing the CV and
+    # re-downloading the old, unconverted PDF without noticing).
+    versions = _pdf_versions(md_path.stem)
+    if versions:
+        latest_n, latest_path = versions[-1]
+        current_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+        meta = _load_pdf_meta()
+        is_current = meta.get(latest_path.name) == current_sha
+        if not is_current:
+            st.caption(f"⚠️ edited since v{latest_n} — reconvert")
+        for n, pdf_path in reversed(versions):
+            if n == latest_n:
+                suffix = " (latest)" if is_current else " (outdated)"
+            else:
+                suffix = ""
+            link = _static_pdf_link(pdf_path, f"⬇ {label} v{n}{suffix}")
+            st.markdown(link, unsafe_allow_html=True)
 
 
 with tab_pdf:
@@ -904,7 +903,7 @@ with tab_pdf:
     rows = []
     for url, j in job_map.items():
         match = j.get("match", {})
-        base = make_safe_name(j.get("company", "company"), j.get("title", "job"))
+        base = resolve_doc_base(j.get("company", "company"), j.get("title", "job"), url)
         has_cv = (CV_DIR / f"{base}_CV.md").exists()
         has_cl = (CL_DIR / f"{base}_CL.md").exists()
         rows.append({
@@ -913,6 +912,9 @@ with tab_pdf:
             "title": j.get("title", "?"),
             "score": match.get("composite_score", 0),
             "tier": match.get("tier", ""),
+            "base": base,
+            "has_cv": has_cv,
+            "has_cl": has_cl,
             "has_docs": has_cv or has_cl,
         })
     rows.sort(key=lambda r: r["score"], reverse=True)
@@ -939,16 +941,15 @@ with tab_pdf:
         tier_icon = {"Strong": "🟢", "Good": "🟡", "Partial": "🟠", "Weak": "🔴"}.get(
             r["tier"].split()[-2] if r["tier"] else "", "⚪"
         )
-        c_score, c_job, c_pdf = st.columns([1, 5, 2])
+        c_score, c_job, c_cv, c_cl = st.columns([1, 4, 2, 2])
         with c_score:
             st.markdown(f"{tier_icon} `{r['score']*100:.0f}%`")
         with c_job:
             st.markdown(f"**{r['company']}** — {r['title'][:70]}")
-        with c_pdf:
-            if r["has_docs"]:
-                pdf_export_controls(r["company"], r["title"], f"pdf_{r['url']}", r["url"])
-            else:
-                st.caption("no CV/CL yet")
+        with c_cv:
+            pdf_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", f"pdf_{r['url']}")
+        with c_cl:
+            pdf_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", f"pdf_{r['url']}")
         st.divider()
     if len(filtered) > 100:
         st.caption(f"…and {len(filtered)-100} more — raise Min score or search to narrow down.")
