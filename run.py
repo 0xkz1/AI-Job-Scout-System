@@ -302,7 +302,7 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
                 if m_old:
                     pdf_lines = [
                         ln for ln in m_old.group(1).split("\n")
-                        if ln.startswith(("cv_pdf:", "cl_pdf:"))
+                        if ln.startswith(("cv_pdf:", "cl_pdf:", "cv_review:", "cl_review:"))
                     ]
                     if pdf_lines:
                         m_new = re.match(r"\A---\n(.*?)\n---\n", report, flags=re.DOTALL)

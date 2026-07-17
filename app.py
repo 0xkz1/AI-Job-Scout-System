@@ -162,7 +162,9 @@ def run_scraper(site="indeed", pages=5):
 # base and the #944040 accent.
 st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
-tab_scraper, tab_weights, tab_watched, tab_pdf = st.tabs(["🔍 Scraper", "🎯 Weights", "👁 Saved", "📄 PDF"])
+tab_scraper, tab_weights, tab_watched, tab_review, tab_pdf = st.tabs(
+    ["🔍 Scraper", "🎯 Weights", "👁 Saved", "🧐 Review", "📄 PDF"]
+)
 
 # ═══════════════════════════════════════════════════════════
 # Tab 1: Scraper
@@ -794,19 +796,19 @@ def _static_pdf_link(pdf_path: Path, label: str) -> str:
     )
 
 
-def _set_report_pdf_property(md_path: Path, pdf_name: str):
-    """Record the freshly generated PDF in the match report's frontmatter.
+def _set_report_doc_property(md_path: Path, key_suffix: str, target_name: str):
+    """Set a cv_*/cl_* wikilink property on the match report's frontmatter.
 
     md_path is the CV/CL markdown (…_CV.md / …_CL.md); the report shares its
-    base name. Sets/updates `cv_pdf:` or `cl_pdf:` to an Obsidian wikilink so
-    the PDF is reachable (and Dataview-queryable) from the report.
+    base name. key_suffix "pdf" → cv_pdf/cl_pdf, "review" → cv_review/cl_review.
+    Frontmatter properties keep these Dataview-queryable from the report.
     """
     import re
     stem = md_path.stem
     if stem.endswith("_CV"):
-        key, base = "cv_pdf", stem[:-3]
+        key, base = f"cv_{key_suffix}", stem[:-3]
     elif stem.endswith("_CL"):
-        key, base = "cl_pdf", stem[:-3]
+        key, base = f"cl_{key_suffix}", stem[:-3]
     else:
         return
     report = MATCH_DIR / f"{base}.md"
@@ -816,13 +818,17 @@ def _set_report_pdf_property(md_path: Path, pdf_name: str):
     m = re.match(r"\A---\n(.*?)\n---\n", text, flags=re.DOTALL)
     if not m:
         return
-    line = f'{key}: "[[{pdf_name}]]"'
+    line = f'{key}: "[[{target_name}]]"'
     fm = m.group(1)
     if re.search(rf"^{key}:.*$", fm, flags=re.MULTILINE):
         fm = re.sub(rf"^{key}:.*$", line, fm, flags=re.MULTILINE)
     else:
         fm = fm + "\n" + line
     report.write_text(f"---\n{fm}\n---\n" + text[m.end():], encoding="utf-8")
+
+
+def _set_report_pdf_property(md_path: Path, pdf_name: str):
+    _set_report_doc_property(md_path, "pdf", pdf_name)
 
 
 def resolve_doc_base(company: str, title: str, url: str = "") -> str:
@@ -834,6 +840,68 @@ def resolve_doc_base(company: str, title: str, url: str = "") -> str:
     if not (CV_DIR / f"{base}_CV.md").exists() and (CV_DIR / f"{hashed}_CV.md").exists():
         return hashed
     return base
+
+
+def ranked_job_rows(all_jobs: list[dict]) -> list[dict]:
+    """URL-deduped jobs sorted by match score desc, with doc-file existence.
+    Shared by the Review and PDF tabs."""
+    job_map = {}
+    for j in all_jobs:
+        url = j.get("url", "")
+        if url:
+            job_map[url] = j
+    rows = []
+    for url, j in job_map.items():
+        match = j.get("match", {})
+        base = resolve_doc_base(j.get("company", "company"), j.get("title", "job"), url)
+        has_cv = (CV_DIR / f"{base}_CV.md").exists()
+        has_cl = (CL_DIR / f"{base}_CL.md").exists()
+        rows.append({
+            "url": url,
+            "company": j.get("company", "?"),
+            "title": j.get("title", "?"),
+            "score": match.get("composite_score", 0),
+            "tier": match.get("tier", ""),
+            "base": base,
+            "has_cv": has_cv,
+            "has_cl": has_cl,
+            "has_docs": has_cv or has_cl,
+            "job": j,
+        })
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows
+
+
+def _tier_icon(tier: str) -> str:
+    return {"Strong": "🟢", "Good": "🟡", "Partial": "🟠", "Weak": "🔴"}.get(
+        tier.split()[-2] if tier else "", "⚪"
+    )
+
+
+def review_doc_controls(label: str, md_path: Path, job: dict, key_prefix: str):
+    """Run/show the LLM review for ONE document (CV or CL). The review is a
+    findings list, never a rewrite — the user's manual edit stays final."""
+    import re
+    from reviewer import run_review, review_is_current, REVIEW_MODEL
+    if not md_path.exists():
+        st.caption(f"{label}: —")
+        return
+    is_cur, rpath = review_is_current(md_path)
+    if st.button(f"🧐 Review {label}", key=f"rev_{key_prefix}_{label}"):
+        with st.spinner(f"Reviewing {label} with {REVIEW_MODEL}…"):
+            try:
+                rpath = run_review(label, md_path, job)
+                _set_report_doc_property(md_path, "review", rpath.stem)
+                is_cur = True
+                st.success(f"{label} review saved → 15_reviews/{rpath.name}")
+            except Exception as e:
+                st.error(f"Review failed: {e}")
+    if rpath and rpath.exists():
+        status = "current" if is_cur else "⚠️ doc edited since this review"
+        with st.expander(f"{label} review ({status})"):
+            text = rpath.read_text(encoding="utf-8")
+            m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
+            st.markdown(text[m.end():] if m else text)
 
 
 def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
@@ -879,6 +947,55 @@ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
             st.markdown(link, unsafe_allow_html=True)
 
 
+with tab_review:
+    st.header("🧐 Document Review")
+    st.markdown(
+        "LLM proofreading BEFORE PDF export: checks your (hand-edited) CV/CL "
+        "against the job posting and your verified profile — factual claims, "
+        "job-fit gaps, style. Findings only; it never rewrites your text. "
+        "Reviews are saved to `15_reviews/` and linked from the match report."
+    )
+
+    try:
+        all_jobs = load_jobs(st.session_state.config)
+    except FileNotFoundError:
+        st.error("No job data found. Run the scraper first (🔍 Scraper tab).")
+        st.stop()
+
+    rows = ranked_job_rows(all_jobs)
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        min_score = st.slider("Min score", 0, 100, 50, key="review_min_score")
+    with col_f2:
+        search_query = st.text_input("🔍 Search company/title", key="review_search")
+
+    filtered = [
+        r for r in rows
+        if r["score"] * 100 >= min_score
+        and r["has_docs"]
+        and (not search_query
+             or search_query.lower() in r["company"].lower()
+             or search_query.lower() in r["title"].lower())
+    ]
+    st.metric("Showing", f"{len(filtered)} jobs")
+
+    for r in filtered[:50]:
+        c_score, c_job = st.columns([1, 7])
+        with c_score:
+            st.markdown(f"{_tier_icon(r['tier'])} `{r['score']*100:.0f}%`")
+        with c_job:
+            st.markdown(f"**{r['company']}** — {r['title'][:70]}")
+        c_cv, c_cl = st.columns(2)
+        with c_cv:
+            review_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", r["job"], f"rv_{r['url']}")
+        with c_cl:
+            review_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", r["job"], f"rv_{r['url']}")
+        st.divider()
+    if len(filtered) > 50:
+        st.caption(f"…and {len(filtered)-50} more — raise Min score or search to narrow down.")
+
+
 with tab_pdf:
     st.header("📄 PDF Export")
     st.markdown(
@@ -893,31 +1010,7 @@ with tab_pdf:
         st.error("No job data found. Run the scraper first (🔍 Scraper tab).")
         st.stop()
 
-    # Dedup by URL, keep pre-computed scores
-    job_map = {}
-    for j in all_jobs:
-        url = j.get("url", "")
-        if url:
-            job_map[url] = j
-
-    rows = []
-    for url, j in job_map.items():
-        match = j.get("match", {})
-        base = resolve_doc_base(j.get("company", "company"), j.get("title", "job"), url)
-        has_cv = (CV_DIR / f"{base}_CV.md").exists()
-        has_cl = (CL_DIR / f"{base}_CL.md").exists()
-        rows.append({
-            "url": url,
-            "company": j.get("company", "?"),
-            "title": j.get("title", "?"),
-            "score": match.get("composite_score", 0),
-            "tier": match.get("tier", ""),
-            "base": base,
-            "has_cv": has_cv,
-            "has_cl": has_cl,
-            "has_docs": has_cv or has_cl,
-        })
-    rows.sort(key=lambda r: r["score"], reverse=True)
+    rows = ranked_job_rows(all_jobs)
 
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
@@ -938,12 +1031,9 @@ with tab_pdf:
     st.metric("Showing", f"{len(filtered)} jobs")
 
     for r in filtered[:100]:
-        tier_icon = {"Strong": "🟢", "Good": "🟡", "Partial": "🟠", "Weak": "🔴"}.get(
-            r["tier"].split()[-2] if r["tier"] else "", "⚪"
-        )
         c_score, c_job, c_cv, c_cl = st.columns([1, 4, 2, 2])
         with c_score:
-            st.markdown(f"{tier_icon} `{r['score']*100:.0f}%`")
+            st.markdown(f"{_tier_icon(r['tier'])} `{r['score']*100:.0f}%`")
         with c_job:
             st.markdown(f"**{r['company']}** — {r['title'][:70]}")
         with c_cv:

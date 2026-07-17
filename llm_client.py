@@ -69,6 +69,7 @@ def call_llm(
     max_tokens: int = 512,
     provider: Optional[str] = None,
     retries: int = 2,
+    model: Optional[str] = None,
 ) -> str:
     """Call LLM with automatic primary → fallback provider chain.
 
@@ -102,7 +103,7 @@ def call_llm(
     for i, prov in enumerate(chain):
         is_last = i == len(chain) - 1
         try:
-            return _call_provider(prov, messages, system_prompt, temperature, max_tokens, retries)
+            return _call_provider(prov, messages, system_prompt, temperature, max_tokens, retries, model)
         except ValueError as e:
             # Missing API key — skip to the next provider in the chain
             if is_last:
@@ -125,16 +126,19 @@ def _call_provider(
     temperature: float,
     max_tokens: int,
     retries: int,
+    model: Optional[str] = None,
 ) -> str:
-    """Route to the appropriate provider implementation."""
+    """Route to the appropriate provider implementation. `model` overrides the
+    provider's env-configured model for this call only (e.g. a stronger model
+    for document review)."""
     if provider == "mistral":
-        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries)
+        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider == "stepfun":
-        return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries)
+        return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider == "openrouter":
-        return _call_openrouter(messages, system_prompt, temperature, max_tokens, retries)
+        return _call_openrouter(messages, system_prompt, temperature, max_tokens, retries, model)
     else:
-        return _call_ollama(messages, system_prompt, temperature, max_tokens, retries)
+        return _call_ollama(messages, system_prompt, temperature, max_tokens, retries, model)
 
 
 def _call_mistral(
@@ -143,12 +147,13 @@ def _call_mistral(
     temperature: float,
     max_tokens: int,
     retries: int,
+    model: Optional[str] = None,
 ) -> str:
     api_key = os.environ.get("MISTRAL_API_KEY") or os.environ.get("CLOUD_API_KEY")
     if not api_key:
         raise ValueError("MISTRAL_API_KEY not set (nor CLOUD_API_KEY)")
 
-    model = os.environ.get("MISTRAL_MODEL") or os.environ.get("CLOUD_MODEL", "mistral-tiny")
+    model = model or (os.environ.get("MISTRAL_MODEL") or os.environ.get("CLOUD_MODEL", "mistral-tiny"))
     full_messages = _build_messages(messages, system_prompt)
 
     for attempt in range(retries + 1):
@@ -182,6 +187,7 @@ def _call_stepfun(
     temperature: float,
     max_tokens: int,
     retries: int,
+    model: Optional[str] = None,
 ) -> str:
     """StepFun native API (OpenAI-compatible) — not routed via OpenRouter."""
     api_key = os.environ.get("STEPFUN_API_KEY") or os.environ.get("CLOUD_API_KEY")
@@ -190,7 +196,7 @@ def _call_stepfun(
 
     region = os.environ.get("STEPFUN_REGION", "international").strip().lower()
     base_url = "https://api.stepfun.com/v1" if region == "china" else "https://api.stepfun.ai/v1"
-    model = os.environ.get("STEPFUN_MODEL") or os.environ.get("CLOUD_MODEL", "step-3.5-flash")
+    model = model or (os.environ.get("STEPFUN_MODEL") or os.environ.get("CLOUD_MODEL", "step-3.5-flash"))
     full_messages = _build_messages(messages, system_prompt)
 
     for attempt in range(retries + 1):
@@ -224,12 +230,13 @@ def _call_openrouter(
     temperature: float,
     max_tokens: int,
     retries: int,
+    model: Optional[str] = None,
 ) -> str:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
 
-    model = os.environ.get("OPENROUTER_MODEL") or os.environ.get("CLOUD_MODEL", "stepfun/step-3.5-flash")
+    model = model or (os.environ.get("OPENROUTER_MODEL") or os.environ.get("CLOUD_MODEL", "stepfun/step-3.5-flash"))
     full_messages = _build_messages(messages, system_prompt)
 
     for attempt in range(retries + 1):
@@ -264,9 +271,10 @@ def _call_ollama(
     temperature: float,
     max_tokens: int,
     retries: int,
+    model: Optional[str] = None,
 ) -> str:
     endpoint = os.environ.get("OLLAMA_ENDPOINT", "http://localhost:11434/api/chat")
-    model = os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")
+    model = model or (os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf"))
     timeout = int(os.environ.get("OLLAMA_TIMEOUT", "180"))
     keep_alive = os.environ.get("OLLAMA_KEEP_ALIVE", "5m")
     full_messages = _build_messages(messages, system_prompt)
