@@ -257,8 +257,9 @@ opening_source: "{opening_source}"
 ---
 """
     
-    display_title = f"{company} - {job_title} (Cover Letter)" if company and job_title else "Cover Letter"
-    content = f"{frontmatter}\n# {display_title}\n\n{letter}"
+    # No big H1 title — it's a letter; it opens with the sender block.
+    # The company/role stays in the frontmatter `title:` for Obsidian.
+    content = f"{frontmatter}\n{letter}"
     
     filepath.write_text(content, encoding="utf-8")
     return str(filepath)
