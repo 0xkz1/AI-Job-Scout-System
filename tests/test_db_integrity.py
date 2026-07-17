@@ -122,3 +122,22 @@ def test_generate_outputs_writes_all_passed_jobs_reports(tmp_path):
     generate_outputs(jobs, config, str(tmp_path))
     reports = list((tmp_path / "00_matches").glob("*.md"))
     assert len(reports) == 5
+
+
+def test_generate_outputs_preserves_pdf_properties(tmp_path):
+    # cv_pdf/cl_pdf are written into report frontmatter by the WebUI at PDF
+    # conversion time; regenerating reports must not silently drop them.
+    config = {"match_score_threshold": 0.99}
+    job = {
+        "company": "Acme", "title": "Designer", "url": "https://x.com/1",
+        "description": "desc", "location": "Remote", "match": _match(0.5),
+    }
+    generate_outputs([job], config, str(tmp_path))
+    report = tmp_path / "00_matches" / "Acme_Designer.md"
+    text = report.read_text()
+    # simulate the WebUI adding the property
+    text = text.replace("---\n", "---\ncv_pdf: \"[[Acme_Designer_CV_v2.pdf]]\"\n", 1)
+    report.write_text(text)
+
+    generate_outputs([job], config, str(tmp_path))  # regenerate
+    assert 'cv_pdf: "[[Acme_Designer_CV_v2.pdf]]"' in report.read_text()

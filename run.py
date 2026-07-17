@@ -291,6 +291,26 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
         # Step 3: Generate match report (with links to CV/CL)
         report = generate_match_report(job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link)
         report_path = os.path.join(match_dir, f"{match_filename}.md")
+        # Reports are fully regenerated each run, but cv_pdf/cl_pdf frontmatter
+        # properties are written by the WebUI at PDF-conversion time — carry
+        # them over from the old report or they'd vanish on every reanalyze.
+        if os.path.exists(report_path):
+            try:
+                with open(report_path) as f:
+                    old = f.read()
+                m_old = re.match(r"\A---\n(.*?)\n---\n", old, flags=re.DOTALL)
+                if m_old:
+                    pdf_lines = [
+                        ln for ln in m_old.group(1).split("\n")
+                        if ln.startswith(("cv_pdf:", "cl_pdf:"))
+                    ]
+                    if pdf_lines:
+                        m_new = re.match(r"\A---\n(.*?)\n---\n", report, flags=re.DOTALL)
+                        if m_new:
+                            fm = m_new.group(1) + "\n" + "\n".join(pdf_lines)
+                            report = f"---\n{fm}\n---\n" + report[m_new.end():]
+            except Exception:
+                pass  # never let carry-over break report generation
         with open(report_path, "w") as f:
             f.write(report)
 
