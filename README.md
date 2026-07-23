@@ -36,7 +36,9 @@ All LLM calls go through one provider chain — **Mistral (cloud, primary) → S
 
 ![System architecture](docs/architecture.svg)
 
-**Flow in one line:** five Playwright scrapers + manual intake → `00_saved/` staging (auto-ingested every run) → `run.py` pipeline (`analyzer` → `filter` → `matcher` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit**.
+**Flow in one line:** five Playwright scrapers + manual intake → `00_saved/` staging (auto-ingested every run) → `run.py` pipeline (`analyzer` → `filter` → `matcher` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit** — then an **LLM review dialogue** (annotate findings in Obsidian, LLM replies, apply agreed fixes per-fix to the document or back to the reusable masters), and a **nightly Hermes cron** that runs the whole pipeline unattended and Telegram-notifies only new high matches. Details: [ARCHITECTURE.md](ARCHITECTURE.md) §6–7.
+
+CV headers (title + tagline) are **per-role**: each `career/cv/profile/<role>.md` carries `role_title` / `role_tagline` frontmatter that `cv_generator.py` injects, so a Product Designer application leads with a different identity than a Creative Technologist one.
 
 Every LLM task (skill extraction, context/ethos scoring, EN+JA summaries, CV & cover-letter drafting) goes through `llm_client.py`, which walks the provider chain **Mistral → StepFun → local Ollama** on rate limits, 5xx errors, timeouts, or missing API keys.
 
@@ -105,14 +107,17 @@ url: "https://indeed.com/..."
 
 ## Streamlit UI
 
-Four tabs in a single app (`app.py`):
+Five tabs in a single app (`app.py`):
 
 | Tab | Function |
 | --- | -------- |
 | **🔍 Scraper** | Edit keywords/locations/salary/sites, run scraper, view results table |
 | **🎯 Weights** | Drag sliders to adjust scoring weights, regenerate all match reports live |
 | **👁 Saved** | url-list.md & watched-list intake — paste URLs or descriptions, extract & analyze |
-| **📋 Kanban** | Application pipeline board (Saved → Applied → … → Offer), per-card **CV/CL → A4 PDF export** |
+| **🧐 Review** | Batch-review CVs/CLs, annotation dialogue (💬 追記に回答), per-fix apply with destination choice (この文書のみ / 元ファイル+この文書 / 適用しない) |
+| **📄 PDF** | Jobs ranked by score, per-document **CV/CL → versioned A4 PDF export** |
+
+⚠️ Streamlit auto-reloads `app.py` on save, but **not** imported modules — after editing `reviewer.py`, `cv_generator.py`, etc., restart the server.
 
 ```bash
 # Launch
@@ -340,17 +345,14 @@ GROUP BY type
 
 ## Cron Scheduling
 
-Two-stage nightly pipeline:
+The nightly run is scheduled in the **Hermes archivist profile's cron** (not plain crontab): `~/.hermes/profiles/archivist/cron/jobs.json` fires `job_scout_nightly.sh` at 02:00 in `no_agent` mode — the script's stdout is delivered verbatim to **Telegram** via the archivist profile's own bot (`deliver: telegram:<chat_id>`).
 
-```bash
-# Every night at 02:00 — scrape new jobs + reanalyze
-0 2 * * * cd /path/to/Job-Intelligence-System && python3 scraper_saved.py && python3 run.py --site indeed --pages 5
-```
+What happens each night (see [ARCHITECTURE.md](ARCHITECTURE.md) §7):
+1. `scraper_saved.py` — LinkedIn/Indeed saved-jobs staging → `00_saved/_saved_index.json`
+2. `run.py --site indeed|reed|guardian|adzuna --pages 5` — scrape → analyze → match → generate CV/CL (LinkedIn excluded: interactive login)
+3. `nightly_scout.py` — diff against `_nightly_state.json`, auto-review new matches ≥ 80%, print a summary of new matches ≥ 70% to stdout → Telegram. No new high matches = empty stdout = silent night.
 
-What happens each night:
-1. `scraper_saved.py` — scrapes LinkedIn bookmarks + tracker → `00_saved/_saved_index.json`
-2. `run.py --site indeed` — scrapes Indeed, saves raw → `00_saved/_raw_indeed_*.json`, then analyzes → `10_output/`
-3. Both manual saved + auto scraped jobs are merged before analysis (deduplicated by URL)
+All scraper output goes to `10_output/_nightly_scout.log`; only the notification summary reaches stdout. Script timeout: 7200 s (`cron.script_timeout_seconds`, archivist `config.yaml`).
 
 For ad-hoc reanalysis without re-scraping:
 ```bash
@@ -509,3 +511,30 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 4. **カバーレターはテンプレート式**: `cover_letter_generator.py` はロール型テンプレートを使用（LLM不要）。140件でもほぼ瞬時に完了。LLMが必要なのはCV職歴セクションのみ。
 
 5. **フォールバック未発動**: Ollamaフォールバックを設定したが一度も発動しなかった。クラウドモデルがバッチ全体を1回のレート制限・タイムアウトなしで処理 — ただしフォールバックはセーフティネットとして常備。
+
+---
+
+## レビュー対話 + 夜間自動化の整備 (2026-07-19 〜 2026-07-20)
+
+セッション横断のトライ&エラー記録。全体像は [ARCHITECTURE.md](ARCHITECTURE.md) §6–7。
+
+### 夜間自動化 (Hermes cron → Telegram)
+
+- **35回のrun全てでTelegram配信が失敗していた** — `deliver=telegram`(bare指定)は cron job の origin (webui) と不一致の場合 `TELEGRAM_HOME_CHANNEL` 環境変数にフォールバックするが、未設定だった。エラーは `last_delivery_error` に静かに残るだけで気づけない。
+- **修正**: job を Hermes **archivist profile** の cron に移設し、`deliver: telegram:<chat_id>` と chat_id 明示指定に変更(env 非依存)。通知は archivist の専用 bot から届く。default profile 側の旧 job は無効化。
+- `scraper_indeed.py` `_format_job_md()` が `KeyError: 'scraped_at'` で落ちていた — `save_indeed()` には他ソース由来の job も流れ込むため、全キーを `.get()` 化。
+- 4サイト×5ページは 3600 秒のデフォルト script timeout を超える → archivist `config.yaml` で `cron.script_timeout_seconds: 7200`。
+
+### ロール別CVヘッダー
+
+- 肩書とタグラインが `MASTER_CV` にハードコードされ全ロール共通だった → `career/cv/profile/<role>.md` frontmatter の `role_title` / `role_tagline` に移し、`get_header()` が注入。Product Designer と Creative Technologist で別の肩書を名乗れる。
+- タグラインのような「候補者の確定ブランド」は `review-decisions.md` 台帳に記載し、レビューでの再指摘を防ぐ。
+
+### レビュー対話の落とし穴と修正
+
+1. **ボタン消滅デッドロック**: 回答/適用ボタンが両方 `is_cur`(文書未編集)でガードされていた。一括適用すると文書が編集され `is_cur=False` → 追記が保留のままボタンが全部消える。→ ガードを撤廃(対話はレビュー側の操作、適用は完全一致置換なのでどちらも stale で安全)。
+2. **「参照元から編集」が機能していなかった**: 対話プロンプトにソースファイル(profile/projects)が入っておらず、LLM は中身を知らずに「承知」と返すだけだった。→ `trace_finding_sources()` で特定したマスターの全文をプロンプトに注入。
+3. **`**修正案**:` がパースされない**: 対話 LLM はラベルを太字にする癖があり、修正案抽出 regex が0件になっていた。→ regex を太字対応に。
+4. **マスターのドリフト問題**: 求人ごとのレビューが毎回マスターを書き換えると、マスターが直近の求人に引きずられる。→ 修正案ごとに適用先を選択制(この文書のみ[デフォルト] / 元ファイル+この文書 / 適用しない)。frontmatter のみに一致する引用はソース適用から除外(確定ブランドの `role_tagline` を誤って上書きしかけた実例あり)。
+5. **対話履歴の整合性**: 却下された旧修正案を後から合意版に差し替えると、ユーザーのコメントが「何に反論したのか」読めなくなる。→ 差し替え時は旧案を取り消し線で残す(パーサーは引用符内の合意版だけを抽出)。
+6. **Streamlit のモジュールキャッシュ**: `app.py` は自動リロードされるが import 先(`reviewer.py` 等)はプロセス再起動まで古いまま。`ImportError: cannot import name ...` が出たらサーバー再起動。

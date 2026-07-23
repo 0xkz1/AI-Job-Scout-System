@@ -41,3 +41,13 @@ sites:
 - adzuna
 - indeed
 - linkedin
+
+# Review submission gate: CV/CL scoring >= this is badged 提出可 (badge only)
+review_score_threshold: 85
+
+# Minimum composite match score for CV/cover-letter generation.
+match_score_threshold: 0.60
+
+# Cap CV/cover-letter generation to the best N matches per run (0 = no cap).
+# Match reports are still written for every job that passes the filter.
+cv_generation_limit: 150

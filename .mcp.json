@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "context-engine": {
+      "command": "/home/kz003/.hermes/hermes-agent/venv/bin/cce",
+      "args": [
+        "serve",
+        "--project-dir",
+        "/media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System"
+      ]
+    }
+  }
+}

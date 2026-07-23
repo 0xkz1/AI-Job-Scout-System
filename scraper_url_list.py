@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import json
 import asyncio
 import requests
@@ -241,7 +242,7 @@ def main():
     if lock is None:
         print("⚠ Another process is already using url_list_jobs.json (scrape or analysis).")
         print("  Wait for it to finish before running again.")
-        return
+        sys.exit(2)  # non-zero so the WebUI surfaces the contention as an error
 
     if not os.path.exists(URL_LIST_FILE):
         print(f"File not found: {URL_LIST_FILE}")

@@ -139,11 +139,30 @@ async def _extract_reed_jobs(page) -> list[dict]:
         return []
 
 
-def _fetch_reed_description_sync(job_url: str) -> str:
+def _job_location_from_ld(data: dict) -> str:
+    """Format Schema.org JobPosting.jobLocation as 'City, Region'."""
+    loc = data.get("jobLocation")
+    if isinstance(loc, list):
+        loc = loc[0] if loc else None
+    if not isinstance(loc, dict):
+        return ""
+    address = loc.get("address") or {}
+    if not isinstance(address, dict):
+        return ""
+    locality = (address.get("addressLocality") or "").strip()
+    region = (address.get("addressRegion") or "").strip()
+    return ", ".join(p for p in (locality, region) if p)
+
+
+def _fetch_reed_description_sync(job_url: str) -> dict:
     """
-    Fetch full job description from a Reed detail page via HTTP (no browser needed).
-    Extracts from Schema.org JSON-LD (type=JobPosting) which Reed always includes
-    in its server-rendered HTML. Falls back to data-qa="job-description" HTML parsing.
+    Fetch full job description (and location) from a Reed detail page via HTTP
+    (no browser needed). Extracts from Schema.org JSON-LD (type=JobPosting) which
+    Reed always includes in its server-rendered HTML — this is the only reliable
+    source of location, since the search-results-page scrape only recognises a
+    hardcoded shortlist of cities (edinburgh/glasgow/london/remote) and leaves
+    everything else (Liverpool, Manchester, ...) blank.
+    Falls back to data-qa="job-description" HTML parsing for description only.
     """
     _HEADERS = {
         "User-Agent": (
@@ -168,6 +187,7 @@ def _fetch_reed_description_sync(job_url: str) -> str:
             try:
                 data = json.loads(block)
                 if isinstance(data, dict) and data.get("@type") == "JobPosting":
+                    location = _job_location_from_ld(data)
                     raw_desc = data.get("description", "")
                     if raw_desc:
                         # Strip HTML tags, unescape entities
@@ -175,7 +195,7 @@ def _fetch_reed_description_sync(job_url: str) -> str:
                         clean = unescape(clean)
                         clean = re.sub(r"\s+", " ", clean).strip()
                         if len(clean) > 100:
-                            return clean[:6000]
+                            return {"description": clean[:6000], "location": location}
             except (json.JSONDecodeError, Exception):
                 continue
 
@@ -190,15 +210,15 @@ def _fetch_reed_description_sync(job_url: str) -> str:
             clean = unescape(clean)
             clean = re.sub(r"\s+", " ", clean).strip()
             if len(clean) > 100:
-                return clean[:6000]
+                return {"description": clean[:6000], "location": ""}
 
-        return ""
+        return {"description": "", "location": ""}
     except Exception as e:
         print(f"  ⚠ Reed HTTP fetch error for {job_url}: {e}")
-        return ""
+        return {"description": "", "location": ""}
 
 
-async def _fetch_job_description(page, job_url: str) -> str:
+async def _fetch_job_description(page, job_url: str) -> dict:
     """
     Async wrapper for Reed description fetch — uses synchronous HTTP (not Playwright)
     for reliability. The `page` arg is kept for interface compatibility but not used.

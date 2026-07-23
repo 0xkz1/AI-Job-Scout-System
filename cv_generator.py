@@ -3,6 +3,8 @@
 # Source: Merged from Rockstar North (Dev Support) + Paper Tiger (Data Input)
 # Generated for automated CV customization per job
 
+import re
+
 DEFAULT_TECHNICAL_TOOLKIT = """Systems & Infrastructure
 Linux (Ubuntu), tmux (process monitoring and session management), Docker, custom PC build, system configuration
 Workflow & Troubleshooting
@@ -20,8 +22,10 @@ Obsidian (structured note-taking, workflow organisation, Zettelkasten-style deco
 # thin-employment weakness is countered by structure — a continuous
 # 2017→present work timeline), independent work as a named studio practice,
 # keyword lists (toolkit) after the evidence, no separate strengths list.
-MASTER_CV = """# Kazuki Yunome
-Edinburgh, Scotland, UK (Local Resident) | CANDIDATE_EMAIL | CANDIDATE_PHONE
+MASTER_CV = """# Kazuki Yunomé
+**{role_title}**
+{role_tagline}
+Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE
 Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
 
 ## PROFILE
@@ -44,6 +48,48 @@ Spanish Language School
 
 ## LANGUAGES
 **Japanese:** Native | **English:** Professional working proficiency | **Spanish:** Daily conversation level"""
+
+# Fallback header if a profile is missing role_title/role_tagline in its
+# frontmatter — keeps generation working rather than rendering "{role_title}"
+# literally into the CV.
+_DEFAULT_ROLE_TITLE = "Full-stack Developer & Designer"
+_DEFAULT_ROLE_TAGLINE = "Building automated systems for business and creative work with AI/LLM"
+
+
+def get_header(role_type: str = "general") -> tuple[str, str]:
+    """Get (role_title, role_tagline) from a profile's frontmatter, falling
+    back to general.md, then to hardcoded defaults."""
+    import yaml
+    from pathlib import Path
+
+    base_dir = Path(__file__).resolve().parent.parent
+    candidates = [
+        base_dir / "cv" / "profile" / f"{role_type}.md",
+        Path(f"/media/kz003/atelier/00_Kazuki/career/cv/profile/{role_type}.md"),
+        Path(f"/home/kz003/atelier/00_Kazuki/career/cv/profile/{role_type}.md"),
+    ]
+    profile_path = next((p for p in candidates if p.exists()), None)
+
+    if profile_path is None:
+        if role_type != "general":
+            return get_header("general")
+        return _DEFAULT_ROLE_TITLE, _DEFAULT_ROLE_TAGLINE
+
+    try:
+        content = profile_path.read_text(encoding="utf-8")
+        parts = content.split("---")
+        frontmatter = yaml.safe_load(parts[1]) or {} if len(parts) >= 3 else {}
+        title = frontmatter.get("role_title")
+        tagline = frontmatter.get("role_tagline")
+        if title and tagline:
+            return title, tagline
+    except Exception as e:
+        print(f"  ⚠ Error loading header for {role_type}: {e}")
+
+    if role_type != "general":
+        return get_header("general")
+    return _DEFAULT_ROLE_TITLE, _DEFAULT_ROLE_TAGLINE
+
 
 def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, str]:
     """
@@ -146,10 +192,58 @@ def get_strengths(role_type: str = "general") -> str:
     _, s, _ = load_profile_and_strengths(role_type)
     return s
 
+# Category ordering per role for the unified master toolkit. Every CV shows
+# ALL categories (full skill breadth — employers should see everything);
+# only the order shifts so the most job-relevant block comes first.
+# Categories not listed for a role keep master-file order after the listed ones.
+_TOOLKIT_CATEGORY_ORDER = {
+    "general":               [],  # master-file order as-is
+    "web_developer":         ["Programming & Automation", "Frontend & Product Engineering", "Systems & Infrastructure", "AI Systems & Agents"],
+    "product_designer":      ["Design & Visual Production", "Frontend & Product Engineering", "3D & Generative Media", "AI Systems & Agents"],
+    "creative_technologist": ["3D & Generative Media", "AI Systems & Agents", "Design & Visual Production", "Programming & Automation"],
+    "technical_artist":      ["3D & Generative Media", "Design & Visual Production", "Programming & Automation", "AI Systems & Agents"],
+    "data_analysis":         ["Programming & Automation", "AI Systems & Agents", "Systems & Infrastructure"],
+    "development_support":   ["Systems & Infrastructure", "Programming & Automation", "AI Systems & Agents"],
+}
+
+
+def _load_master_toolkit() -> list[tuple[str, str]]:
+    """Parse skill-toolkit/master.md into [(category, skills_line), ...] preserving order."""
+    from pathlib import Path
+    base_dir = Path(__file__).resolve().parent.parent
+    for cand in [base_dir / "cv" / "skill-toolkit" / "master.md",
+                 Path("/media/kz003/atelier/00_Kazuki/career/cv/skill-toolkit/master.md")]:
+        if cand.exists():
+            body = cand.read_text(encoding="utf-8")
+            if "## Technical Toolkit" in body:
+                body = body.split("## Technical Toolkit", 1)[1]
+            pairs, cat = [], None
+            for line in body.split("\n"):
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if cat is None:
+                    cat = s
+                else:
+                    pairs.append((cat, s))
+                    cat = None
+            if pairs:
+                return pairs
+    return []
+
+
 def get_toolkit(role_type: str = "general") -> str:
-    """Get technical toolkit for a role type."""
-    _, _, t = load_profile_and_strengths(role_type)
-    return t
+    """Unified toolkit: ALL categories on every CV, reordered per role type
+    (deterministic, no LLM). Falls back to the per-profile toolkit if the
+    master file is missing."""
+    pairs = _load_master_toolkit()
+    if not pairs:
+        _, _, t = load_profile_and_strengths(role_type)
+        return t
+    priority = _TOOLKIT_CATEGORY_ORDER.get(role_type, [])
+    ordered = [p for name in priority for p in pairs if p[0] == name]
+    ordered += [p for p in pairs if p not in ordered]
+    return "\n".join(f"{cat}\n{skills}" for cat, skills in ordered)
 
 # Role type detection from job title/description
 ROLE_KEYWORDS = {
@@ -159,6 +253,7 @@ ROLE_KEYWORDS = {
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
     "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
     "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma"],
+    "camera_assistant": ["camera assistant", "photography assistant", "photo assistant", "camera operator", "studio photographer", "photographer", "photography"],
 }
 
 def detect_role_type(job_title: str, job_description: str = "") -> str:
@@ -172,6 +267,42 @@ def detect_role_type(job_title: str, job_description: str = "") -> str:
         if scores[best] > 0:
             return best
     return "general"
+
+
+def role_affinity(job_title: str, job_skills: list[str] | None = None,
+                  job_description: str = "") -> dict[str, float]:
+    """Keyword affinity of a job to EVERY role profile, aggregated across
+    title, extracted skill list, and description. Title hits count double —
+    the title is the employer's own one-line statement of the discipline.
+
+    Unlike detect_role_type (winner-take-all, picks ONE CV template), this
+    returns the full {role: score} map so callers can reason about
+    mixed-signal jobs: one stray data_analysis keyword next to three
+    product_designer keywords should read as a design job, not a data job,
+    and matcher.py uses the aggregate to decide whether a bare "Design"
+    skill is credible.
+
+    Description hits count only 0.5: long postings mention role words in
+    passing ("product design" in a tour-operator posting about designing
+    travel products, "photographer" in an art-book publisher's boilerplate),
+    so a description-only mention must appear as several distinct keywords
+    before it outweighs the absence of any title/skill-list evidence."""
+    title = (job_title or "").lower()
+    skills_blob = " ".join(str(s).lower() for s in (job_skills or []))
+    desc = (job_description or "").lower()[:5000]
+    aff: dict[str, float] = {}
+    for role, keywords in ROLE_KEYWORDS.items():
+        score = 0.0
+        for kw in keywords:
+            if kw in title:
+                score += 2.0
+            if kw in skills_blob:
+                score += 1.0
+            if kw in desc:
+                score += 0.5
+        if score:
+            aff[role] = score
+    return aff
 
 # ─────────────────────────────────────────────
 # Project Registry
@@ -213,7 +344,10 @@ def load_projects_from_md() -> list[dict]:
                 if is_draft:
                     continue  # Skip draft projects
                 
-                description = parts[2].strip()
+                # The body IS the CV entry — but a trailing "## 和訳" section
+                # (reference translation for the user) must never reach the CV.
+                import re as _re
+                description = _re.split(r"\n##\s*和訳", parts[2], maxsplit=1)[0].strip()
                 
                 project = {
                     "id": frontmatter.get("id", fpath.stem),
@@ -226,6 +360,10 @@ def load_projects_from_md() -> list[dict]:
                     # type: employment entries render in the fixed EXPERIENCE
                     # section; everything else is a selectable project.
                     "type": str(frontmatter.get("type", "project")).lower(),
+                    # cover_letter: false keeps a project out of cover-letter
+                    # openings while leaving it on the CV — for work that is
+                    # real but not yet developed enough to lead a pitch with.
+                    "cover_letter": frontmatter.get("cover_letter", True) is not False,
                 }
                 projects.append(project)
         except Exception as e:
@@ -242,54 +380,75 @@ EMPLOYMENT = sorted(
 PROJECTS = [p for p in _ALL_ENTRIES if p["type"] != "employment"]
 
 
-def get_employment_section() -> str:
+def get_employment_section(role_type: str = "") -> str:
     """Fixed employment/freelance history — never LLM-selected. For a
     portfolio-led CV this is the structural proof of work history; omitting
-    the one real employer is the last thing this CV can afford."""
-    return "\n\n".join(_format_project_entry(p) for p in EMPLOYMENT)
+    the one real employer is the last thing this CV can afford.
+
+    Filtered by tags: an entry with no tags (or an empty list) always shows —
+    that's the explicit "relevant to every role" declaration. An entry WITH
+    tags only shows when role_type is one of them (e.g. the Real Estate
+    Photography internship is tagged [camera_assistant] only, so it must not
+    surface in unrelated CVs like Property Underwriter or Family Solicitor)."""
+    entries = [p for p in EMPLOYMENT if not p.get("tags") or role_type in p["tags"]]
+    return "\n\n".join(_format_project_entry(p) for p in entries)
 
 # ─────────────────────────────────────────────
 # Fallback: Static experience per role type
 # ─────────────────────────────────────────────
 # Used when Ollama is unavailable. Projects filtered by role_tags, order fixed.
 
+# ids must exist in career/cv/projects/*.md (employment entries render in the
+# fixed EXPERIENCE section, so they never appear here). Top-5 per role to
+# mirror the LLM path's selection size.
 STATIC_EXPERIENCE = {
     "web_developer": [
         "portfolio_website",
-        "independent_development",
-        "linux_systems",
+        "ai-job-scout-system",
+        "hermes-ai-agent-orchestration-system",
+        "asset-weaver-obsidian-plugin",
+        "web3-node-ops",
     ],
     "development_support": [
-        "independent_development",
-        "linux_systems",
+        "ai-job-scout-system",
+        "hermes-ai-agent-orchestration-system",
+        "ai-asset-tagger-system",
+        "personal-priority-orchestrator",
+        "web3-node-ops",
     ],
     "data_analysis": [
-        "independent_development",
+        "ai-asset-tagger-system",
+        "ai-job-scout-system",
+        "personal-priority-orchestrator",
+        "hermes-ai-agent-orchestration-system",
     ],
     "creative_technologist": [
-        "feral",
-        "arch_viz",
-        "hive_floral_pod",
+        "feral-bestiary-tales-of-return",
+        "ai-creative-workflow-automation",
+        "hive-floral-pod-3d-conceptual-art",
+        "feral-research-living-archive",
         "portfolio_website",
     ],
     "technical_artist": [
-        "feral",
-        "arch_viz",
-        "hive_floral_pod",
+        "feral-bestiary-tales-of-return",
+        "hive-floral-pod-3d-conceptual-art",
+        "ai-creative-workflow-automation",
+        "ai-asset-tagger-system",
+        "asset-weaver-obsidian-plugin",
     ],
     "product_designer": [
         "portfolio_website",
-        "feral",
-        "arch_viz",
-        "hive_floral_pod",
+        "feral-bestiary-tales-of-return",
+        "hive-floral-pod-3d-conceptual-art",
+        "logo-design-for-myself",
+        "ai-creative-workflow-automation",
     ],
     "general": [
+        "ai-job-scout-system",
         "portfolio_website",
-        "independent_development",
-        "linux_systems",
-        "feral",
-        "arch_viz",
-        "hive_floral_pod",
+        "feral-bestiary-tales-of-return",
+        "hermes-ai-agent-orchestration-system",
+        "hive-floral-pod-3d-conceptual-art",
     ],
 }
 
@@ -408,7 +567,10 @@ AVAILABLE PROJECTS:
 {project_summaries}
 
 INSTRUCTIONS:
-1. Select the 3-5 projects MOST RELEVANT to this specific job.
+1. Select the 5 projects MOST RELEVANT to this specific job — pick the 5 that
+   deserve full write-ups. Do NOT list, summarise, or mention the remaining
+   projects in any form (no "Additional projects" line) — they are appended
+   automatically by the caller.
 2. Order them by relevance — most relevant first.
 3. Format each entry exactly as:
    [Project Title] | [Role] | [Period]
@@ -420,7 +582,10 @@ INSTRUCTIONS:
 8. If the job involves creative/3D work, prioritize Feral, Arch Viz, and Hive Floral Pod.
 9. If the job involves data/automation, prioritize Independent Development.
 
-Write ONLY the Experience section content. No "EXPERIENCE" header."""
+Write ONLY the Experience section content. No "EXPERIENCE" header.
+NEVER open with the job title you are writing for ("{job_title}") or any other
+role name on its own line — this section lists the candidate's OWN past
+projects, and a bare role name there reads as a job they have held."""
 
     try:
         from llm_client import call_llm
@@ -439,19 +604,167 @@ Write ONLY the Experience section content. No "EXPERIENCE" header."""
         return None
 
 
+def _strip_llm_other_lines(body: str) -> str:
+    """Drop any 'Additional/Other projects' line the LLM wrote on its own —
+    the canonical one-liner is appended deterministically by the caller, and
+    a model-authored variant would make its titles look 'already included'."""
+    import re
+    kept = [
+        l for l in body.split("\n")
+        if not re.match(r"\s*[*_]{0,3}\s*(?:Additional|Other)\s+Projects?\b", l, flags=re.IGNORECASE)
+    ]
+    return "\n".join(kept).strip()
+
+
+def _other_projects_line(included_text: str) -> str:
+    """One-line list of every project NOT given a full write-up, so the CV
+    always shows the complete project breadth (employers see everything;
+    only the depth of description varies)."""
+    rest = [p for p in PROJECTS if p["title"] not in included_text]
+    if not rest:
+        return ""
+    items = " · ".join(f"{p['title']} ({p['period']})" for p in rest)
+    return f"**Other projects:** {items}"
+
+
+def _strip_echoed_job_title(body: str, job_title: str) -> str:
+    """Drop a leading line that merely repeats the posting's job title.
+
+    The experience prompt already says "no headers", but the model still liked
+    to open the section with the target role in bold, which rendered as:
+
+        EXPERIENCE
+        **Performance Creative Designer**
+        **AI Creative Workflow Automation** | Independent | 2026
+
+    — i.e. the job being applied FOR read as a position the candidate had
+    HELD. A reviewer flagged exactly that as a factual misrepresentation.
+    Genuine entries always carry "Title | Role | Period", so a leading line
+    with no pipe that normalises to the job title is never a real entry.
+    """
+    if not job_title:
+        return body
+    import re
+
+    def _norm(s: str) -> str:
+        s = re.sub(r"[*_#`]", "", s)
+        return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+
+    target = _norm(job_title)
+    if not target:
+        return body
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if "|" in line:
+            break  # first real entry reached — nothing was echoed
+        if _norm(line) == target:
+            return "\n".join(lines[i + 1:]).lstrip("\n")
+        break  # only the very first content line can be the echo
+    return body
+
+
+# A fabricated employment block betrays itself two ways: unfilled placeholders
+# ("[Company Name]", "[Dates]") the model left for a job it invented, and the
+# posting's own duty list pasted in under a "Key Responsibilities" heading as
+# though the candidate had performed it. One CV opened its EXPERIENCE section
+# with "Artworker | [Company Name] | Stockport | [Dates]" followed by four
+# duties lifted verbatim from the advert — sending that is CV fraud, so the
+# block is cut rather than trusted.
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?:company name|dates?|location|your [^\]]{0,20}|insert[^\]]{0,20}|"
+    r"employer|job title|position|month|year)[^\]]{0,10}\]",
+    re.IGNORECASE,
+)
+_DUTY_HEADING_RE = re.compile(
+    r"^\s*\**\s*(?:key\s+)?(?:responsibilities|duties|requirements|"
+    r"what you'?ll do|the role)\s*:?\s*\**\s*$",
+    re.IGNORECASE,
+)
+# The model sometimes addresses ITSELF in the output — "(Note: If actual
+# employment history exists, replace the above with …)" — and then helpfully
+# supplies a worked example beneath it: an invented Junior Design Engineer post
+# complete with SolidWorks, "90% on-time delivery" and "reduced installation
+# time by 15%". Read cold, that example is indistinguishable from real history,
+# which makes the note the most dangerous artefact of the three.
+_META_NOTE_RE = re.compile(
+    r"^\s*[*_(]*\s*(?:note|nb)\s*[:：]|"
+    r"\b(?:replace the above|if actual (?:employment|work) history|"
+    r"example format|placeholder|adjust as needed|fill in your)\b",
+    re.IGNORECASE,
+)
+# Where the model resumes listing the candidate's real portfolio after the
+# invented block — everything before this is discarded.
+_REAL_WORK_HEADING_RE = re.compile(
+    r"^\s*\**\s*(?:relevant experience|selected projects|projects|"
+    r"experience)\s*:?\s*\**\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_fabricated_employment(body: str) -> str:
+    """Remove an invented employment entry the model built from the posting.
+
+    Genuine entries come from career/cv/projects and always render as
+    "Title | Role | Period" with real values; anything carrying an unfilled
+    placeholder, or a duty-list heading copied from the advert, is the model
+    writing a job the candidate never held. Cuts from the offending line to
+    the next real-work heading (or drops just that block when none follows).
+    """
+    lines = body.split("\n")
+    bad_idx = next(
+        (i for i, ln in enumerate(lines)
+         if _PLACEHOLDER_RE.search(ln) or _DUTY_HEADING_RE.match(ln)
+         or _META_NOTE_RE.search(ln)),
+        None,
+    )
+    if bad_idx is None:
+        return body
+    # A meta-note is followed by its own invented example, so everything from
+    # the note to the end of the section goes — there is no genuine entry after
+    # it to preserve. (A stray horizontal rule above it goes too.)
+    if _META_NOTE_RE.search(lines[bad_idx]):
+        while bad_idx > 0 and (not lines[bad_idx - 1].strip()
+                               or set(lines[bad_idx - 1].strip()) <= {"-", "*", "_"}):
+            bad_idx -= 1
+        return "\n".join(lines[:bad_idx]).strip("\n")
+
+    resume_idx = next(
+        (j for j in range(bad_idx + 1, len(lines))
+         if _REAL_WORK_HEADING_RE.match(lines[j])),
+        None,
+    )
+    if resume_idx is not None:
+        kept = lines[:bad_idx] + lines[resume_idx + 1:]
+    else:
+        # No resume marker: drop the contiguous block up to the next blank-line
+        # separated entry that looks genuine ("Title | Role | Period").
+        j = bad_idx + 1
+        while j < len(lines) and "|" not in lines[j]:
+            j += 1
+        kept = lines[:bad_idx] + lines[j:]
+    return "\n".join(kept).strip("\n")
+
+
 def generate_experience(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
     """
-    Generate the Experience section for a CV.
-    Tries LLM-based dynamic generation first, falls back to static ordering.
+    Generate the Experience section for a CV: top-5 most relevant projects in
+    full (LLM-ordered when a description is available, static otherwise) plus
+    a compact one-line list of all remaining projects.
     """
-    # Try LLM first (if job description is available)
+    body = None
     if job_description and len(job_description) > 50:
-        llm_result = _generate_experience_ollama(job_title, job_description, role_type)
-        if llm_result:
-            return _bold_experience_titles(llm_result)
+        body = _generate_experience_ollama(job_title, job_description, role_type)
+    if not body:
+        body = _get_static_experience(role_type)
 
-    # Fallback: static experience
-    return _bold_experience_titles(_get_static_experience(role_type))
+    body = _strip_llm_other_lines(body)
+    body = _strip_echoed_job_title(body, job_title)
+    body = _strip_fabricated_employment(body)
+    section = _bold_experience_titles(body)
+    other = _other_projects_line(body)
+    return f"{section}\n\n{other}" if other else section
 
 
 def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "") -> str:
@@ -478,10 +791,13 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     strengths = get_strengths(role_type)
     toolkit = get_toolkit(role_type)
     experience = generate_experience(job_title, job_description, role_type)
-    
+    role_title, role_tagline = get_header(role_type)
+
     cv_body = MASTER_CV.format(
+        role_title=role_title,
+        role_tagline=role_tagline,
         profile=profile,
-        employment=_bold_experience_titles(get_employment_section()),
+        employment=_bold_experience_titles(get_employment_section(resolved_role)),
         technical_toolkit=_bold_toolkit_headers(toolkit),
         experience=experience
     )

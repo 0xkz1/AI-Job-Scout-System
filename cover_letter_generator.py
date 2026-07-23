@@ -105,8 +105,8 @@ def load_cover_template(role_type: str = "general") -> dict:
         return {"opening": "", "experience": "", "skills": "", "closing": "", "team_name": ""}
 
 PERSONAL_INFO = {
-    "name": "Kazuki Yunome",
-    "location": "Edinburgh, Scotland, UK (Local Resident)",
+    "name": "Kazuki Yunomé",
+    "location": "Edinburgh, Scotland, UK",
     "email": "CANDIDATE_EMAIL",
     "phone": "CANDIDATE_PHONE",
     "portfolio": "http://kazukiyunome.com/",
@@ -115,6 +115,288 @@ PERSONAL_INFO = {
 }
 
 from datetime import date
+import re
+
+
+# Industry/sector words that turn a neutral sentence into a claim of domain
+# experience. The persona summary names no client sector at all, so pairing one
+# of these with a first-person experience verb asserts work the candidate has
+# not done — exactly how "I've built similar systems for financial platforms"
+# ended up in an AJ Bell letter (AJ Bell is a financial services firm; the
+# reviewer correctly flagged it as fabrication). Describing what the EMPLOYER
+# does is legitimate, so the check below is scoped to first-person claim
+# sentences rather than the paragraph as a whole.
+_SECTOR_TERMS = (
+    "financial", "finance", "fintech", "banking", "insurance", "healthcare",
+    "health care", "medical", "clinical", "pharmaceutical", "pharma", "legal",
+    "law firm", "government", "public sector", "retail", "e-commerce",
+    "ecommerce", "logistics", "automotive", "aerospace", "defence", "defense",
+    "telecom", "telecommunications", "energy", "oil and gas", "utilities",
+    "education", "edtech", "gaming", "gambling", "casino", "travel",
+    "hospitality", "real estate", "manufacturing", "construction",
+    "agriculture", "biotech", "charity", "nonprofit", "non-profit",
+)
+
+# First-person assertions of past work. Deliberately narrow: it must read as
+# "I did this", not merely "I can" or "I am interested in".
+_FIRST_PERSON_CLAIM = re.compile(
+    r"\b(?:I(?:'ve|’ve| have)?\s+"
+    r"(?:built|worked|designed|developed|delivered|led|created|shipped|managed|supported)"
+    r"|my\s+(?:experience|background|work|practice)\s+(?:in|with|across|for))\b",
+    re.IGNORECASE,
+)
+
+
+def _claims_unsupported_sector(text: str, persona: str) -> str | None:
+    """Return the offending sector term if `text` asserts first-person
+    experience in an industry the persona never mentions, else None.
+
+    Fail-safe by design: a rejected opening falls back to the role template's
+    static opening, which contains no invented claims. A false positive costs
+    one generic paragraph; a false negative ships a factual misrepresentation
+    to an employer, so the check errs toward rejection.
+    """
+    persona_l = persona.lower()
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if not _FIRST_PERSON_CLAIM.search(sentence):
+            continue
+        sentence_l = sentence.lower()
+        for term in _SECTOR_TERMS:
+            if term in sentence_l and term not in persona_l:
+                return term
+    return None
+
+
+# Nouns that, in a cover-letter opening, describe the WRITER's own practice —
+# never the employer's. "your team"/"your platform"/"your mission" are normal
+# ways to address the reader, but "your approach to design"/"your background"
+# is the letter talking to the applicant instead of from them.
+_CANDIDATE_ATTRIBUTES = (
+    "approach", "background", "practice", "experience", "skill", "skills",
+    "expertise", "portfolio", "focus on blending", "workflow of", "process of",
+)
+_INVERTED_PERSON = re.compile(
+    r"\b[Yy]our\s+(?:own\s+)?(?:" + "|".join(_CANDIDATE_ATTRIBUTES) + r")\b"
+)
+# "You've built …", "You have designed …" — a past-work verb aimed at the reader
+# is describing the candidate, since the employer's history is not the subject.
+_INVERTED_PERSON_VERB = re.compile(
+    r"\b[Yy]ou(?:['’]ve| have)?\s+"
+    r"(?:built|designed|developed|created|delivered|shipped|engineered)\b"
+)
+
+
+def _has_inverted_person(text: str) -> str | None:
+    """Return the offending phrase when the opening addresses the CANDIDATE as
+    "you", else None.
+
+    Kept as a rule rather than folded into the LLM check: asking one model call
+    to judge both fabrication and person made it unreliable at both — it began
+    flagging ordinary employer address ("your team needs…") while letting a
+    fabricated project through. Person inversion has a narrow, decidable
+    surface form, so it is matched directly and the model is left to do only
+    the semantic job it is actually needed for.
+    """
+    for pat in (_INVERTED_PERSON, _INVERTED_PERSON_VERB):
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _verify_opening_claims(text: str) -> str | None:
+    """Second-pass fact check of an LLM-written opening. Returns a short reason
+    when a claim is unsupported, else None.
+
+    _claims_unsupported_sector catches invented INDUSTRY experience by keyword,
+    but not invented projects: "I designed the visual pipeline for a remote
+    compute platform handling high-resolution AI-generated assets" survives
+    every keyword test — the persona genuinely mentions a "Remote Compute
+    Desktop (Japan)" — while describing delivered client work that never
+    happened. Telling a personal machine apart from a shipped project is
+    semantic, so it needs a model; running it only on openings that actually
+    assert something keeps it to one extra call on a minority of letters.
+
+    Fails OPEN on API/parse errors: an outage should degrade to the previous
+    behaviour (opening kept; the reviewer still fact-checks downstream) rather
+    than silently strip the tailored paragraph out of every letter.
+    """
+    if not _FIRST_PERSON_CLAIM.search(text):
+        return None  # asserts nothing about past work — nothing to verify
+    try:
+        from llm_client import call_llm
+        facts = _load_verification_record()
+        if not facts:
+            return None
+        prompt = f"""Check the opening paragraph of a cover letter. The candidate WROTE this letter; the reader is the employer.
+
+VERIFIED RECORD (the ONLY things this candidate has actually done):
+{facts}
+
+PARAGRAPH:
+{text}
+
+Report a problem ONLY for FABRICATION: a claim about the candidate's own past work that
+is absent from the verified record.
+
+The candidate's record is made of SELF-DIRECTED projects plus a short employment history.
+So the test is not "was this self-directed?" — it is "does the record show this work, and
+does the paragraph describe WHO it was done for correctly?"
+
+REPORT these:
+- A named project/system that is not in the record, or that the record shows doing
+  something different from what the paragraph claims.
+- Work attributed to a CLIENT, EMPLOYER, or PLATFORM the record does not show. Both
+  "I designed brand identities for <employer>" and "during my work at <employer>" are
+  fabrication unless the record lists that employer. Reframing the candidate's own
+  machine, vault, or plugin as something delivered for someone else is fabrication too.
+- Named clients, employers, industries, or scale figures absent from the record.
+- An asserted FIELD, DISCIPLINE, or DOMAIN of past work the record does not show —
+  "my work in packaging design", "my background in motion graphics", "years spent in
+  editorial design". Vague phrasing is not a licence.
+- A real project bent to a BENEFICIARY or PURPOSE the record does not show. The record's
+  knowledge system is the candidate's own; "I built a knowledge infrastructure for pupils"
+  is fabrication because the record shows no pupils. Same for "pipelines for hospital
+  staff", "a workflow for retail teams". Check who the record says the work served, and
+  report any paragraph that hands it to someone else — the resemblance of the underlying
+  system does not license the new audience.
+
+Do NOT report these:
+- Naming one of the candidate's OWN documented projects and describing what it does, as
+  the record describes it, with no client attached. "In developing the AI Job Scout
+  System, I designed a multi-agent workflow" is honest and correct.
+- Describing what the EMPLOYER does, or addressing the employer as "you"/"your".
+- Describing HOW the candidate works — their approach, principles, or interests.
+
+The decisive question for any piece of past work: does the record contain it, and does
+the paragraph claim it was done for someone the record does not name?
+
+Reply with exactly one line:
+OK
+or
+PROBLEM: <the specific fabricated claim, under 15 words>"""
+        verdict = (call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You verify cover-letter openings strictly. Reply in the requested one-line format only.",
+            temperature=0.0,
+            max_tokens=80,
+        ) or "").strip()
+        if verdict.upper().startswith("PROBLEM"):
+            return verdict.split(":", 1)[-1].strip()[:120] or "unsupported claim"
+        return None
+    except Exception as e:
+        print(f"  ⚠ CL opening verification skipped ({e})")
+        return None
+
+
+_verify_record_cache: str | None = None
+
+
+def _load_verification_record() -> str:
+    """The candidate's concrete work record, for checking an opening's claims.
+
+    reviewer._load_review_facts() leads with ~13k characters of ethos and design
+    philosophy before reaching any project — so truncating it (as this check did)
+    dropped the project records entirely and the verifier rejected honest
+    mentions of real projects as unrecorded. Feeding it untruncated then buried
+    the instructions and the verifier passed everything.
+
+    Verification only needs what can be checked: which projects exist, what each
+    one did, and who it was for. The philosophy is not evidence, so it is left
+    out and the record stays small enough for the model to actually use.
+    """
+    global _verify_record_cache
+    if _verify_record_cache is not None:
+        return _verify_record_cache
+    try:
+        from cv_generator import load_projects_from_md
+        employment, projects = [], []
+        for p in load_projects_from_md():
+            title = (p.get("title") or "").strip()
+            if not title:
+                continue
+            head = f"### {title}"
+            role = (p.get("role") or "").strip()
+            period = str(p.get("period") or "").strip()
+            meta = " | ".join(x for x in (role, period) if x)
+            if meta:
+                head += f"\n({meta})"
+            body = (p.get("description") or "").strip()
+            entry = f"{head}\n{body}"
+            (employment if p.get("type") == "employment" else projects).append(entry)
+        parts = [
+            "The candidate is portfolio-led: the projects below are SELF-DIRECTED work "
+            "carried out under their own studio unless an employer is named in the entry. "
+            "That is normal and legitimate — it is not a reason to doubt a claim."
+        ]
+        if employment:
+            parts.append("## EMPLOYMENT (the only employers on record)\n" + "\n\n".join(employment))
+        if projects:
+            parts.append("## PROJECTS (self-directed unless stated)\n" + "\n\n".join(projects))
+        _verify_record_cache = "\n\n".join(parts)
+    except Exception as e:
+        print(f"  ⚠ verification record load failed ({e})")
+        _verify_record_cache = ""
+    return _verify_record_cache
+
+
+_projects_digest_cache: str | None = None
+
+
+def _first_sentence(description: str, limit: int = 200) -> str:
+    """Opening sentence of a project body, stripped of markdown, for the digest."""
+    line = next((l for l in description.split("\n") if l.strip()), "")
+    line = re.sub(r"^\s*[•\-\*]\s*", "", line)
+    line = re.sub(r"\*\*|\*|`", "", line).strip()
+    if len(line) > limit:
+        cut = line[:limit].rsplit(" ", 1)[0]
+        line = cut + "…"
+    return line
+
+
+def _load_projects_digest() -> str:
+    """Compact one-line-per-project digest for the opening-hook prompt.
+
+    The opening previously saw only the ethos (persona truncated at 2500 chars,
+    which ethos.md alone fills), so every letter recited the same ethos headings
+    with no concrete work to anchor to. This surfaces the real projects so the
+    model can pick ONE that fits each posting and ground the ethos in something
+    specific and different per job.
+
+    Each entry carries a line of what the project actually IS. Title and skills
+    alone were not enough to choose by: nine of twenty-five openings reached for
+    "AI Job Scout System" and eight for "AI Asset Tagger System" regardless of
+    the role, while the design, illustration, photography and infrastructure work
+    went unused — the model was matching on how technical a name sounded rather
+    than on what the project was.
+    """
+    global _projects_digest_cache
+    if _projects_digest_cache is not None:
+        return _projects_digest_cache
+    try:
+        from cv_generator import load_projects_from_md
+        lines = []
+        for p in load_projects_from_md():
+            title = (p.get("title") or "").strip()
+            if not title or not p.get("cover_letter", True):
+                continue  # real work, but not developed enough to pitch with
+            role = (p.get("role") or "").strip()
+            skills = [s for s in (p.get("skills") or []) if s and s.strip()]
+            skill_str = ", ".join(skills[:6])
+            head = f"- {title}"
+            if role:
+                head += f" ({role})"
+            lines.append(head)
+            summary = _first_sentence(p.get("description") or "")
+            if summary:
+                lines.append(f"    what it is: {summary}")
+            if skill_str:
+                lines.append(f"    skills: {skill_str}")
+        _projects_digest_cache = "\n".join(lines)
+    except Exception as e:
+        print(f"  ⚠ projects digest load failed ({e}); opening will use ethos only")
+        _projects_digest_cache = ""
+    return _projects_digest_cache
 
 
 def _generate_opening_hook(job_title: str, company: str, job_description: str) -> str | None:
@@ -134,6 +416,7 @@ def _generate_opening_hook(job_title: str, company: str, job_description: str) -
         persona = _load_persona_summary()
         if not persona:
             return None
+        projects_digest = _load_projects_digest()
         prompt = f"""Write the OPENING paragraph of a cover letter (3-4 sentences, at most 80 words).
 
 THE JOB:
@@ -141,13 +424,39 @@ Company: {company}
 Title: {job_title}
 Posting (excerpt): {job_description[:2000]}
 
-THE CANDIDATE:
-{persona[:2500]}
+THE CANDIDATE (ethos = the backbone of the whole letter):
+{persona[:8000]}
+
+THE CANDIDATE'S REAL PROJECTS (the only concrete work you may cite — pick ONE):
+{projects_digest}
+
+HOW TO WRITE THIS OPENING (follow in order):
+1. Read the posting and decide which ONE of the candidate's ethos principles it most resonates with — e.g. "Building Tools That Amplify Human Creativity", "Craft × Structure", "Reduce Friction Between Idea and Execution", or "Knowledge as Infrastructure". Different jobs should surface different principles; do not default to the same one every time.
+2. Pick the ONE real project from the list above that best fits this specific role, and name it.
+   Choose on what the project IS ("what it is:" line), not on how technical its name sounds.
+   A graphic design, branding or illustration post is better served by the illustration,
+   identity, 3D or portfolio-site work than by an AI pipeline; a photography post by the
+   photography work; an infrastructure or ops post by the node-ops or orchestration work.
+   The list holds sixteen projects across design, illustration, photography, web and
+   infrastructure — do not keep reaching for the same two or three AI systems.
+3. Judge how much this posting actually reveals about the EMPLOYER'S OWN work. Recruitment agencies and thin postings often say nothing about it — in that case you must NOT describe what the employer does, because you would be guessing.
+4. Choose the first sentence to fit what you found in step 3:
+   - Employer's work is clearly described → you may open from it, then pivot to the candidate.
+   - Employer's work is unclear, or the poster is an agency hiring for a client → open from the candidate's own practice or from the concrete demands of the ROLE ITSELF, never from an invented account of the employer.
+   Vary the construction. Do not open every letter with "Your work at X … resonates with my approach"; that frame is one option among several, not a formula.
+5. Open with that sentence, anchor it to the one named project, and connect both to this posting's actual focus. The result must read as written for THIS job — a reader comparing two of these letters should see different principles, different projects, different opening moves.
 
 RULES:
 - First person, UK English, plain prose. No markdown, no bullet points, no heading.
+- The candidate is the WRITER, not the reader. Write "I"/"my" for the candidate; "you"/"your" may refer ONLY to the employer. Never describe the candidate's own work as "your work" — that inverts the letter.
 - Reference something CONCRETE and specific from this posting (their product, mission, tech stack, or the role's actual focus) and connect it to the candidate's real background.
 - Do NOT fabricate experience or qualifications not in the candidate profile.
+- NEVER claim the candidate has worked in the employer's industry or sector (finance, healthcare, retail, legal, government, gaming, …) unless the candidate profile explicitly says so. Constructions like "I've built similar systems for financial platforms", "my experience with healthcare clients", or "having worked in retail" are FORBIDDEN unless verbatim supported by the profile above.
+- You may describe what the EMPLOYER does in their sector; you may not assert that the candidate has done it too. Connect via the candidate's documented approach and process, not via invented domain experience.
+- Do NOT invent a project, client, or deliverable. If you describe a specific piece of past work, it must be one named in the projects list above, described as it is described there. Never reframe the candidate's personal tooling or hardware (their own compute machine, their own vault, their own plugins) as work delivered for someone else.
+- Never mention relocation or moving, and never claim the candidate lives in, is near, or is moving to the employer's city. The candidate is based in Edinburgh; the job's location is irrelevant to the opening.
+- Ground the connection in the candidate's actual process or outcomes (systems thinking, automation, design rigor) — not literal tools or hardware (tablets, specific input devices, software names) unless the posting explicitly calls for them. Backstage implementation details do not belong in an opening paragraph.
+- Avoid recycling the ethos headings verbatim as filler ("reduce friction between idea and execution", "craft and structure", "tools that amplify human creativity"). Express the chosen principle through the specific project and this posting, in your own words.
 - No clichés ("I was excited to see", "I am writing to apply", "passionate about"), no flattery filler.
 - Do not include the greeting line; the letter template already has "Dear Hiring Team".
 
@@ -168,6 +477,31 @@ Output ONLY the paragraph."""
             return None
         company_word = (company.split()[0].lower() if company and company.split() else "")
         if len(company_word) >= 3 and company_word not in text.lower():
+            return None
+        # Last gate, and the one the prompt alone could not enforce: the model
+        # kept inventing domain experience to bridge candidate → employer even
+        # with an explicit "do not fabricate" instruction.
+        # Voice gate, cheap and checked before the LLM verification below.
+        # Tightening the anti-fabrication rules pushed the model into writing
+        # ABOUT the candidate in the second person ("Your approach to design…",
+        # "You've built workflows…"), which reads as a letter addressed TO the
+        # applicant instead of from them. A cover-letter opening that never
+        # says "I" is not usable regardless of how factual it is.
+        if not re.search(r"(?:^|\s)(?:I|I['’](?:m|ve|d|ll)|[Mm]y)\b", text):
+            print("  ⚠ CL opening not written in first person; using template opening")
+            return None
+        inverted = _has_inverted_person(text)
+        if inverted:
+            print(f"  ⚠ CL opening addresses the candidate as 'you' ({inverted}); using template opening")
+            return None
+
+        offending = _claims_unsupported_sector(text, persona)
+        if offending:
+            print(f"  ⚠ CL opening claimed unsupported '{offending}' experience; using template opening")
+            return None
+        unsupported = _verify_opening_claims(text)
+        if unsupported:
+            print(f"  ⚠ CL opening unsupported claim ({unsupported}); using template opening")
             return None
         return text
     except Exception as e:

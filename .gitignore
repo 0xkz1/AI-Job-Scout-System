@@ -1,6 +1,7 @@
 # Output — contains personal CVs, cover letters, match reports (PII)
 output/
 10_output/
+static/pdfs/
 
 # Staging — contains raw scraped job data (large + ephemeral)
 00_saved/

@@ -487,36 +487,39 @@ def filter_jobs_by_keywords(jobs: list[dict], keywords: list[str]) -> list[dict]
 
 
 def _format_job_md(job: dict) -> str:
-    return f"""# Job Description: {job['title']}
+    # Jobs from other scrapers / saved-jobs staging pass through here too
+    # (run.py save_indeed), so no key can be assumed present.
+    url = job.get("url", "")
+    return f"""# Job Description: {job.get('title', 'Unknown')}
 
-> **Source:** [{job['source_site']}]({job['url']})
-> **Scraped:** {job['scraped_at']}
+> **Source:** [{job.get('source_site') or job.get('source', 'unknown')}]({url})
+> **Scraped:** {job.get('scraped_at', 'unknown')}
 
 ---
 
 ## Company
 
-**{job['company']}**
-Location: {job['location']}
+**{job.get('company', 'Unknown')}**
+Location: {job.get('location', 'Unknown')}
 
 ---
 
 ## Salary
 
-{job['salary'] if job['salary'] else 'Not specified'}
+{job.get('salary') or 'Not specified'}
 
 ---
 
 ## Description
 
-{job['description'] or job['snippet'] or 'No description available.'}
+{job.get('description') or job.get('snippet') or 'No description available.'}
 
 ---
 
 ## Metadata
 
-- **Search Source:** {job['source']}
-- **URL:** {job['url']}
+- **Search Source:** {job.get('source', 'unknown')}
+- **URL:** {url}
 """
 
 

@@ -130,7 +130,13 @@ def load_all_from_saved() -> list[dict]:
             fp = os.path.join(SAVED_DIR, f)
             try:
                 with open(fp) as fh:
-                    all_jobs.extend(json.load(fh))
+                    batch = json.load(fh)
+                # Tag the collection route so match reports can be filtered by
+                # how the job was collected (Dataview: WHERE route = "url_list").
+                route = {"url_list_jobs.json": "url_list", "local_html_jobs.json": "local_html"}.get(f, "scraper")
+                for job in batch:
+                    job.setdefault("route", route)
+                all_jobs.extend(batch)
             except Exception:
                 pass
     # 2. Manual saved jobs via index
@@ -154,16 +160,21 @@ def _same_posting(a: dict, b: dict) -> bool:
     return SequenceMatcher(None, da, db).ratio() >= 0.9
 
 
-def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
+def dedupe_by_company_title(jobs: list[dict]) -> tuple[list[dict], list[dict]]:
     """Merge duplicate postings of the same role (e.g. LinkedIn reposts under a
     new job ID): identical (company, title) AND matching descriptions.
 
-    Keeps the entry with the longest description (best data), then highest
-    composite score; the losers' URLs are preserved in "duplicate_urls" so
-    future scrapes still recognise them as known. Same-titled jobs with
-    genuinely different descriptions are kept separate (see generate_outputs
-    for the filename disambiguation).
+    Priority: source (LinkedIn > Indeed > Others) -> description length -> composite score.
+    Returns (kept_jobs, archived_jobs).
     """
+    def source_priority(job: dict) -> int:
+        src = (job.get("source") or "").lower()
+        if src == "linkedin":
+            return 3
+        elif src == "indeed":
+            return 2
+        return 1
+
     groups: dict[tuple, list[dict]] = {}
     no_key = []
     for j in jobs:
@@ -175,9 +186,11 @@ def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
             no_key.append(j)
 
     result = []
+    archived = []
     merged_away = 0
     for group in groups.values():
         group.sort(key=lambda j: (
+            source_priority(j),
             len(j.get("description") or ""),
             j.get("match", {}).get("composite_score", 0),
         ), reverse=True)
@@ -194,12 +207,85 @@ def dedupe_by_company_title(jobs: list[dict]) -> list[dict]:
             dup_urls.extend(u for u in (j.get("duplicate_urls") or []) if u not in dup_urls)
             if dup_urls:
                 target["duplicate_urls"] = sorted(set(dup_urls))
+            archived.append(j)
             merged_away += 1
         result.extend(kept)
 
     if merged_away:
-        print(f"  🔀 Merged {merged_away} duplicate postings (same company+title, matching description)")
-    return result + no_key
+        print(f"  🔀 Merged {merged_away} duplicate postings (prioritizing LinkedIn > Indeed)")
+    return result + no_key, archived
+
+def archive_duplicate_files(archived_jobs: list[dict], output_dir: str):
+    """Scan existing output files and move files belonging to archived_jobs to archive folders."""
+    if not archived_jobs:
+        return
+        
+    import shutil
+    from pathlib import Path
+    import re
+    
+    archived_urls = {j.get("url") for j in archived_jobs if j.get("url")}
+    if not archived_urls:
+        return
+        
+    out_dir = Path(output_dir)
+    matches_dir = out_dir / "00_matches"
+    
+    if not matches_dir.exists():
+        return
+        
+    archived_count = 0
+    for match_file in matches_dir.glob("*.md"):
+        try:
+            content = match_file.read_text(encoding="utf-8")
+            # Extract URL from frontmatter
+            m = re.search(r'^url:\s*"(.*?)"', content, re.MULTILINE)
+            if not m:
+                continue
+            url = m.group(1)
+            
+            if url in archived_urls:
+                base_name = match_file.stem
+                
+                # Define all related files
+                related_files = [
+                    matches_dir / f"{base_name}.md",
+                    out_dir / "10_cvs" / f"{base_name}_CV.md",
+                    out_dir / "10_cover-letters" / f"{base_name}_CL.md",
+                    out_dir / "15_reviews" / f"{base_name}_CV_review.md",
+                    out_dir / "15_reviews" / f"{base_name}_CL_review.md",
+                ]
+                
+                pdf_dir = out_dir / "20_pdfs"
+                if pdf_dir.exists():
+                    related_files.extend(pdf_dir.glob(f"{base_name}_*_v*.pdf"))
+                    
+                # Move them to their respective archive dirs
+                for fpath in related_files:
+                    if fpath.exists():
+                        parent_name = fpath.parent.name
+                        if parent_name == "00_matches":
+                            archive_dir = out_dir / ".matches_archive"
+                        elif parent_name == "10_cvs":
+                            archive_dir = out_dir / ".cvs_archive"
+                        elif parent_name == "10_cover-letters":
+                            archive_dir = out_dir / ".cls_archive"
+                        elif parent_name == "15_reviews":
+                            archive_dir = out_dir / "15_reviews" / ".archive"
+                        elif parent_name == "20_pdfs":
+                            archive_dir = out_dir / "20_pdfs" / ".archive"
+                        else:
+                            continue
+                            
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(fpath), str(archive_dir / fpath.name))
+                archived_count += 1
+        except Exception:
+            pass
+            
+    if archived_count > 0:
+        print(f"  🗑️  Archived files for {archived_count} duplicate jobs.")
+
 
 
 def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
@@ -217,10 +303,33 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
     os.makedirs(letter_dir, exist_ok=True)
 
     cv_threshold = config.get("match_score_threshold", 0.50)
+    # Reports are written for every filter-passed job, but CV/CL generation is
+    # the expensive part (one LLM pass each) — cap it at the best N matches.
+    # The cap ranks only jobs that still NEED a CV — jobs whose CV already
+    # exists are skipped anyway, and letting them occupy slots would starve
+    # newly scraped matches as the archive grows.
+    cv_limit = config.get("cv_generation_limit", 150)
+    eligible_ids: set[int] = set()
+    if cv_limit:
+        _seen: set[str] = set()
+        needs_cv = []
+        for j in passed_jobs:
+            if not j.get("match"):
+                continue
+            b = make_safe_name(j.get('company', 'company'), j.get('title', 'job'))
+            if b in _seen:
+                b = f"{b}_{hashlib.md5((j.get('url') or '').encode()).hexdigest()[:6]}"
+            _seen.add(b)
+            if not os.path.exists(os.path.join(cv_dir, f"{b}_CV.md")):
+                needs_cv.append(j)
+        needs_cv.sort(key=lambda j: j["match"].get("composite_score", 0), reverse=True)
+        eligible_ids = {id(j) for j in needs_cv[:cv_limit]}
+
     cv_generated = 0
     cv_skipped = 0
     letter_generated = 0
     letter_skipped = 0
+    cv_over_limit = 0
 
     seen_bases: set[str] = set()
     for job in passed_jobs:
@@ -248,8 +357,11 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
         cv_filename_link = None
         cl_filename_link = None
 
-        # Step 1: Generate CV first (if above threshold and description is available)
-        if composite_score >= cv_threshold and not match.get("description_missing", False):
+        # Step 1: Generate CV first (top-N match, above threshold, has description)
+        within_limit = (not cv_limit) or (id(job) in eligible_ids)
+        if not within_limit and composite_score >= cv_threshold:
+            cv_over_limit += 1
+        if within_limit and composite_score >= cv_threshold and not match.get("description_missing", False):
             cv_path = os.path.join(cv_dir, cv_filename_md)
             if not os.path.exists(cv_path):
                 role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
@@ -315,8 +427,9 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
             f.write(report)
 
     print(f"  📊 Saved {len(passed_jobs)} match reports to {match_dir}/")
-    print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc)")
-    print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc)")
+    limit_note = f", {cv_over_limit} outside top {cv_limit}" if cv_limit else ""
+    print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc{limit_note})")
+    print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc{limit_note})")
 
 
 def print_summary(jobs: list[dict]):
@@ -548,7 +661,8 @@ async def main():
             with open(raw_path) as f:
                 analyzed = json.load(f)
             print(f"  📂 Loaded {len(analyzed)} pre-analyzed jobs from {raw_path}")
-            analyzed = dedupe_by_company_title(analyzed)
+            analyzed, archived = dedupe_by_company_title(analyzed)
+            archive_duplicate_files(archived, output_dir)
             
             if args.force_reanalyze:
                 print("  🔄 Re-running full keyword/Ollama analysis (skills and experience classification) on all jobs...")
@@ -860,6 +974,32 @@ async def main():
         except Exception:
             existing_analyzed = []
 
+    # --- Propagate collection route onto already-known jobs --------------
+    # A URL re-submitted through a priority route (url_list / local_html)
+    # may already live in the DB tagged with the default route (or none).
+    # The incremental skip below drops it before its route is recorded, so
+    # it would never satisfy the Dataview `route = "url_list"` filter and
+    # never show up in "URL List Match Table.md". Copy the fresher route
+    # onto the existing record here — match reports are fully regenerated
+    # every run, so the frontmatter picks it up automatically.
+    priority_routes = {"url_list", "local_html"}
+    fresh_route_by_url: dict[str, str] = {}
+    for j in all_jobs:
+        u, r = j.get("url"), j.get("route")
+        if u and r in priority_routes:
+            fresh_route_by_url[u] = r
+    if fresh_route_by_url:
+        route_upgraded = 0
+        for j in existing_analyzed:
+            for u in [j.get("url"), *(j.get("duplicate_urls") or [])]:
+                r = fresh_route_by_url.get(u)
+                if r and j.get("route") != r:
+                    j["route"] = r
+                    route_upgraded += 1
+                    break
+        if route_upgraded:
+            print(f"  🏷  Re-tagged route on {route_upgraded} already-known jobs")
+
     # --- Skip already-known jobs (incremental mode) ---
     new_jobs = [j for j in all_jobs if j.get("url") and j["url"] not in existing_urls]
     no_url_jobs = [j for j in all_jobs if not j.get("url")]
@@ -898,7 +1038,8 @@ async def main():
             merged_analyzed.append(j)
 
     # Merge duplicate postings (same company+title under different URLs)
-    merged_analyzed = dedupe_by_company_title(merged_analyzed)
+    merged_analyzed, archived = dedupe_by_company_title(merged_analyzed)
+    archive_duplicate_files(archived, output_dir)
 
     with open(raw_path, "w", encoding="utf-8") as f:
         json.dump(merged_analyzed, f, indent=2, ensure_ascii=False, default=str)

@@ -50,6 +50,26 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 call_llm_counter = 0  # module-level call counter for structured logging
 
 
+def _quarantine_filter_chain(chain: list[str]) -> list[str]:
+    """Skip providers currently sidelined by key_quarantine (import kept lazy so
+    llm_client still works if the module is absent)."""
+    try:
+        from key_quarantine import filter_chain
+        return filter_chain(chain)
+    except Exception:
+        return chain
+
+
+def _maybe_quarantine(provider: str, err: str) -> None:
+    """Sideline a provider whose key looks exhausted or rejected."""
+    try:
+        from key_quarantine import is_quota_or_auth_error, quarantine
+        if is_quota_or_auth_error(err):
+            quarantine(provider, err[:160])
+    except Exception:
+        pass
+
+
 def _is_transient_error(e: Exception) -> bool:
     """Check if a RuntimeError is a transient (retryable) failure."""
     err_str = str(e).lower()
@@ -58,6 +78,7 @@ def _is_transient_error(e: Exception) -> bool:
         "429", "rate limit", "too many requests", "quota",
         "502", "503", "504", "500", "bad gateway", "service unavailable",
         "timeout", "timed out", "connection", "eof", "refused", "reset",
+        "401", "403", "unauthorized", "forbidden",
     ]
     return any(m in err_str for m in markers)
 
@@ -70,6 +91,7 @@ def call_llm(
     provider: Optional[str] = None,
     retries: int = 2,
     model: Optional[str] = None,
+    use_fallbacks: bool = True,
 ) -> str:
     """Call LLM with automatic primary → fallback provider chain.
 
@@ -84,6 +106,11 @@ def call_llm(
         max_tokens: Max output tokens.
         provider: Override env ANALYSIS_PROVIDER ("ollama", "mistral", "openrouter").
         retries: Max retries on transient failure PER PROVIDER.
+        model: Override the provider's env-configured model for THIS call.
+        use_fallbacks: When False, only the primary provider is tried and the
+            global FALLBACK_PROVIDERS chain is ignored. Callers that manage their
+            own (provider, model) fallback list use this — a single `model` name
+            is provider-specific, so it cannot be reused across the global chain.
 
     Returns:
         Response text string.
@@ -94,10 +121,15 @@ def call_llm(
 
     primary = provider or os.environ.get("ANALYSIS_PROVIDER", "ollama")
     fallbacks_env = os.environ.get("FALLBACK_PROVIDERS") or os.environ.get("FALLBACK_PROVIDER", "")
-    chain = [primary] + [
+    chain = [primary] + ([
         p.strip() for p in fallbacks_env.split(",")
         if p.strip() and p.strip() != primary
-    ]
+    ] if use_fallbacks else [])
+    # A provider whose key is spent stays in the chain but is skipped until its
+    # cooldown expires — otherwise every call burns the full retry budget on a
+    # key that cannot answer, and deleting it would lose the key once its quota
+    # resets. Order is untouched, so it returns to its original position.
+    chain = _quarantine_filter_chain(chain)
 
     errors: list[str] = []
     for i, prov in enumerate(chain):
@@ -116,6 +148,7 @@ def call_llm(
                     raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
                 raise  # non-transient (or nothing left) → propagate
             errors.append(f"{prov}: {e}")
+            _maybe_quarantine(prov, str(e))
             print(f"[llm_client #{cid}] {prov} transient failure, trying next fallback: {e}")
 
 
@@ -133,10 +166,18 @@ def _call_provider(
     for document review)."""
     if provider == "mistral":
         return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model)
+    elif provider == "mistral-backup":
+        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
+                              key_env="MISTRAL_API_KEY_BACKUP")
+    elif provider == "mistral-tertiary":
+        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
+                              key_env="MISTRAL_API_KEY_TERTIARY")
     elif provider == "stepfun":
         return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider == "openrouter":
         return _call_openrouter(messages, system_prompt, temperature, max_tokens, retries, model)
+    elif provider in _OPENAI_COMPAT:
+        return _call_openai_compat(provider, messages, system_prompt, temperature, max_tokens, retries, model)
     else:
         return _call_ollama(messages, system_prompt, temperature, max_tokens, retries, model)
 
@@ -148,10 +189,11 @@ def _call_mistral(
     max_tokens: int,
     retries: int,
     model: Optional[str] = None,
+    key_env: str = "MISTRAL_API_KEY",
 ) -> str:
-    api_key = os.environ.get("MISTRAL_API_KEY") or os.environ.get("CLOUD_API_KEY")
+    api_key = os.environ.get(key_env) or os.environ.get("CLOUD_API_KEY")
     if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set (nor CLOUD_API_KEY)")
+        raise ValueError(f"{key_env} not set (nor CLOUD_API_KEY)")
 
     model = model or (os.environ.get("MISTRAL_MODEL") or os.environ.get("CLOUD_MODEL", "mistral-tiny"))
     full_messages = _build_messages(messages, system_prompt)
@@ -173,7 +215,11 @@ def _call_mistral(
                 timeout=60,
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            content = resp.json()["choices"][0]["message"].get("content") or ""
+            if not content.strip():
+                raise RuntimeError(
+                    f"mistral/{model} returned empty content (max_tokens={max_tokens})")
+            return content
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
             if attempt < retries:
                 time.sleep(2 ** attempt)
@@ -263,6 +309,81 @@ def _call_openrouter(
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"OpenRouter API error after {retries+1} attempts: {e}")
+
+
+# OpenAI-compatible providers reachable with just a base URL + bearer key.
+# (provider -> (base_url, api-key env vars tried in order, default model env)).
+# Used for the review fallback chain: independent providers that offer
+# small/medium models comparable to mistral-medium. Model is normally passed
+# explicitly per call (reviewer._review_chain), so the default env is optional.
+_OPENAI_COMPAT = {
+    # OpenCode Zen free tier (only *-free / big-pickle usable; paid models 401).
+    "opencode": ("https://opencode.ai/zen/v1", ("OPENCODE_API_KEY",), "OPENCODE_MODEL"),
+    # OpenCode Zen "go" = same key, PAID endpoint — unlocks the paid catalog
+    # (glm-5, deepseek-v4, qwen3.x …). Reuses the opencode key if no go-specific one.
+    "opencode-go": ("https://opencode.ai/zen/go/v1", ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"), "OPENCODE_GO_MODEL"),
+    "nvidia":   ("https://integrate.api.nvidia.com/v1", ("NVIDIA_API_KEY",), "NVIDIA_MODEL"),
+    "zai":      ("https://api.z.ai/api/paas/v4", ("ZAI_API_KEY", "ZAI_CODING_API_KEY"), "ZAI_MODEL"),
+}
+
+
+def _call_openai_compat(
+    provider: str,
+    messages: list[dict],
+    system_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+    model: Optional[str] = None,
+) -> str:
+    """Generic OpenAI-compatible chat call (OpenCode Zen, Nvidia NIM, Z.ai …).
+
+    `model` is required (explicitly or via the provider's *_MODEL env); these
+    providers host many models with no sensible single default. Reasoning models
+    (e.g. deepseek-v4-flash) spend part of max_tokens on hidden reasoning, so a
+    generous timeout and token budget are used."""
+    base_url, key_envs, model_env = _OPENAI_COMPAT[provider]
+    api_key = next((os.environ[e] for e in key_envs if os.environ.get(e)), None)
+    if not api_key:
+        raise ValueError(f"{key_envs[0]} not set")
+    model = model or os.environ.get(model_env)
+    if not model:
+        raise ValueError(f"no model specified for provider '{provider}' (set {model_env})")
+    full_messages = _build_messages(messages, system_prompt)
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": full_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"].get("content") or ""
+            if not content.strip():
+                # Reasoning models (e.g. deepseek-v4-flash) can spend the whole
+                # max_tokens budget on hidden reasoning and return HTTP 200 with
+                # an empty content string (finish_reason=length). Raising here
+                # lets the caller's provider chain fall through to the next model
+                # instead of silently persisting an empty result.
+                raise RuntimeError(
+                    f"{provider}/{model} returned empty content "
+                    f"(reasoning-token exhaustion at max_tokens={max_tokens}?)")
+            return content
+        except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"{provider} API error after {retries+1} attempts: {e}")
 
 
 def _call_ollama(

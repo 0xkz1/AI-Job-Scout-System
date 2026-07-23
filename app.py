@@ -141,10 +141,12 @@ def save_config(cfg):
 
 def run_scraper(site="indeed", pages=5):
     """Run scraper and stream output."""
+    # sys.executable, not "python3": the venv is not on PATH, so a bare
+    # python3 resolves to the system interpreter and fails on imports.
     if site == "saved":
-        cmd = ["python3", "run.py", "--saved"]
+        cmd = [sys.executable, "-u", "run.py", "--saved"]
     else:
-        cmd = ["python3", "run.py", "--site", site, "--pages", str(pages)]
+        cmd = [sys.executable, "-u", "run.py", "--site", site, "--pages", str(pages)]
     process = subprocess.Popen(
         cmd, cwd=str(SCRAPER_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
@@ -162,8 +164,8 @@ def run_scraper(site="indeed", pages=5):
 # base and the #944040 accent.
 st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
-tab_scraper, tab_weights, tab_watched, tab_review, tab_pdf = st.tabs(
-    ["🔍 Scraper", "🎯 Weights", "👁 Saved", "🧐 Review", "📄 PDF"]
+tab_scraper, tab_watched, tab_analysis, tab_review, tab_pdf = st.tabs(
+    ["🔍 Scraper", "👁 Saved", "🎯 Match Analysis", "🧐 Review", "📄 PDF"]
 )
 
 # ═══════════════════════════════════════════════════════════
@@ -197,14 +199,18 @@ with tab_scraper:
             "🚫 Exclude from Title (one per line)",
             value="\n".join(st.session_state.config.get("exclude_title_keywords", [])),
             height=80,
+            key="exclude_title_text",
             help="Jobs with these words in the TITLE will be hidden. Uses word-boundary matching: 'senior' matches 'Senior Developer' but NOT 'leadership'. Description text like 'cooperate with senior engineers' is NOT filtered — only the title is checked.",
         )
-        # Quick preset button for common seniority exclusions
+        # Quick preset button for common seniority exclusions. Merging into the
+        # in-memory config + rerun is the only way to move a widget's value —
+        # assigning to the local variable after the widget renders is a no-op.
         if st.button("⚡ Add Entry/Mid Preset", help="Add senior, lead, principal, head of, director, manager to title exclusions"):
-            current = [k.strip() for k in exclude_title_text.split("\n") if k.strip()]
             presets = ["senior", "lead", "principal", "head of", "director", "manager"]
-            merged = sorted(set(current + presets))
-            exclude_title_text = "\n".join(merged)
+            current = [k.strip() for k in exclude_title_text.split("\n") if k.strip()]
+            st.session_state.config["exclude_title_keywords"] = sorted(set(current + presets))
+            del st.session_state["exclude_title_text"]  # let the widget re-read config
+            st.rerun()
         exclude_desc_text = st.text_area(
             "🚫 Exclude from Description (one per line)",
             value="\n".join(st.session_state.config.get("exclude_description_keywords", [])),
@@ -242,6 +248,11 @@ with tab_scraper:
             0.0, 1.0, float(st.session_state.config.get("match_score_threshold", 0.50)), 0.05,
             help="Minimum match score required to generate a tailored CV and Cover Letter."
         )
+        review_threshold = st.slider(
+            "🧐 Review Submission Threshold",
+            0, 100, int(st.session_state.config.get("review_score_threshold", 85)), 1,
+            help="Minimum review score required for a CV/CL to be considered ready for submission."
+        )
 
     if st.button("💾 Save Configuration"):
         st.session_state.config = {
@@ -255,6 +266,7 @@ with tab_scraper:
             "exclude_title_keywords": [k.strip() for k in exclude_title_text.split("\n") if k.strip()],
             "exclude_description_keywords": [k.strip() for k in exclude_desc_text.split("\n") if k.strip()],
             "match_score_threshold": cv_threshold,
+            "review_score_threshold": review_threshold,
         }
         save_config(st.session_state.config)
         st.success("✅ Configuration saved! Run `python3 run.py --reanalyze` in your terminal to apply the new threshold.")
@@ -280,19 +292,6 @@ with tab_scraper:
                     for line in run_scraper(site="all", pages=run_pages):
                         st.code(line)
 
-        if st.button("🔄 Re-analyze Existing Data"):
-            with st.spinner("Re-analyzing _analyzed.json with updated analyzer..."):
-                cmd = ["python3", "run.py", "--reanalyze"]
-                process = subprocess.Popen(
-                    cmd, cwd=str(SCRAPER_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-                )
-                for line in process.stdout:
-                    st.code(line)
-                process.wait()
-                if process.returncode == 0:
-                    st.success("✅ Re-analysis complete! Refresh to see updated results.")
-                else:
-                    st.error(f"❌ Re-analysis failed with exit code {process.returncode}")
 
     # === Section 3: Results ===
     st.subheader("📊 Recent Results")
@@ -384,7 +383,7 @@ with tab_scraper:
                         "URL": st.column_config.LinkColumn(width="small", display_text="🔗 Open"),
                         "Skills": st.column_config.Column(width="large"),
                     },
-                    use_container_width=True,
+                    width="stretch",
                     height=500,
                 )
 
@@ -424,11 +423,118 @@ with tab_scraper:
 
 
 # ═══════════════════════════════════════════════════════════
-# Tab 2: Weights
+# Tab 2: Match Analysis
 # ═══════════════════════════════════════════════════════════
 
-with tab_weights:
-    st.header("🎯 Match Weight Adjuster")
+with tab_analysis:
+    st.header("🎯 Match Analysis")
+    
+    st.subheader("▶️ Run Analysis")
+
+    # Analysis is incremental: run.py --from-saved skips URLs already in
+    # _analyzed.json, so the number that matters is NEW, not the queue size.
+    # Showing the queue size alone reads as "669 will be processed" when the
+    # real answer is often zero.
+    @st.cache_data(ttl=30)
+    def _staging_status() -> tuple[int, int, list[str]]:
+        """(new_count, staged_total, ['reed 623', 'url-list 46', …])."""
+        import glob as _glob
+        from collections import Counter as _Counter
+        known: set[str] = set()
+        try:
+            for j in json.load(open(ANALYZED_PATH)):
+                if j.get("url"):
+                    known.add(j["url"])
+                known.update(j.get("duplicate_urls") or [])
+        except Exception:
+            pass
+        staged, new_src = 0, _Counter()
+        parts = []
+        for f in sorted(_glob.glob(str(SCRAPER_DIR / "00_saved" / "*.json"))):
+            name = os.path.basename(f)
+            if not (name.startswith("_raw_") or name in ("local_html_jobs.json",
+                                                         "url_list_jobs.json",
+                                                         "_saved_index.json")):
+                continue
+            try:
+                jobs = json.load(open(f))
+            except Exception:
+                continue
+            if name.startswith("_raw_"):
+                label = name.replace("_raw_", "").rsplit("_", 2)[0]
+            elif name == "url_list_jobs.json":
+                label = "url-list (👁 Saved)"
+            elif name == "_saved_index.json":
+                label = "手動保存"
+            else:
+                label = "ローカルHTML"
+            staged += len(jobs)
+            parts.append(f"{label} {len(jobs)}")
+            for j in jobs:
+                if not j.get("url") or j["url"] not in known:
+                    new_src[label] += 1
+        return sum(new_src.values()), staged, parts
+
+    _new_n, _staged_n, _staged_parts = _staging_status()
+
+    col_run1, col_run2 = st.columns(2)
+    with col_run1:
+        _btn = f"📥 新規求人を解析 ({_new_n}件)" if _new_n else "📥 新規求人なし — 解析不要"
+        if st.button(_btn, type="primary", disabled=_new_n == 0,
+                     help="00_saved/ キューのうち、まだ _analyzed.json に無い求人だけを解析します "
+                          "(増分処理)。既に解析済みの求人は再処理されません。新たなスクレイプはしません"):
+            with st.spinner(f"Analyzing {_new_n} new jobs…"):
+                cmd = [sys.executable, "-u", "run.py", "--from-saved"]
+                process = subprocess.Popen(
+                    cmd, cwd=str(SCRAPER_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                )
+                for line in process.stdout:
+                    st.code(line)
+                process.wait()
+                if process.returncode == 0:
+                    st.success("✅ Analysis complete! Refresh to see updated results.")
+                else:
+                    st.error(f"❌ Analysis failed with exit code {process.returncode}")
+                    
+    with col_run2:
+        if st.button("🔄 Re-score Analyzed DB (_analyzed.json)",
+                     help="解析済みの _analyzed.json を、現在の matcher・重み設定で再採点。"
+                          "新しい求人は取り込まない (取り込みは左の Staged Jobs)"):
+            with st.spinner("Re-scoring _analyzed.json with the current matcher…"):
+                cmd = [sys.executable, "-u", "run.py", "--reanalyze"]
+                process = subprocess.Popen(
+                    cmd, cwd=str(SCRAPER_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                )
+                for line in process.stdout:
+                    st.code(line)
+                process.wait()
+                if process.returncode == 0:
+                    st.success("✅ Re-score complete! Refresh to see updated results.")
+                else:
+                    st.error(f"❌ Re-score failed with exit code {process.returncode}")
+
+    @st.cache_data(ttl=30)
+    def _db_by_source() -> tuple[int, str]:
+        from collections import Counter as _Counter
+        try:
+            db = json.load(open(ANALYZED_PATH))
+        except Exception:
+            return 0, ""
+        c = _Counter(j.get("source", "?") for j in db)
+        return len(db), " / ".join(f"{k} {v}" for k, v in c.most_common())
+
+    _db_n, _db_parts = _db_by_source()
+    if _db_n:
+        st.caption(f"📊 解析済みDB: **{_db_n}件** — {_db_parts}")
+    st.caption(
+        f"📥 `00_saved/` キュー: {_staged_n}件 ({' / '.join(_staged_parts) or '空'}) "
+        f"→ うち未解析 **{_new_n}件**。"
+        "キューは「収集した求人の待ち行列」で、スクレイプ分と 👁 Saved (url-list.md) 分が合流します。"
+        "処理済みの生データを片付けるには `00_saved/archive/raw/` へ移動してください"
+    )
+
+    st.markdown("---")
+    st.subheader("⚖️ Match Weight Adjuster")
     st.markdown("Adjust the importance of each dimension and see how match scores change in real time.")
 
     # --- Load analyzed jobs ---
@@ -583,7 +689,7 @@ with tab_weights:
     st.dataframe(
         filtered_df[["Company", "Title", "Location", "Score (%)",
                      "Skills", "Exp", "Loc", "Salary", "Context", "Tier"]],
-        use_container_width=True,
+        width="stretch",
         height=500,
     )
 
@@ -878,12 +984,32 @@ def _tier_icon(tier: str) -> str:
     )
 
 
-def show_review(label: str, md_path: Path):
-    """Display-only: the stored review for one document with freshness status.
-    Reviews are produced by the batch runner (skips unchanged docs), not by
-    per-row buttons."""
+def _score_badge(review_path: Path) -> str:
+    """Submission badge from a review's frontmatter. Threshold is read live
+    from config (review_score_threshold, default 85) so tuning it re-labels
+    every stored review without re-reviewing. fact_block overrides the score;
+    a missing/null score is shown as unknown, never as a pass."""
     import re
-    from reviewer import review_is_current
+    text = review_path.read_text(encoding="utf-8")[:600]
+    m = re.search(r"^submission_score:\s*(\d+)", text, flags=re.MULTILINE)
+    fb = re.search(r"^fact_block:\s*true", text, flags=re.MULTILINE)
+    if fb:
+        score_txt = f" {m.group(1)}%" if m else ""
+        return f"⛔{score_txt} 事実要修正"
+    if not m:
+        return "⚪ スコア未算出 (再レビューで算出)"
+    score = int(m.group(1))
+    threshold = int(st.session_state.get("config", {}).get("review_score_threshold", 85))
+    return f"🟢 {score}% 提出可" if score >= threshold else f"🔴 {score}% (基準 {threshold}%)"
+
+
+def show_review(label: str, md_path: Path, job: dict | None = None):
+    """Display the stored review with freshness status, plus the annotation
+    dialogue: user comments added in Obsidian block one-click apply until the
+    LLM has replied and the user has settled them. Reviews are produced by the
+    batch runner (skips unchanged docs), not by per-row buttons."""
+    import re
+    from reviewer import review_is_current, detect_annotations
     display = "CV" if label == "CV" else "Cover Letter"
     if not md_path.exists():
         st.caption(f"{display}: —")
@@ -893,33 +1019,176 @@ def show_review(label: str, md_path: Path):
         st.caption(f"{display}: レビュー未実施")
         return
     status = "✅ current" if is_cur else "⚠️ 編集済み — 次回バッチで再レビュー"
-    with st.expander(f"{'📄' if label == 'CV' else '✉️'} {display} review ({status})"):
+    notes = detect_annotations(rpath)
+    if notes:
+        status += f" / 💬 追記{len(notes)}件"
+
+    score_badge = f" | {_score_badge(rpath)}" if rpath and rpath.exists() else ""
+
+    with st.expander(f"{'📄' if label == 'CV' else '✉️'} {display} review ({status}){score_badge}"):
         text = rpath.read_text(encoding="utf-8")
         m = re.match(r"\A---\n.*?\n---\n", text, flags=re.DOTALL)
         st.markdown(text[m.end():] if m else text)
 
-        # One-click apply — but only for a review of the CURRENT doc content,
-        # and only as deterministic verbatim replacements (no LLM involved):
-        # quotes that no longer match are listed for manual editing instead.
-        from reviewer import parse_review_fixes, apply_review_fixes
+        from reviewer import parse_review_fixes, apply_review_fixes, respond_to_annotations, trace_finding_sources
         fixes = parse_review_fixes(rpath)
-        if fixes and is_cur:
-            st.caption(f"抽出された修正案: {len(fixes)}件 (原文一致箇所のみ置換されます)")
+
+        # Source tracing: findings quoting a reusable block should be fixed at
+        # the SOURCE (once, for every CV) — not argued per-review.
+        traced = [(q, src) for q, src in trace_finding_sources(rpath) if src]
+        if traced:
+            uniq = sorted({src for _q, src in traced})
+            st.info(
+                f"📌 **ソース由来の指摘 {len(traced)}件** — 対応するならレビューではなく元ファイルを直すこと"
+                f"(1回直せば全CV/CLに効く):\n" + "\n".join(f"- `{s}`" for s in uniq)
+            )
+
+        # ── Annotation gate ──────────────────────────────────────────────
+        # notes == None: pre-feature review, no pristine baseline → can't tell
+        # whether the user annotated it; offer the dialogue button but don't
+        # block. notes == [...]: user annotations pending → block apply.
+        if notes:
+            st.warning(
+                f"⏸ **あなたの追記 {len(notes)}件が保留中** — 回答が済むまで一括適用はブロックされます:\n"
+                + "\n".join(f"- {n[:90]}…" if len(n) > 90 else f"- {n}" for n in notes[:8])
+            )
+        # The dialogue must survive document edits: 一括適用 itself edits the
+        # doc and flips is_cur to False — gating on is_cur here deadlocked
+        # pending annotations until the next batch re-review.
+        if (notes or notes is None) and job is not None:
+            btn_label = "💬 追記に回答して修正案を更新" if notes else "💬 追記があれば回答させる (原本未登録の旧レビュー)"
+            if st.button(btn_label, key=f"respond_{md_path.stem}",
+                         help="LLMがあなたの追記(質問・反論・賛成)に回答し、正当な指摘は修正案に反映した改訂版レビューを書きます。旧版は 15_reviews/archive/ に保存"):
+                with st.spinner("LLMが追記を読んで回答中…"):
+                    try:
+                        respond_to_annotations(label, md_path, job)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"回答生成に失敗: {e}")
+
+        # ── Per-fix apply with destination choice (deterministic, no LLM) ─
+        # Blocked while annotations are pending: un-annotated 修正案 count as
+        # agreed, but the user's open questions must be settled first.
+        # Apply is exact-match-only (unmatched quotes are just reported), so a
+        # stale review is safe to apply — no is_cur gate for the same reason.
+        # Destination defaults to この文書のみ: masters must NOT drift with every
+        # job posting — a source edit is an explicit, per-fix opt-in for
+        # durable improvements only.
+        if fixes and not notes:
+            from reviewer import fix_targets, apply_fixes_to_sources
+            targets = fix_targets(rpath)
+            st.caption(
+                f"抽出された修正案: {len(targets)}件 — 各修正の適用先を選んで実行 "
+                f"(元ファイル適用は今後生成される全CV/CLに影響。求人特化の調整は「この{display}のみ」を推奨)"
+            )
+            DOC_ONLY, TO_SOURCE, SKIP = f"この{display}のみ", "元ファイル+この文書", "適用しない"
+            choice_by_orig: dict[str, str] = {}
+            for i, (orig, repl, src, why) in enumerate(targets):
+                short_o = orig[:80] + "…" if len(orig) > 80 else orig
+                short_r = repl[:80] + "…" if len(repl) > 80 else repl
+                st.markdown(f"**{i+1}.** ~~{short_o}~~\n   → {short_r}")
+                opts = [DOC_ONLY, f"{TO_SOURCE} (`{src}`)", SKIP] if src else [DOC_ONLY, SKIP]
+                choice_by_orig[orig] = st.radio(
+                    "適用先", opts, horizontal=True, index=0,
+                    key=f"dest_{md_path.stem}_{i}", label_visibility="collapsed",
+                )
+                # Never omit the source option silently — say why it is absent.
+                if why:
+                    kind, _, where = why.partition(":")
+                    st.caption({
+                        "applied": f"↳ 元ファイル適用は不要 — `{where}` には適用済み "
+                                   f"(この{display}は生成が古いだけ。再生成でも解消します)",
+                        "frontmatter": f"↳ 元ファイル適用は不可 — 引用は `{where}` の frontmatter "
+                                       f"(role_tagline 等の設定値)。変更するならファイルを直接編集",
+                        "doc-only": "↳ 元ファイル適用は不可 — この文言はマスターに無い "
+                                    "(求人ごとにLLM生成された箇所)",
+                    }[kind])
             if st.button(
-                f"✅ 修正案を{display}に一括適用",
+                f"✅ 選択した修正を適用",
                 key=f"apply_{md_path.stem}",
-                help="レビューの引用と完全一致する箇所だけを修正案で置換。適用前の版は 15_reviews/*.pre_apply.md に保存",
+                help="この文書: レビュー引用と完全一致する箇所のみ置換 (バックアップ: 15_reviews/.backups/)。"
+                     "元ファイル: profile/projects 等のマスター側も置換 (バックアップ: 15_reviews/.source_backups/)",
             ):
-                applied, unmatched = apply_review_fixes(md_path, rpath)
-                if applied:
-                    st.success(f"{applied}件適用しました (バックアップ: 15_reviews/{md_path.stem}.pre_apply.md)")
-                if unmatched:
-                    st.warning(
-                        f"{len(unmatched)}件は原文と一致せず未適用 — 手動で対応してください:\n"
-                        + "\n".join(f"- {u[:80]}…" if len(u) > 80 else f"- {u}" for u in unmatched[:5])
+                doc_set = {o for o, c in choice_by_orig.items() if c != SKIP}
+                src_set = {o for o, c in choice_by_orig.items() if c.startswith(TO_SOURCE)}
+                applied, unmatched = 0, []
+                if doc_set:
+                    applied, unmatched = apply_review_fixes(md_path, rpath, only=doc_set)
+                    if applied:
+                        st.success(f"{applied}件を{display}に適用 (バックアップ: 15_reviews/.backups/)")
+                    if unmatched:
+                        st.warning(
+                            f"{len(unmatched)}件は{display}の原文と一致せず未適用 — 手動で対応してください:\n"
+                            + "\n".join(f"- {u[:80]}…" if len(u) > 80 else f"- {u}" for u in unmatched[:5])
+                        )
+                if src_set:
+                    s_applied, s_unmatched = apply_fixes_to_sources(rpath, only=src_set)
+                    if s_applied:
+                        files = sorted({lbl for lbl, _o in s_applied})
+                        st.success(
+                            f"{len(s_applied)}件を元ファイルに適用: " + ", ".join(f"`{f}`" for f in files)
+                            + " — 次回生成される全CV/CLに反映されます"
+                        )
+                    if s_unmatched:
+                        st.warning(
+                            f"{len(s_unmatched)}件はソース由来だが原文と完全一致せず未適用 — 手動で対応:\n"
+                            + "\n".join(f"- {u[:80]}…" if len(u) > 80 else f"- {u}" for u in s_unmatched[:5])
+                        )
+                if not doc_set and not src_set:
+                    st.info(
+                        "適用対象が選択されていません (全て「適用しない」)。"
+                        f"この{display}を今のマスターから作り直すなら下の「🔄 再生成」を使ってください"
                     )
-                if applied:
+                elif applied:
                     st.rerun()
+
+        # ── Regenerate from current masters ──────────────────────────────
+        # The way out when the fixes are already applied at the source (or all
+        # skipped): the stale document is rebuilt from the masters as they are
+        # now, which also picks up header/role_tagline changes.
+        if job is not None:
+            st.caption(
+                f"修正案が全て元ファイル側で解決済みの場合は、{display}を作り直すのが早い "
+                "(現在のマスター・ヘッダー設定で再生成 → 次回バッチで再レビュー)"
+            )
+            if st.button(
+                f"🔄 {display}を今のマスターから再生成",
+                key=f"regen_{md_path.stem}",
+                help="career/cv/ の profile/projects/toolkit と role_title/role_tagline から作り直します。"
+                     "現在のファイルは 15_reviews/.backups/ にバックアップされます。手動編集は失われます",
+            ):
+                try:
+                    with st.spinner(f"{display}を再生成中…"):
+                        from reviewer import REVIEWS_DIR
+                        REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+                        (_regen_bk_dir := REVIEWS_DIR / ".backups").mkdir(parents=True, exist_ok=True) or (_regen_bk_dir / f"{md_path.stem}.pre_regen.md").write_text(
+                            md_path.read_text(encoding="utf-8"), encoding="utf-8")
+                        base = md_path.stem[:-3]  # strip _CV / _CL
+                        title = job.get("title", "")
+                        company = job.get("company", "")
+                        desc = job.get("description") or job.get("snippet") or ""
+                        if label == "CV":
+                            from cv_generator import detect_role_type, generate_cv
+                            md_path.write_text(
+                                generate_cv(
+                                    role_type=detect_role_type(title, desc),
+                                    job_title=title, company=company, job_description=desc,
+                                    match_filename=base, cl_filename=f"{base}_CL",
+                                ), encoding="utf-8")
+                        else:
+                            from cover_letter_generator import save_cover_letter
+                            save_cover_letter(
+                                title, company, job.get("location", "Edinburgh"), desc,
+                                str(md_path.parent), match_filename=base,
+                                cv_filename=f"{base}_CV",
+                            )
+                    st.success(
+                        f"{display}を再生成しました (バックアップ: 15_reviews/.backups/)。"
+                        "レビューは古くなったので、次回バッチで再レビューされます"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"再生成に失敗: {e}")
 
 
 def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
@@ -931,6 +1200,13 @@ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
     if not md_path.exists():
         st.caption(f"{label}: —")
         return
+
+    # Submission badge next to the PDF button (badge only — never blocks)
+    from reviewer import REVIEWS_DIR
+    review_path = REVIEWS_DIR / f"{md_path.stem}_review.md"
+    if review_path.exists():
+        st.markdown(f"**Review:** {_score_badge(review_path)}")
+
     if st.button(f"{label} → PDF", key=f"conv_{key_prefix}_{label}"):
         try:
             _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
@@ -1048,9 +1324,9 @@ with tab_review:
             st.markdown(f"**{r['company']}** — {r['title'][:70]}")
         c_cv, c_cl = st.columns(2)
         with c_cv:
-            show_review("CV", CV_DIR / f"{r['base']}_CV.md")
+            show_review("CV", CV_DIR / f"{r['base']}_CV.md", r["job"])
         with c_cl:
-            show_review("CL", CL_DIR / f"{r['base']}_CL.md")
+            show_review("CL", CL_DIR / f"{r['base']}_CL.md", r["job"])
         st.divider()
 
 
@@ -1134,7 +1410,7 @@ with tab_watched:
         st.session_state.pop(f"{key}_running", None)
 
     # Initialize process state
-    for _key in ["saved_proc", "watched_proc", "analysis_proc"]:
+    for _key in ["saved_proc", "watched_proc"]:
         if _key not in st.session_state:
             st.session_state[_key] = None
         if f"{_key}_running" not in st.session_state:
@@ -1142,14 +1418,20 @@ with tab_watched:
         if f"{_key}_output" not in st.session_state:
             st.session_state[f"{_key}_output"] = []
 
+    # Two-stage pipeline state for the URL-list flow:
+    #   saved_stage    — which step saved_proc is currently running ("scrape"/"analyze")
+    #   saved_chain    — True when the scrape should auto-continue into --from-saved analysis
+    st.session_state.setdefault("saved_stage", None)
+    st.session_state.setdefault("saved_chain", False)
+
     # ════════════════════════════════════════
     # Section B: URL List Scraper
     # ════════════════════════════════════════
     st.subheader("🔗 B: URL List Scraper & Matcher")
     st.caption("""
-        Add job detail page URLs to `00_saved/url-list.md` (one per line). 
-        First, click **Start URL List Scrape** to extract job description texts with AI.
-        Once scraping is done, click **Run Match Analysis** to evaluate matches and generate CVs.
+        Add job detail page URLs to `00_saved/url-list.md` (one per line).
+        - **⚡ Scrape → 解析まで一気通貫** — スクレイプから解析・表反映まで自動実行(通常はこれ)。
+        - **▶ Scrape のみ** — 00_saved/ に貯めるだけ。解析は 🎯 Match Analysis タブで別途。
     """)
 
     # Show url-list.md contents & count
@@ -1174,54 +1456,46 @@ with tab_watched:
         except Exception:
             pass
 
-    col_b1, col_b2, col_b3 = st.columns([1.5, 1.5, 3])
+    col_b1, col_b3 = st.columns([1, 2])
 
-    # ── Mutual exclusion: scrape and analysis can't run simultaneously ──
     scrape_running = st.session_state.saved_proc is not None and st.session_state.saved_proc.poll() is None
-    analysis_running = st.session_state.analysis_proc is not None and st.session_state.analysis_proc.poll() is None
-    _any_b_running = scrape_running or analysis_running
+
+    def _start_scrape(chain: bool):
+        """Launch scraper_url_list.py. If chain=True, auto-run run.py --from-saved
+        once the scrape exits cleanly (see the reporting block below)."""
+        st.session_state.saved_proc = subprocess.Popen(
+            [sys.executable, "-u", "scraper_url_list.py"], cwd=str(SCRAPER_DIR),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        st.session_state.saved_stage = "scrape"
+        st.session_state.saved_chain = chain
+        st.session_state.saved_running = True
+        st.session_state.saved_proc_output = []  # Clear previous log
+        st.rerun()
 
     with col_b1:
         if not scrape_running:
-            if st.button("▶ Start URL List Scrape", type="primary", key="start_saved", disabled=_any_b_running):
-                cmd = [sys.executable, "-u", "scraper_url_list.py"]
-                st.session_state.saved_proc = subprocess.Popen(
-                    cmd, cwd=str(SCRAPER_DIR),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
-                st.session_state.saved_running = True
-                st.session_state.saved_proc_output = [] # Clear previous log
-                st.rerun()
+            if st.button("▶ Scrape のみ", key="start_saved",
+                         help="URL をスクレイプして 00_saved/ に貯めるだけ。表は更新されません "
+                              "(解析は 🎯 Match Analysis タブで別途)。"):
+                _start_scrape(chain=False)
+            if st.button("⚡ Scrape → 解析まで一気通貫", type="primary", key="start_saved_chain",
+                         help="スクレイプ完了後、そのまま run.py --from-saved を自動実行し "
+                              "`URL List Match Table` まで反映します。"):
+                _start_scrape(chain=True)
         else:
-            if st.button("⏹ Stop Scrape", type="secondary", key="stop_saved", disabled=not scrape_running):
+            _label = "⏹ Stop 解析" if st.session_state.saved_stage == "analyze" else "⏹ Stop Scrape"
+            if st.button(_label, type="secondary", key="stop_saved", disabled=not scrape_running):
+                st.session_state.saved_chain = False  # cancel any pending chain step
                 _kill_process("saved_proc")
                 st.rerun()
 
-    with col_b2:
-        if not analysis_running:
-            if st.button("🎯 Run Match Analysis", type="primary", key="start_analysis", disabled=_any_b_running):
-                cmd = [sys.executable, "-u", "run.py", "--from-saved"]
-                st.session_state.analysis_proc = subprocess.Popen(
-                    cmd, cwd=str(SCRAPER_DIR),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
-                st.session_state.analysis_running = True
-                st.session_state.analysis_proc_output = [] # Clear previous log
-                st.rerun()
-        else:
-            if st.button("⏹ Stop Analysis", type="secondary", key="stop_analysis", disabled=not analysis_running):
-                _kill_process("analysis_proc")
-                st.rerun()
-
-    # Show lock warning
-    if _any_b_running:
-        _running_label = "Scrape" if scrape_running else "Analysis"
-        st.caption(f"⏳ {_running_label} is running — the other action is disabled to prevent file conflicts.")
-
     with col_b3:
-        # Show status/output for scrape
+        # Show status/output for the current pipeline step (scrape or analyze)
         if st.session_state.saved_proc is not None:
             proc = st.session_state.saved_proc
+            _stage = st.session_state.saved_stage or "scrape"
+            _step_name = "解析 (run.py --from-saved)" if _stage == "analyze" else "Scrape"
             # Drain available output lines (non-blocking)
             try:
                 while True:
@@ -1232,48 +1506,61 @@ with tab_watched:
             except Exception:
                 pass
 
-            st.info(f"Scraper running (PID {proc.pid})" if proc.poll() is None else f"Scraper finished (exit code {proc.returncode})")
+            st.info(f"{_step_name} running (PID {proc.pid})" if proc.poll() is None
+                    else f"{_step_name} finished (exit code {proc.returncode})")
 
             if st.session_state.saved_proc_output:
-                with st.expander("Scraper Output", expanded=True):
+                with st.expander(f"{_step_name} Output", expanded=True):
                     st.code("\n".join(st.session_state.saved_proc_output[-100:]))
 
             if proc.poll() is None:
                 import time
                 time.sleep(2)
                 st.rerun()
-            else:
-                st.success(f"✅ Scraper Finished (exit code {proc.returncode})")
+            elif _stage == "scrape":
+                if proc.returncode == 0:
+                    st.success("✅ Scrape 完了")
+                    if st.session_state.saved_chain:
+                        # Auto-continue into analysis. The scrape process has
+                        # exited, so its file lock is released and run.py can
+                        # acquire it (both use the "url_list_jobs" lock).
+                        st.info("→ 続けて解析を実行します…")
+                        st.session_state.saved_proc = subprocess.Popen(
+                            [sys.executable, "-u", "run.py", "--from-saved"],
+                            cwd=str(SCRAPER_DIR),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                        )
+                        st.session_state.saved_stage = "analyze"
+                        st.session_state.saved_chain = False
+                        st.session_state.saved_proc_output = []
+                        st.rerun()
+                    else:
+                        st.info("次: 🎯 **Match Analysis** タブで解析すると "
+                                "`URL List Match Table` に反映されます。")
+                        st.session_state.saved_proc = None
+                        st.session_state.saved_stage = None
+                elif proc.returncode == 2:
+                    st.error("⚠ Scrape skipped: another process is using url_list_jobs.json "
+                             "(a Match Analysis run holds the lock). Wait for it to finish, then retry.")
+                    st.session_state.saved_proc = None
+                    st.session_state.saved_stage = None
+                else:
+                    st.error(f"❌ Scrape failed (exit code {proc.returncode}). See output above.")
+                    st.session_state.saved_proc = None
+                    st.session_state.saved_stage = None
+            else:  # _stage == "analyze"
+                if proc.returncode == 0:
+                    st.success("✅ 一気通貫 完了 — `URL List Match Table` に反映されました。"
+                               "（Obsidian でテーブルを開き直すと最新化されます）")
+                elif proc.returncode == 2:
+                    st.error("⚠ 解析 skipped: another process holds the url_list_jobs lock. "
+                             "Wait for it to finish, then run 🎯 Match Analysis.")
+                else:
+                    st.error(f"❌ 解析 failed (exit code {proc.returncode}). See output above.")
                 st.session_state.saved_proc = None
-
-        # Show status/output for analysis
-        elif st.session_state.analysis_proc is not None:
-            proc = st.session_state.analysis_proc
-            # Drain available output lines (non-blocking)
-            try:
-                while True:
-                    line = proc.stdout.readline()
-                    if not line:
-                        break
-                    st.session_state.analysis_proc_output.append(line.rstrip())
-            except Exception:
-                pass
-
-            st.info(f"Analyzer running (PID {proc.pid})" if proc.poll() is None else f"Analyzer finished (exit code {proc.returncode})")
-
-            if st.session_state.analysis_proc_output:
-                with st.expander("Analyzer Output", expanded=True):
-                    st.code("\n".join(st.session_state.analysis_proc_output[-100:]))
-
-            if proc.poll() is None:
-                import time
-                time.sleep(2)
-                st.rerun()
-            else:
-                st.success(f"✅ Analysis Finished (exit code {proc.returncode})")
-                st.session_state.analysis_proc = None
+                st.session_state.saved_stage = None
         else:
-            st.caption("Not running. Choose an action to start.")
+            st.caption("待機中。「Scrape のみ」または「Scrape → 解析まで一気通貫」を押してください。")
 
 
     # ════════════════════════════════════════
@@ -1363,3 +1650,122 @@ with tab_watched:
                         st.text(content[:2000])
                 else:
                     st.text(content[:2000])
+
+    # ════════════════════════════════════════
+    # Section D: Email Outreach (cold email drafts)
+    # ════════════════════════════════════════
+    st.divider()
+    st.subheader("✉️ D: Email Outreach (メール下書き)")
+    st.caption(
+        "`00_saved/email-list.md` の表に「メール / 会社名 / URL / ロール / メモ」を記入 → 下のボタンで "
+        "`10_output/30_emails/` にテンプレートから下書きを生成。会社名が空欄の行は企業ドメインから推定 "
+        "(gmail 等は推定不可)。既存の下書きは上書きしません — 作り直すにはファイルを削除。"
+    )
+
+    from email_outreach import (
+        parse_email_list, generate_all, draft_path, link_drafts_into_list,
+        generate_outreach_cv, outreach_cv_path, OUT_DIR as EMAIL_OUT_DIR,
+    )
+    _email_rows = parse_email_list()
+    if _email_rows:
+        import pandas as _pd
+        st.dataframe(_pd.DataFrame([{
+            "メール": r["email"],
+            "会社名": r["company"] + (" (推定)" if r["company_guessed"] else "") if r["company"] else "❌ 要記入",
+            "ロール": r["role"],
+            "CV": (outreach_cv_path(r).name if outreach_cv_path(r) and outreach_cv_path(r).exists() else "—"),
+            "下書き": (draft_path(r).name if draft_path(r) and draft_path(r).exists() else "—"),
+            "メモ": r["notes"],
+        } for r in _email_rows]), hide_index=True, width="stretch")
+
+        st.caption(
+            "求人票が無いため、CVはロール別マスターからそのまま生成する汎用版 (求人特化のマッチ度調整・レビューは行いません)。"
+            "CLはこの用途では作成しません — 冒頭文を書く根拠となる求人内容が無いため。"
+        )
+        col_cv, col_mail, col_regen, col_imap = st.columns(4)
+        with col_cv:
+            if st.button("📄 CVを生成", key="gen_outreach_cvs"):
+                results = [(r, *generate_outreach_cv(r)) for r in _email_rows]
+                created = [(r, p) for r, p, s in results if s == "created"]
+                skipped = [r for r, p, s in results if s == "exists"]
+                failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
+                if created:
+                    st.success("生成: " + ", ".join(f"`{p.name}`" for _r, p in created)
+                               + " → `10_output/31_outreach_cvs/`")
+                if skipped:
+                    st.info(f"{len(skipped)}件は既存のCVあり — 作り直すにはファイルを削除")
+                for r, s in failed:
+                    st.warning(f"{r['email']}: {s}")
+                if created:
+                    st.rerun()
+        with col_mail:
+            if st.button("✉️ メール下書きを生成", type="primary", key="gen_emails"):
+                results = generate_all()
+                created = [(r, p) for r, p, s in results if s == "created"]
+                skipped = [r for r, p, s in results if s == "exists"]
+                failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
+                if created:
+                    st.success("生成: " + ", ".join(f"`{p.name}`" for _r, p in created)
+                               + " → `10_output/30_emails/` (Obsidianで編集して送信)")
+                if skipped:
+                    st.info(f"{len(skipped)}件は既存の下書きあり — 変更する場合はファイル側を直接編集、"
+                            "またはテンプレート変更後は「🔄 作り直す」で上書き")
+                for r, s in failed:
+                    st.warning(f"{r['email']}: {s}")
+                # Write [[wikilinks]] back into email-list.md's 下書き column so
+                # Obsidian readers can jump straight from the list to the draft.
+                if created or skipped:
+                    if link_drafts_into_list():
+                        st.caption("📎 email-list.md の「下書き」列にリンクを記入しました")
+                    st.rerun()
+        with col_regen:
+            if st.button("🔄 作り直す (上書き)", key="regen_emails",
+                         help="既存の下書きファイルを削除して、現在のテンプレートから作り直します。"
+                              "手動で編集した内容があれば失われます。"):
+                results = generate_all(force=True)
+                created = [(r, p) for r, p, s in results if s == "created"]
+                failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
+                if created:
+                    st.success(f"{len(created)}件を最新テンプレートで作り直しました → `10_output/30_emails/`")
+                for r, s in failed:
+                    st.warning(f"{r['email']}: {s}")
+                if created:
+                    st.rerun()
+        with col_imap:
+            if st.button("💾 Gmail下書きに保存", key="imap_save_all"):
+                from email_outreach import save_imap_draft
+                ok_count, fail_count = 0, 0
+                for r in _email_rows:
+                    cv_md = outreach_cv_path(r)
+                    cv_pdf = None
+                    if cv_md and cv_md.exists():
+                        try:
+                            cv_pdf, _v, _new = _convert_pdf_versioned(cv_md)
+                        except Exception as _pdf_err:
+                            st.warning(f"{r['company']}: PDF変換失敗 — {_pdf_err} (本文のみで保存)")
+                    ok, msg = save_imap_draft(r, cv_pdf)
+                    if ok:
+                        ok_count += 1
+                        st.success(f"✓ {msg}")
+                    else:
+                        fail_count += 1
+                        st.error(f"✗ {r.get('company','?')}: {msg}")
+                if ok_count:
+                    st.caption(f"Gmail の「下書き」フォルダを開いて内容を確認してから送信してください。")
+    else:
+        st.info("email-list.md の表にまだ行がありません。メール列に @ を含む行を追加してください。")
+
+    _drafts = sorted(EMAIL_OUT_DIR.glob("*.md")) if EMAIL_OUT_DIR.exists() else []
+    if _drafts:
+        from email_outreach import gmail_compose_url
+        st.markdown("**生成済み下書き:**")
+        for d in _drafts:
+            with st.expander(f"✉️ {d.stem}"):
+                gmail_url = gmail_compose_url(d)
+                if gmail_url:
+                    st.link_button("📧 Gmail で下書きを開く (CANDIDATE_EMAIL)", gmail_url)
+                    st.caption("宛先・件名・本文は入力済み。CVの添付だけ手動で行い、内容を確認して送信してください "
+                               "(URL経由でのファイル自動添付はブラウザ仕様上できません)。")
+                else:
+                    st.caption("⚠️ 宛先またはSubjectを読み取れず、Gmailリンクを生成できませんでした。")
+                st.markdown(d.read_text(encoding="utf-8", errors="replace"))

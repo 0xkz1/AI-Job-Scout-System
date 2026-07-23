@@ -135,10 +135,21 @@ async def fetch_descriptions_sequential(
                 url = job.get("url")
                 if not url:
                     continue
-                desc = await fetch_fn(page, url)
+                result = await fetch_fn(page, url)
+                # fetch_fn may return a plain description string (Adzuna, Guardian)
+                # or a dict with extra fields like location (Reed, whose search-page
+                # scrape only recognises a hardcoded city shortlist and needs the
+                # detail page's structured data to fill in the rest).
+                if isinstance(result, dict):
+                    desc = result.get("description", "")
+                    loc = result.get("location", "")
+                else:
+                    desc, loc = result, ""
                 if desc:
                     job["description"] = desc
                     job["snippet"] = desc[:300]
+                    if loc and not job.get("location"):
+                        job["location"] = loc
                     title = job.get("title", "").strip().lower()
                     company = job.get("company", "").strip().lower()
                     cache[(title, company)] = job

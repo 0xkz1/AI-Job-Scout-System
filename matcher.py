@@ -186,6 +186,10 @@ SKILL_SYNONYMS = {
     "typescript": "ts",
     "py": "python",
     "python": "py",
+    "scripting": "bash / shell",
+    "shell scripting": "bash / shell",
+    "shell": "bash / shell",
+    "bash": "bash / shell",
     "react.js": "react",
     "reactjs": "react",
     "nextjs": "next.js",
@@ -208,6 +212,8 @@ SKILL_SYNONYMS = {
     "rest": "rest / websockets",
     "rest api": "rest / websockets",
     "api": "rest / websockets",
+    "apis": "rest / websockets",
+    "api integration": "rest / websockets",
     "websockets": "rest / websockets",
     "sql": "postgresql",
     "postgres": "postgresql",
@@ -236,6 +242,17 @@ SKILL_SYNONYMS = {
     "workflow optimization": "workflow automation",
     "process automation": "workflow automation",
     "pipeline": "workflow automation",
+    "n8n": "workflow automation",
+    "zapier": "workflow automation",
+    # Agentic / multi-agent phrasing — job posts split one competency into
+    # many near-duplicate terms; route them all to the Multi-Agent Systems row.
+    "agent workflows": "multi-agent systems",
+    "agentic workflows": "multi-agent systems",
+    "agentic systems": "multi-agent systems",
+    "ai agents": "multi-agent systems",
+    "autonomous agents": "multi-agent systems",
+    "autonomous research agents": "multi-agent systems",
+    "multi agent": "multi-agent systems",
     "agile methodology": "agile",
     "agile development": "agile",
     "scrum": "agile",
@@ -274,9 +291,19 @@ SKILL_SYNONYMS = {
     "coding standards": "code standards",
     "code quality": "code standards",
     "code review": "code standards",
+    "troubleshooting": "debugging",
+    "problem diagnosis": "debugging",
+    # AI-assisted / agentic coding tooling
+    "claude code": "ai-assisted development",
+    "agentic coding": "ai-assisted development",
+    "ai coding": "ai-assisted development",
+    "ai pair programming": "ai-assisted development",
+    "copilot": "ai-assisted development",
     "database management": "data management",
     "data pipelines": "data management",
     "data pipeline": "data management",
+    "data structuring": "data management",
+    "data modeling": "data management",
     "data driven": "data-driven systems",
     # Game development variants (aspirational — partial credit via skills.md)
     "game dev": "game development",
@@ -326,6 +353,58 @@ NON_SKILL_FILTER: set[str] = {
 def _is_non_skill(skill_name: str) -> bool:
     """Check if skill name is in non-skill filter (case-insensitive)."""
     return skill_name.lower().strip() in NON_SKILL_FILTER
+
+
+# "Design"/"Designer" alone is discipline-ambiguous — it covers physical/
+# industrial design (gas pipe layout, automotive parts, mechanical CAD) just
+# as much as the candidate's actual graphic/UI/product design work. Without
+# word-boundary matching, this term partial-matches the candidate's own
+# "Web Design"/"UI Design" skills (get_user_skill_level's substring path) and
+# scored a Gas Designer posting 0.64 on skills alone. Only trust it when the
+# SAME job also names a concrete digital-design tool/practice.
+_AMBIGUOUS_DESIGN_TERMS = {"design", "designer", "design engineer", "cad", "cad design"}
+_DIGITAL_DESIGN_SIGNALS = {
+    "adobe", "photoshop", "illustrator", "affinity", "figma", "sketch",
+    "indesign", "web design", "ui design", "ux design", "ui/ux", "ui", "ux",
+    "front-end", "frontend", "front end", "html", "css", "javascript",
+    "graphic design", "brand design", "visual design", "visual", "canva",
+    "procreate", "after effects", "premiere", "framer", "webflow",
+    "product design", "typography", "wireframe", "wireframing",
+    "prototyping", "prototype", "branding", "layout", "portfolio",
+}
+
+
+def _has_digital_design_context(job_skills: list[str]) -> bool:
+    """True if the job's skill list names a concrete digital-design tool or
+    practice alongside a bare "design"/"designer" term — see
+    _AMBIGUOUS_DESIGN_TERMS above for why that co-occurrence matters."""
+    blob = " ".join(normalize_skill_name(s) for s in job_skills)
+    return any(sig in blob for sig in _DIGITAL_DESIGN_SIGNALS)
+
+
+# Roles whose "design" vocabulary is digital/creative by definition — a bare
+# "Design" skill inside one of these disciplines is the candidate's actual
+# strength, not a physical-design (gas/automotive/CAD) false friend.
+_DIGITAL_ROLE_SET = {"product_designer", "creative_technologist", "technical_artist",
+                     "web_developer", "camera_assistant"}
+# One title keyword hit (2.0) or two skill/description hits (1.0 each) suffice.
+_DIGITAL_ROLE_MIN_AFFINITY = 2.0
+
+
+def _digital_role_affinity(job_title: str, job_skills: list[str],
+                           job_description: str = "") -> float:
+    """Total role-keyword affinity to digital/creative roles, summed across
+    title + skill list + description (cv_generator.role_affinity, shared with
+    CV template routing so the two paths can't drift). Replaces a title-only
+    check that missed jobs whose evidence is spread thin — one
+    creative_technologist keyword in the title is conclusive, but so are
+    several product_designer keywords scattered across the skills and
+    description with none individually in the title. Physical-design jobs
+    (gas mains, automotive) hit none of these keywords, so they stay at 0
+    and keep the untrusted-"design" demotion."""
+    from cv_generator import role_affinity
+    aff = role_affinity(job_title, job_skills, job_description)
+    return sum(v for r, v in aff.items() if r in _DIGITAL_ROLE_SET)
 
 
 def normalize_skill_name(name: str) -> str:
@@ -412,7 +491,18 @@ def _skill_name_embedding_similarity(job_skill: str, user_skill_list: list) -> f
         return 0.0
 
 
-def calculate_skill_match(job_skills: list[str], user_skills: dict) -> dict:
+# Skill-score shaping (see calculate_skill_match). `strength` saturates the
+# absolute matched credit so that ~4-6 solid matches carry a score floor
+# independent of how many skills the job listed — this is what stops a real
+# match from collapsing to 0 under a long unmatched tail. The ceiling caps how
+# far absolute strength alone can lift the score; a top score still needs
+# breadth (high `coverage`).
+_SKILL_SATURATION = 4.0
+_SKILL_STRENGTH_CEILING = 0.6
+
+
+def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: str = "",
+                          job_description: str = "") -> dict:
     """
     Calculate skill match score with embedding fallback.
     Returns: {score, matched_skills, missing_skills, partial_skills}
@@ -421,6 +511,10 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict) -> dict:
         return {"score": 0.3, "matched": [], "missing": [], "partial": []}
 
     user_skill_list = _build_user_skill_embeddings(user_skills)
+    has_design_context = (
+        _has_digital_design_context(job_skills)
+        or _digital_role_affinity(job_title, job_skills, job_description) >= _DIGITAL_ROLE_MIN_AFFINITY
+    )
 
     matched = []
     partial = []
@@ -432,8 +526,17 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict) -> dict:
         # Skip non-skill terms (too generic/ambiguous)
         if _is_non_skill(job_skill):
             continue
-        level = get_user_skill_level(user_skills, job_skill)
         total_weight += 1.0
+
+        # Bare "design"/"designer" with no accompanying digital-design signal
+        # in this same job's skill list is discipline-ambiguous (see
+        # _AMBIGUOUS_DESIGN_TERMS) — count it unmatched rather than let it
+        # substring/embedding-match the candidate's own Web/UI design skills.
+        if normalize_skill_name(job_skill) in _AMBIGUOUS_DESIGN_TERMS and not has_design_context:
+            missing.append(job_skill)
+            continue
+
+        level = get_user_skill_level(user_skills, job_skill)
 
         if level >= 0.6:
             matched.append({"skill": job_skill, "level": level})
@@ -454,22 +557,22 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict) -> dict:
             else:
                 missing.append(job_skill)
 
-    # Raw proportion of coverage
-    raw_score = matched_weight / total_weight if total_weight > 0 else 0.0
-
-    # Also factor: what % of job skills were at least partially covered?
-    covered = len(matched) + len(partial)
-    coverage_ratio = covered / total_weight if total_weight > 0 else 0.0
-
-    # Penalty for large gaps (many skills completely missing)
-    gap_penalty = 0.0
-    if coverage_ratio < 0.25:
-        gap_penalty = 0.15
-    elif coverage_ratio < 0.50:
-        gap_penalty = 0.05
-
-    # Combine: weighted coverage with gap penalty
-    score = max(0.0, coverage_ratio - gap_penalty)
+    # Two views of skill fit, combined so a long tail of unmatched niche/
+    # duplicate terms can't zero out a candidate who genuinely covers the
+    # core skills:
+    #   coverage — weighted fraction of the job's skills the candidate holds.
+    #     Honest breadth signal, but it sinks toward 0 when the LLM extracts
+    #     many granular near-duplicate terms (denominator inflation), e.g.
+    #     "Agent Workflows" + "Autonomous Research Agents" + "Multi-Agent
+    #     Systems" as three separate rows for one competency.
+    #   strength — absolute matched credit, saturating. Depends only on how
+    #     much real match exists, NOT on the gap count, so it sets a floor a
+    #     genuine match can't fall below. Zero matches -> matched_weight 0 ->
+    #     strength 0, so this never invents a fit the candidate lacks (real
+    #     gaps like "Distributed Compute" still lower coverage, as they should).
+    coverage = matched_weight / total_weight if total_weight > 0 else 0.0
+    strength = 1.0 - math.exp(-matched_weight / _SKILL_SATURATION)
+    score = max(coverage, _SKILL_STRENGTH_CEILING * strength)
 
     # Boost for strong individual matches
     if matched:
@@ -766,55 +869,113 @@ def _load_persona_summary() -> str:
     # though profile.md states the location explicitly.
     parts = [
         "--- KEY FACTS (authoritative) ---\n"
-        "Current location: Edinburgh, UK (relocated 2025). UK work eligible, local resident.\n"
+        "Current location: Edinburgh, Scotland, UK — settled resident since December 2025, UK work eligible.\n"
+        "Do NOT frame this as an upcoming or future move, and never claim the candidate lives in, "
+        "is near, or is relocating to the employer's location. The candidate's home is Edinburgh, full stop.\n"
         "Any mentions of Japan below refer to past work, photography subjects, or a "
         "remote compute machine — NOT the candidate's current location."
     ]
+    # ethos.md gets a larger budget: at 2000 chars the model saw only the
+    # local-AI mentions and never reached the deployment-agnostic /
+    # "What I Do" sections, and reported a "local-first preference" mismatch
+    # against cloud-heavy jobs.
+    per_file_limit = {"ethos.md": 6500}
     for fname in persona_files:
         fpath = USER_PROFILE_DIR / fname
         if fpath.exists():
             content = fpath.read_text(encoding="utf-8").strip()
             if content:
-                parts.append(f"--- {fname} ---\n{content[:2000]}")
+                parts.append(f"--- {fname} ---\n{content[:per_file_limit.get(fname, 2000)]}")
     _persona_cache = "\n\n".join(parts) if len(parts) > 1 else ""
     return _persona_cache
 
 
-def _ollama_context_score(job_description: str, persona_summary: str) -> dict | None:
+# The candidate is deployment-agnostic (cloud or local per constraint), but
+# smaller/fallback models keep inventing a "local-first preference" and scoring
+# cloud-heavy jobs as a values mismatch. Prompt instructions alone do not hold
+# across the fallback provider chain, so violations are caught and scrubbed.
+import re as _re_framing
+
+_DEPLOY_FRAMING_RX = _re_framing.compile(
+    r"local[-\s]?first|self[-\s]?hosted|ローカルファースト|セルフホスト", _re_framing.I
+)
+
+
+def _scrub_deployment_framing(text: str) -> str:
+    """Drop sentences that frame the candidate as local-first / anti-cloud."""
+    if not text or not _DEPLOY_FRAMING_RX.search(text):
+        return text
+    # Split on English and Japanese sentence ends, keeping the terminator.
+    sentences = _re_framing.split(r"(?<=[.!?。])\s*", text)
+    kept = [s for s in sentences if s and not _DEPLOY_FRAMING_RX.search(s)]
+    return " ".join(kept).strip() or text
+
+
+def _ollama_context_score(job_description: str, persona_summary: str,
+                          brief: bool = False, _retries_left: int = 1) -> dict | None:
     """
-    Ask Ollama LLM to rate context/ethos alignment on 0-100 scale.
-    Returns {"score": float (0-1), "reasoning": str} or None on failure.
+    Ask the LLM to rate context/ethos alignment on a 0-100 scale.
+    Returns {"score": float (0-1), "reasoning": str, ...} or None on failure.
+
+    brief=True: English-only, 1-2 sentence reasoning, small token budget —
+    for bulk scoring passes where only the score gates filtering. The long
+    bilingual reasoning (brief=False) roughly 6-10x's the latency; reserve it
+    for the few high-match jobs whose reports actually display it. The
+    Japanese translation is added lazily at report time, not here.
+
+    Reasoning that calls the candidate local-first is retried once, then
+    scrubbed — see _scrub_deployment_framing.
     """
     if not job_description or not persona_summary:
         return None
 
-    prompt = f"""You are a career alignment analyst. Rate how well this job matches the candidate's personal philosophy, work style, and ethos.
+    shared = f"""You are a career alignment analyst. Rate how well this job matches the candidate's personal philosophy, work style, and ethos.
 
 ## Candidate Profile
-{persona_summary[:3000]}
+{persona_summary[:9000]}
 
 ## Job Description
 {job_description[:5000]}
 
 ## Task
 Score the alignment on 0-100 (0 = completely misaligned, 100 = perfect fit).
-Consider: work philosophy, values, creative vs corporate culture, autonomy, local-first/open-source ethos, multi-disciplinary creative-engineer fit.
+Consider: work philosophy, values, creative vs corporate culture, autonomy, tooling flexibility (picks cloud or local per constraint, bound to neither), multi-disciplinary creative-engineer fit.
 
-Note: The candidate is highly pragmatic in professional environments. Their personal ethos (e.g., running local AI, private agents, local-first workflows) represents their independent creative ideals and personal research preferences, but they are fully open to, and capable of, working with standard enterprise cloud services, third-party APIs, and corporate workflows. Do not penalize the score simply because a job uses cloud/enterprise systems instead of local-first tools; instead, focus on whether the candidate's core problem-solving ethos (e.g., reducing friction, automating pipelines, bridging design and engineering) aligns with the job's requirements.
+Note: The candidate is deployment-agnostic. They run local models in personal research and standard enterprise cloud (AWS, hosted model APIs, managed services, third-party SaaS) in professional work, choosing per constraint — latency, cost, privacy, team toolchain — not per preference. This is portability, NOT a local-first bias. Do NOT describe the candidate as "local-first", do NOT treat a cloud or enterprise stack as a mismatch, and do NOT mention local-vs-cloud in the reasoning at all. Score on whether the candidate's core problem-solving ethos (reducing friction, automating pipelines, bridging design and engineering) aligns with the job's requirements."""
+
+    # Style for both modes: plain, simple English. Short words, short
+    # sentences, no jargon or filler. Say the one thing that drives the score.
+    if brief:
+        prompt = shared + """
 
 Respond ONLY with JSON:
-{{"score": <number 0-100>, "reasoning_en": "<detailed explanation in English — as long as needed to justify the score>", "reasoning_ja": "<日本語での説明 — スコアの根拠を詳しく書く>"}}
+{"score": <number 0-100>, "reasoning_en": "<3-4 short, plain sentences>"}
+Use simple words, short sentences. Say what fits, what does not, and the main reason for the score. No filler.
+Plain prose only — NO markdown, NO bold, NO headers, NO bullet points, NO labels like "Fits:"/"Doesn't fit:". Just 3-4 flowing sentences.
+BANNED: the reasoning must not contain "local-first", "local first", "self-hosted", "open-source preference", or any claim that cloud / enterprise / third-party tooling is a mismatch for this candidate. The candidate uses cloud and local equally.
+"""
+    else:
+        prompt = shared + """
 
-The reasoning should explain WHY this score, citing specific aspects of the job and candidate profile. Length is up to your judgment — write more for complex/nuanced cases, less for obvious ones. Be specific about what aligns or misaligns.
+Respond ONLY with JSON:
+{"score": <number 0-100>, "reasoning_en": "<3-4 short, plain sentences>", "reasoning_ja": "<短く平易な日本語で3〜4文>"}
+
+Write plainly. Short words, short sentences, no jargon. Say what fits and what does not, and why — nothing more. Keep English and Japanese the same length and meaning.
+Plain prose only — NO markdown, NO bold, NO headers, NO bullet points, NO labels like "Fits:"/"Doesn't fit:". Just 3-4 flowing sentences per language.
+BANNED: neither language may contain "local-first" / "ローカルファースト", "self-hosted", "open-source preference", or any claim that cloud / enterprise / third-party tooling is a mismatch for this candidate. The candidate uses cloud and local equally.
 """
 
     try:
         from llm_client import call_llm as _call_llm
         content = _call_llm(
             messages=[{"role": "user", "content": prompt}],
-            system_prompt="You are a career alignment scoring engine. Output ONLY valid JSON.",
+            system_prompt=(
+                "You are a career alignment scoring engine. Output ONLY valid JSON. "
+                "The candidate is deployment-agnostic: cloud and local are equally normal for them. "
+                "Never call them local-first, never treat a cloud/enterprise stack as a values mismatch."
+            ),
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=300 if brief else 700,  # short reasoning → small budget → fast
         )
 
         import json, re
@@ -831,6 +992,20 @@ The reasoning should explain WHY this score, citing specific aspects of the job 
                 else:
                     reasoning = reasoning_en
                 score = max(0, min(100, score)) / 100.0
+
+                if _DEPLOY_FRAMING_RX.search(f"{reasoning_en} {reasoning_ja}"):
+                    if _retries_left > 0:
+                        retried = _ollama_context_score(
+                            job_description, persona_summary, brief,
+                            _retries_left=_retries_left - 1,
+                        )
+                        if retried is not None:
+                            return retried
+                    reasoning_en = _scrub_deployment_framing(reasoning_en)
+                    reasoning_ja = _scrub_deployment_framing(reasoning_ja)
+                    reasoning = (f"{reasoning_en}\n\n**和訳:** {reasoning_ja}"
+                                 if reasoning_ja else reasoning_en)
+
                 return {"score": round(score, 2), "reasoning": reasoning, "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja}
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
@@ -839,18 +1014,65 @@ The reasoning should explain WHY this score, citing specific aspects of the job 
         return None
 
 
-def _ollama_job_summary(job_description: str) -> dict | None:
-    """Generate a bilingual (English + Japanese) summary of a job description using Ollama."""
+def translate_to_ja(text_en: str) -> str:
+    """Translate a short plain-English note to plain Japanese.
+
+    Generic — used for both context-alignment reasoning and job summaries.
+    Bulk passes generate English only (fast); this adds Japanese lazily, for
+    just the few high-match jobs whose reports actually display it, so the
+    bulk pass itself stays fast. Returns "" on failure (caller keeps
+    English-only)."""
+    if not text_en:
+        return ""
+    try:
+        from llm_client import call_llm as _call_llm
+        out = _call_llm(
+            messages=[{"role": "user", "content":
+                       "Translate to plain, simple Japanese. Short words, short "
+                       "sentences, same meaning. Write it as ONE flowing paragraph — "
+                       "no line breaks between sentences, no bullet points, no markdown. "
+                       f"Output ONLY the Japanese, no preamble:\n\n{text_en}"}],
+            system_prompt="You are a precise EN→JA translator. Output only the translation.",
+            temperature=0.1,
+            max_tokens=400,
+        )
+        return (out or "").strip()
+    except Exception:
+        return ""
+
+
+def _ollama_job_summary(job_description: str, en_only: bool = False) -> dict | None:
+    """Generate a summary of a job description.
+
+    en_only=True: English only, for the bulk pass over every >=0.50 match —
+    keeps the loop fast. Japanese is added lazily via translate_to_ja() for
+    just the high-match jobs whose reports display it (see
+    llm_context_backfill.py). en_only=False (default): original bilingual
+    single-call behavior, used by the on-demand/interactive analyze_match
+    path where per-job cost isn't in a tight bulk loop."""
     if not job_description or len(job_description) < 50:
         return None
 
-    prompt = f"""You are a job description summarizer. Summarize the following job description in 3-5 sentences.
+    if en_only:
+        prompt = f"""You are a job description summarizer. Summarize the following job description in 3-4 sentences.
 
-Focus on: role, key responsibilities, required skills, team/company culture, and what makes this role distinctive.
+Cover: role, main duties, required skills, and what makes this role distinctive. Use plain, simple words and short sentences. No markdown, no bullet points, no jargon.
+
+Respond ONLY with JSON. The value MUST be a plain string (flowing prose,
+3-4 short sentences) — NEVER a nested object, list, or markdown headings/bold:
+{{"summary_en": "<3-4 short, plain sentences in English>"}}
+
+## Job Description
+{job_description[:5000]}
+"""
+    else:
+        prompt = f"""You are a job description summarizer. Summarize the following job description in 3-4 sentences.
+
+Cover: role, main duties, required skills, and what makes this role distinctive. Use plain, simple words and short sentences. No markdown, no bullet points, no jargon.
 
 Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
-3-5 sentences) — NEVER nested objects, lists, or markdown headings:
-{{"summary_en": "<3-5 sentence summary in English>", "summary_ja": "<3-5文の日本語要約>"}}
+3-4 short sentences) — NEVER nested objects, lists, or markdown headings/bold:
+{{"summary_en": "<3-4 short, plain sentences in English>", "summary_ja": "<短く平易な日本語で3〜4文>"}}
 
 ## Job Description
 {job_description[:5000]}
@@ -866,7 +1088,7 @@ Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
             messages=[{"role": "user", "content": prompt}],
             system_prompt="You are a job description summarizer. Output ONLY valid JSON.",
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=280 if en_only else 450,
         )
 
         import json
@@ -985,6 +1207,16 @@ def calculate_context_match(job_description: str) -> dict:
         else:
             normalized = (best_sim - RAW_FLOOR) / (RAW_CEIL - RAW_FLOOR)
 
+        # TF-IDF measures word overlap, not meaning: "Gas Designer" shares
+        # "design / technical / drawings / project" with the persona and
+        # saturates to 1.0 despite being a different field. Cap the fallback
+        # so surface overlap can register a positive signal but never claim a
+        # perfect fit — only the LLM read (context_source="llm") is trusted
+        # to award a high context score. Raise the cap by enabling
+        # --llm-context (option A).
+        TFIDF_SCORE_CAP = 0.6
+        normalized = min(normalized, TFIDF_SCORE_CAP)
+
         return {
             "score": round(normalized, 2),
             "raw_similarity": round(best_sim, 3),
@@ -1101,7 +1333,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         job_description = ". ".join(p for p in parts if p)
 
     # Individual scores
-    skill_match = calculate_skill_match(job_skills, user_skills)
+    skill_match = calculate_skill_match(job_skills, user_skills, job.get("title", ""), job_description)
     exp_match = calculate_experience_match(job_level, user_exp)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
@@ -1159,11 +1391,18 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     )
     composite = composite * relevance
 
-    # Determine tier
+    # Determine tier. "Strong Match" asserts confirmed relevance, so it
+    # requires a semantic (LLM) context read — a TF-IDF-only score is
+    # word-overlap and can't tell "UI Designer" from "Gas Designer". Without
+    # that confirmation a job is capped at "Good Match" no matter how high the
+    # keyword-driven composite climbs. Enabling --llm-context (option A) lets
+    # genuinely strong jobs reach the top tier again.
     if relevance < 0.5:
         tier = "🔴 Completely Irrelevant"
-    elif composite >= 0.8:
+    elif composite >= 0.8 and ctx_source == "llm":
         tier = "🟢 Strong Match"
+    elif composite >= 0.8:
+        tier = "🟡 Good Match (未検証: LLM文脈スコア無し)"
     elif composite >= 0.6:
         tier = "🟡 Good Match"
     elif composite >= 0.4:
@@ -1183,6 +1422,12 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
                 summary_en = summary.get("summary_en", "")
                 summary_ja = summary.get("summary_ja", "")
 
+    # Per-role keyword affinity (title×2 + skills + description hits) — stored
+    # so reports/debugging can see WHY a mixed-signal job was read as design
+    # vs data vs creative-tech, and which profile it leans toward.
+    from cv_generator import role_affinity as _role_affinity_fn
+    role_aff = _role_affinity_fn(job.get("title", ""), job_skills, job_description)
+
     return {
         "composite_score": round(composite, 2),
         "tier": tier,
@@ -1201,6 +1446,8 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "weights": weights,
         "summary_en": summary_en,
         "summary_ja": summary_ja,
+        "role_affinity": role_aff,
+        "detected_role": max(role_aff, key=role_aff.get) if role_aff else "general",
     }
 
 
@@ -1263,6 +1510,10 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     # YAML frontmatter for Dataview queries
     source = job.get("source", "unknown")
     jtype = job.get("type", "auto")
+    # Collection route (how the job entered the queue), not the job board it came
+    # from — `source` is the site, `route` is url_list / watched / scraper.
+    route = job.get("route", "")
+    route_yaml = f'\nroute: "{route}"' if route else ""
     scraped_at = job.get("scraped_at", "")
     saved_at = scraped_at[:10] if scraped_at else datetime.now().strftime("%Y-%m-%d")
     cv_link = f'\ncv: "[[{cv_filename.replace(".md", "")}]]"' if cv_filename else ""
@@ -1279,7 +1530,7 @@ title: "{title}"
 categories: {categories_yaml}
 location: "{location}"
 source: "{source}"
-type: "{jtype}"
+type: "{jtype}"{route_yaml}
 saved_at: {saved_at}
 skills_score: {int(match['skills']['score'] * 100)}
 experience_score: {int(match['experience']['score'] * 100)}
