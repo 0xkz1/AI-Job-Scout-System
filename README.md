@@ -434,6 +434,7 @@ A running record of non-obvious decisions, bugs, and design pivots — written f
 #### Key Design Decision — Prototyping vs Agile as Separate Skills
 
 Kazuki identified that **Prototyping** and **Agile** are genuinely separate competencies in his profile, not synonyms of each other. Prototyping is a core creative/technical practice (physical + digital); Agile is a process methodology he uses but doesn't specialize in. This is why they have different proficiency levels (Advanced vs Intermediate) in `skills.md`.
+
 ---
 
 ## 2段階LLM戦略 (2026-07-15)
