@@ -58,6 +58,9 @@ BLOCKED_BACKOFF_MS = 30000
 # Consecutive blocks after which continuing only deepens the ban. The remaining
 # jobs are left untouched for a later run rather than recorded as unrecoverable.
 MAX_CONSECUTIVE_BLOCKS = 3
+# Write recoveries to disk this often. Small, because each page costs ~4s: losing
+# 10 fetches to a crash is 40 seconds, losing 100 is most of the run.
+CHECKPOINT_EVERY = 10
 
 
 def _extractor(source: str):
@@ -86,6 +89,47 @@ def _extractor(source: str):
     return None
 
 
+def _apply(got: dict[str, str], gone: list[str], backup: bool = False) -> int:
+    """Write recovered descriptions and removal marks into the DB. Returns the count.
+
+    Called as results arrive, not only at the end. The results used to be applied
+    after the whole loop, so a browser error on the first URL discarded everything —
+    and a rate-limit stop partway through discarded the recoveries already made.
+    Rewriting the file per batch is cheap next to a 4s-per-page fetch.
+    """
+    if not got and not gone:
+        return 0
+    db = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    updated = 0
+    for job in db:
+        url = job.get("url")
+        if url in gone:
+            # Marked, not deleted: the job stays out of every re-fetch attempt from
+            # here on, while remaining visible as a lead lost to a dead listing
+            # rather than silently vanishing from the backlog.
+            job["listing_removed"] = True
+            continue
+        desc = got.get(url)
+        if desc and job.get("description") != desc:
+            job["description"] = desc
+            # Full text now, so the API-summary flag no longer applies — leaving it
+            # set would keep the job out of review after it had been repaired.
+            job.pop("description_truncated", None)
+            # Drop the analysis computed from the broken text: skills were
+            # extracted from JavaScript, and context was scored on it. Leaving
+            # them would keep a fixed description paired with a poisoned score.
+            job.pop("match", None)
+            if isinstance(job.get("analysis"), dict):
+                job["analysis"].pop("skills", None)
+                job["analysis"].pop("skill_coverage", None)
+            updated += 1
+    if backup:
+        shutil.copy2(ANALYZED, ANALYZED.with_suffix(".json.prerefetch"))
+    ANALYZED.write_text(json.dumps(db, ensure_ascii=False, indent=2, default=str),
+                        encoding="utf-8")
+    return updated
+
+
 async def _page_state(page, url: str) -> str:
     """'ok' | 'blocked' | 'gone' — checked before extraction.
 
@@ -100,16 +144,34 @@ async def _page_state(page, url: str) -> str:
     except Exception:
         return "blocked"
     status = resp.status if resp else 0
+
+    # Adzuna's /jobs/land/ad/ links bounce through a redirect, and evaluating while
+    # that is in flight raises "Execution context was destroyed" — which killed the
+    # whole run on its first URL. Settle first, then treat an evaluate failure as
+    # "cannot tell", not as a crash: the caller's extractor gets its own attempt.
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
     await page.wait_for_timeout(1500)
-    body = (await page.evaluate("() => (document.body.innerText || '').slice(0, 400)")).lower()
+
+    async def _probe(js: str, default):
+        try:
+            return await page.evaluate(js)
+        except Exception:
+            return default
+
+    body = (await _probe(
+        "() => (document.body.innerText || '').slice(0, 400)", "") or "").lower()
     if status == 403 or "suspicious behaviour" in body or "unusual behaviour" in body:
         return "blocked"
     if "no longer available" in body or (status == 404 and "adp-body" not in body):
         # 404 alone is not proof: some removed-listing pages still render the
-        # posting body, so the visible notice decides.
-        gone = await page.evaluate(
-            "() => document.querySelectorAll('[class*=\"adp-body\"]').length === 0")
-        if gone:
+        # posting body, so the visible notice decides. Defaulting to False (not
+        # gone) when the probe fails keeps a live posting from being written off.
+        if await _probe(
+                "() => document.querySelectorAll('[class*=\"adp-body\"]').length === 0",
+                False):
             return "gone"
     return "ok"
 
@@ -142,7 +204,16 @@ async def refetch(targets: list[dict], headless: bool = True) -> tuple[dict[str,
                 print(f"  [{i}/{len(targets)}] skip ({source}: no extractor)", flush=True)
                 continue
             fetch_fn, returns_dict = found
-            state = await _page_state(page, url)
+            # Guard the probe too, not just fetch_fn. An unguarded browser call
+            # anywhere in this loop ends the run and loses every recovery made so
+            # far — "Execution context was destroyed" on the FIRST url did exactly
+            # that, and the results were only written after the loop.
+            try:
+                state = await _page_state(page, url)
+            except Exception as e:
+                print(f"  [{i}/{len(targets)}] ✗ probe {type(e).__name__}: "
+                      f"{str(e)[:50]}", flush=True)
+                continue
             if state == "blocked":
                 blocks += 1
                 print(f"  [{i}/{len(targets)}] ⛔ rate-limited ({blocks}/"
@@ -178,6 +249,10 @@ async def refetch(targets: list[dict], headless: bool = True) -> tuple[dict[str,
             got[url] = desc
             print(f"  [{i}/{len(targets)}] ✓ {len(desc):5d}c {(job.get('title') or '?')[:42]}",
                   flush=True)
+            # Checkpoint. Whatever ends the run next — a browser error, a
+            # rate-limit stop, an interrupt — the work up to here is already on disk.
+            if len(got) % CHECKPOINT_EVERY == 0:
+                print(f"    💾 checkpoint: {_apply(got, gone)} jobs written", flush=True)
             await page.wait_for_timeout(SETTLE_MS)
         await browser.close()
     return got, gone
@@ -236,41 +311,22 @@ def main() -> int:
     if not targets:
         return 0
 
-    got, gone = asyncio.run(refetch(targets, headless=not args.show_browser))
+    try:
+        got, gone = asyncio.run(refetch(targets, headless=not args.show_browser))
+    except Exception as e:
+        # Browser teardown or the loop itself can still fail. The checkpoints have
+        # already persisted the recoveries, so report and exit non-zero rather than
+        # dying with a traceback that implies nothing was saved.
+        print(f"\n✗ run ended early: {type(e).__name__}: {str(e)[:100]}")
+        print("  recoveries written before this point are already saved "
+              "(checkpointed); re-run to continue.")
+        return 1
     print(f"\nrecovered: {len(got)}/{len(targets)}   confirmed removed: {len(gone)}")
     if not got and not gone:
         return 0
 
-    db = json.loads(ANALYZED.read_text(encoding="utf-8"))
-    updated = 0
-    for job in db:
-        url = job.get("url")
-        if url in gone:
-            # Marked, not deleted: the job stays out of every re-fetch attempt from
-            # here on, while remaining visible as a lead lost to a dead listing
-            # rather than silently vanishing from the backlog.
-            job["listing_removed"] = True
-            continue
-        desc = got.get(url)
-        if desc:
-            job["description"] = desc
-            # Full text now, so the API-summary flag no longer applies — leaving it
-            # set would keep the job out of review after it had been repaired.
-            job.pop("description_truncated", None)
-            # Drop the analysis computed from the broken text: skills were
-            # extracted from JavaScript, and context was scored on it. Leaving
-            # them would keep a fixed description paired with a poisoned score.
-            job.pop("match", None)
-            if isinstance(job.get("analysis"), dict):
-                job["analysis"].pop("skills", None)
-                job["analysis"].pop("skill_coverage", None)
-            updated += 1
-
-    backup = ANALYZED.with_suffix(".json.prerefetch")
-    shutil.copy2(ANALYZED, backup)
-    ANALYZED.write_text(json.dumps(db, ensure_ascii=False, indent=2, default=str),
-                        encoding="utf-8")
-    print(f"updated {updated} jobs in {ANALYZED.name} (backup: {backup.name})")
+    updated = _apply(got, gone, backup=True)
+    print(f"updated {updated} jobs in {ANALYZED.name}")
     print("\nNext: re-analyse the cleared jobs, then re-review them:")
     print("  .venv/bin/python3 run.py --reanalyze --llm-context")
     print("  .venv/bin/python3 rereview_top.py --new-only")
