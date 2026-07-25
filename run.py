@@ -73,6 +73,42 @@ def load_config() -> dict:
 SAVED_DIR = os.path.join(os.path.dirname(__file__), "00_saved")
 
 
+def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) -> int:
+    """Score every job in place. Returns the failure count.
+
+    Shared by every matching pass because each one needs the same two things and
+    none of them originally had either:
+
+    - Containment. analyze_match reaches the LLM for context scoring, so it raises
+      whenever the provider chain is exhausted — an ordinary end-state after a bulk
+      day. Unguarded, one job's failure discarded the scoring of every job in the
+      batch.
+    - Progress. A silent loop over 1000 jobs runs for over an hour with no output,
+      which looks exactly like a hung process. That ambiguity produced three false
+      "the process died" reports in one session while it was simply waiting on the
+      API.
+
+    A failed job keeps an empty match dict rather than none, so downstream code that
+    assumes the key exists still works and `--reanalyze` can retry it.
+    """
+    failures = 0
+    for i, job in enumerate(jobs, 1):
+        try:
+            job["match"] = analyze_match(job, config, **kwargs)
+        except Exception as e:
+            failures += 1
+            if failures <= 3:
+                print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
+                      f"{type(e).__name__}: {str(e)[:70]}", flush=True)
+            job.setdefault("match", {})
+        if i % 100 == 0 or i == len(jobs):
+            print(f"  … {i}/{len(jobs)} {label} ({failures} failed)", flush=True)
+    if failures:
+        print(f"  ⚠ {failures}/{len(jobs)} jobs left without a match score. "
+              f"Re-run `run.py --reanalyze` to retry them.")
+    return failures
+
+
 def save_raw_to_saved(jobs: list[dict], source: str):
     """Save raw scraped jobs to 00_saved/ staging area."""
     os.makedirs(SAVED_DIR, exist_ok=True)
@@ -510,9 +546,8 @@ async def main():
             # Calculate temporary match scores so we can target only the top ones
             user_skills = load_user_skills()
             user_exp = load_user_experience()
-            for job in analyzed:
-                if "match" not in job or not job["match"]:
-                    job["match"] = analyze_match(job, config)
+            match_all([j for j in analyzed if not j.get("match")], config,
+                      label="scored for targeting")
 
             # Sort and apply filters first to identify the relevant subset
             passed, _ = filter_jobs(analyzed, config)
@@ -662,10 +697,22 @@ async def main():
             
             if args.force_reanalyze:
                 print("  🔄 Re-running full keyword/Ollama analysis (skills and experience classification) on all jobs...")
+                _reanalyze_failures = 0
                 for idx, job in enumerate(analyzed):
-                    analyzed[idx] = analyze_job(job)
+                    try:
+                        analyzed[idx] = analyze_job(job)
+                    except Exception as e:
+                        # Contained for the same reason as every other analysis loop:
+                        # analyze_job reaches the LLM, and this is the pass users are
+                        # told to run to recover from a rate-limited night. It must
+                        # not be the pass that discards everything.
+                        _reanalyze_failures += 1
+                        if _reanalyze_failures <= 3:
+                            print(f"    ⚠ {(job.get('title') or '?')[:40]}: "
+                                  f"{type(e).__name__}: {str(e)[:60]}", flush=True)
                     if (idx + 1) % 10 == 0 or idx + 1 == len(analyzed):
-                        print(f"    → Re-analyzed {idx + 1}/{len(analyzed)} jobs...")
+                        print(f"    → Re-analyzed {idx + 1}/{len(analyzed)} jobs "
+                              f"({_reanalyze_failures} failed)...", flush=True)
             else:
                 print(f"  ⚡ Skipping re-analysis (use --force-reanalyze to re-run Ollama extraction)")
             
@@ -674,8 +721,7 @@ async def main():
             user_exp = load_user_experience()
             total_skills = sum(len(s) for s in user_skills.values())
             print(f"  📋 Loaded profile: {total_skills} skills, {user_exp.get('years_python', 0)}y Python, {user_exp.get('years_linux', 0)}y Linux")
-            for job in analyzed:
-                job["match"] = analyze_match(job, config, skip_summary=True)
+            match_all(analyzed, config, skip_summary=True)
 
             # --- LLM Context Match (optional, slow but accurate) ---
             if args.llm_context:
@@ -1104,8 +1150,7 @@ async def main():
         user_exp = load_user_experience()
         total_skills = sum(len(s) for s in user_skills.values())
         print(f"  📋 Loaded profile: {total_skills} skills, {user_exp.get('years_python', 0)}y Python, {user_exp.get('years_linux', 0)}y Linux")
-        for job in new_analyzed:
-            job["match"] = analyze_match(job, config)
+        match_all(new_analyzed, config)
     else:
         new_analyzed = []
         print("  ✅ No new jobs — using existing DB")

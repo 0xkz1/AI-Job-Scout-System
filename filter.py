@@ -7,6 +7,30 @@ Filters analyzed job listings based on user preferences from config.yaml.
 import re
 from typing import Any
 
+# UK full-time convention: 37.5h/week over 52 weeks.
+_HOURS_PER_YEAR = 37.5 * 52
+
+# Below this, an "annual" figure is not a salary. parse_salary tags anything
+# without "hour" in the text as annual, so a stray pair of numbers in a
+# description becomes min=1.0/max=2.0 — 33 such rows exist, several from postings
+# reading only "Salary negotiable". Rejecting a job for a £2 salary would be
+# absurd, so an implausible annual figure is treated as no data at all.
+_MIN_PLAUSIBLE_ANNUAL = 1000
+
+
+def _annualise(amount: float, period: str | None) -> float | None:
+    """`amount` as an annual figure, or None when it cannot be trusted.
+
+    None means "do not filter on this" rather than zero — an unparseable or
+    implausible salary must not be read as a low one.
+    """
+    if amount is None:
+        return None
+    if period == "hourly":
+        return amount * _HOURS_PER_YEAR
+    # annual, or unknown-but-annual-shaped
+    return amount if amount >= _MIN_PLAUSIBLE_ANNUAL else None
+
 
 def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
     """
@@ -55,10 +79,18 @@ def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
             return False, f"level '{level}' not in allowed levels {allowed_levels}"
 
     # --- Filter by salary ---
+    # min_salary_gbp is annual, so a non-annual figure has to be converted before
+    # the comparison means anything. Comparing raw values rejected every hourly and
+    # daily posting outright: "£30 - £35 per hour" read as "max salary £35 < £26000"
+    # and was dropped, though it annualises to roughly £67k. 33 postings in the DB
+    # carried a max under 100 — all of them hourly or daily rates.
     min_salary = config.get("min_salary_gbp", 0)
     if min_salary > 0 and salary.get("max"):
-        if salary["max"] < min_salary:
-            return False, f"max salary £{salary['max']:.0f} < min £{min_salary}"
+        annual = _annualise(salary["max"], salary.get("period"))
+        if annual is not None and annual < min_salary:
+            unit = f" ({salary['period']})" if salary.get("period") else ""
+            return False, (f"max salary £{salary['max']:.0f}{unit} "
+                           f"≈ £{annual:.0f}/yr < min £{min_salary}")
 
     # --- Filter by employment type ---
     allowed_types = config.get("employment_types", [])
