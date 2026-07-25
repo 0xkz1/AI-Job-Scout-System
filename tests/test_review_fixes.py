@@ -52,5 +52,6 @@ def test_apply_replaces_only_verbatim_matches(tmp_path, monkeypatch):
     assert "Working knowledge of Docker-based deployment." in text
     assert "must not be applied" not in text
     assert unmatched == ["This phrase is not in the document."]
-    # pre-apply backup preserved
-    assert (tmp_path / "15_reviews" / "X_CV.pre_apply.md").read_text() == DOC_MD
+    # pre-apply backup preserved, under .backups/ as apply_review_fixes documents
+    assert (tmp_path / "15_reviews" / ".backups" / "X_CV.pre_apply.md"
+            ).read_text() == DOC_MD

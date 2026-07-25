@@ -172,6 +172,9 @@ def _call_provider(
     elif provider == "mistral-tertiary":
         return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
                               key_env="MISTRAL_API_KEY_TERTIARY")
+    elif provider == "mistral-quaternary":
+        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
+                              key_env="MISTRAL_API_KEY_QUATERNARY")
     elif provider == "stepfun":
         return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider == "openrouter":

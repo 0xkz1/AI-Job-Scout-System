@@ -86,6 +86,18 @@ def main():
         print("⚠️ job-scout-nightly: _analyzed.json missing or empty — pipeline may have failed")
         return
 
+    # Scoring invariants, before anything is reported. Every scoring bug this
+    # pipeline has had was silent — a plausible number, no error — so a nightly run
+    # would have reproduced it indefinitely (review_score_threshold was
+    # unreachable for months, and 255/255 reviews read 提出不可 as a result).
+    # Printed, not raised: stdout is the Telegram notification here, and a broken
+    # invariant is worth surfacing without discarding the night's real findings.
+    try:
+        from invariants import report as _invariant_report
+        _invariant_report()
+    except Exception as e:  # noqa: BLE001 - never let the check take the run down
+        print(f"⚠️ 整合性チェックを実行できませんでした: {type(e).__name__}: {e}")
+
     current = {}
     for j in jobs:
         url = j.get("url")
@@ -133,7 +145,7 @@ def main():
                     review_path = run_review(kind, doc, j)
                     reviewed.append(f"{base}_{kind}")
                     reviewed_jobs.add(base)
-                    score, fact_block = _extract_score(
+                    score, fact_block, _nits = _extract_score(
                         review_path.read_text(encoding="utf-8"))
                     if score is not None and not fact_block and score >= get_score_threshold():
                         ready_count += 1

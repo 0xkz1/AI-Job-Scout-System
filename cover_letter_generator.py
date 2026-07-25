@@ -399,6 +399,39 @@ def _load_projects_digest() -> str:
     return _projects_digest_cache
 
 
+# For visual-design roles the model kept reaching for the AI pipelines (Asset
+# Tagger, Asset Weaver) because their records are the most detailed — leaving an
+# Audio-Visual Designer or a Packaging Designer pitched on an image-tagging tool.
+# These hints steer each role toward the projects that actually demonstrate the
+# relevant craft. They only reorder preference; the model still picks one real
+# project and every fabrication gate still applies.
+_ROLE_PROJECT_HINTS = {
+    "product_designer":
+        "FOR THIS ROLE: it is a design role. Prefer the design-forward projects — "
+        "My Personal Identity Mark (visual identity), Hive Floral Pod (3D concept "
+        "design), the Portfolio Website (design + build), Feral Research (design of "
+        "a living archive). Reach for an AI pipeline (Asset Tagger, Asset Weaver) "
+        "ONLY if the posting is explicitly about automation or AI tooling; a "
+        "graphic/brand/packaging/motion/AV design role is better served by the "
+        "visual and product work.",
+    "technical_artist":
+        "FOR THIS ROLE: prefer work showing craft plus pipeline — Hive Floral Pod "
+        "(3D), Feral Bestiary work, the Portfolio Website, or a tooling project "
+        "only where the posting is pipeline-focused.",
+    "camera_assistant":
+        "FOR THIS ROLE: prefer the photography work (Real Estate Photography, the "
+        "Architectural & Wildlife Photography practice). Do not lead with software "
+        "pipelines.",
+    "web_developer":
+        "FOR THIS ROLE: prefer the Portfolio Website (front-end build) and the "
+        "engineering projects (AI Job Scout System, Feral Research, node ops).",
+}
+
+
+def _role_project_hint(role_type: str) -> str:
+    return _ROLE_PROJECT_HINTS.get(role_type, "")
+
+
 def _generate_opening_hook(job_title: str, company: str, job_description: str) -> str | None:
     """LLM-write a company-specific opening paragraph ("why this company").
 
@@ -417,6 +450,8 @@ def _generate_opening_hook(job_title: str, company: str, job_description: str) -
         if not persona:
             return None
         projects_digest = _load_projects_digest()
+        role_type = detect_role_type(job_title, job_description)
+        role_hint = _role_project_hint(role_type)
         prompt = f"""Write the OPENING paragraph of a cover letter (3-4 sentences, at most 80 words).
 
 THE JOB:
@@ -429,6 +464,7 @@ THE CANDIDATE (ethos = the backbone of the whole letter):
 
 THE CANDIDATE'S REAL PROJECTS (the only concrete work you may cite — pick ONE):
 {projects_digest}
+{role_hint}
 
 HOW TO WRITE THIS OPENING (follow in order):
 1. Read the posting and decide which ONE of the candidate's ethos principles it most resonates with — e.g. "Building Tools That Amplify Human Creativity", "Craft × Structure", "Reduce Friction Between Idea and Execution", or "Knowledge as Infrastructure". Different jobs should surface different principles; do not default to the same one every time.
@@ -457,56 +493,126 @@ RULES:
 - Never mention relocation or moving, and never claim the candidate lives in, is near, or is moving to the employer's city. The candidate is based in Edinburgh; the job's location is irrelevant to the opening.
 - Ground the connection in the candidate's actual process or outcomes (systems thinking, automation, design rigor) — not literal tools or hardware (tablets, specific input devices, software names) unless the posting explicitly calls for them. Backstage implementation details do not belong in an opening paragraph.
 - Avoid recycling the ethos headings verbatim as filler ("reduce friction between idea and execution", "craft and structure", "tools that amplify human creativity"). Express the chosen principle through the specific project and this posting, in your own words.
+- BANNED phrases — do not use any of these or close paraphrases; they have become a tic across letters: "disappear into the workflow", "tools that disappear", "invisible infrastructure", "invisible scaffolding", "amplify intent without demanding attention", "extend intent without demanding attention", "serve the work rather than". Say what the project concretely did instead.
+- Keep it TIGHT: 3-4 sentences, 80 words maximum. A tight opening reads sharper than a long one; do not pad to fill space.
 - No clichés ("I was excited to see", "I am writing to apply", "passionate about"), no flattery filler.
 - Do not include the greeting line; the letter template already has "Dear Hiring Team".
 
 Output ONLY the paragraph."""
-        text = call_llm(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="You write concise, specific, honest cover-letter openings. Output only the requested paragraph.",
-            temperature=0.5,
-            max_tokens=300,
-        )
-        text = (text or "").strip().strip('"')
-        # Sanity gate: single plain paragraph that actually names the company.
-        # Use the first word of the company name — models naturally write
-        # "Wordsmith's" rather than the full registered name "Wordsmith AI".
-        if not (120 <= len(text) <= 1000):
-            return None
-        if any(m in text for m in ("\n\n", "- ", "• ", "#", "Dear ")):
-            return None
-        company_word = (company.split()[0].lower() if company and company.split() else "")
-        if len(company_word) >= 3 and company_word not in text.lower():
-            return None
-        # Last gate, and the one the prompt alone could not enforce: the model
-        # kept inventing domain experience to bridge candidate → employer even
-        # with an explicit "do not fabricate" instruction.
-        # Voice gate, cheap and checked before the LLM verification below.
-        # Tightening the anti-fabrication rules pushed the model into writing
-        # ABOUT the candidate in the second person ("Your approach to design…",
-        # "You've built workflows…"), which reads as a letter addressed TO the
-        # applicant instead of from them. A cover-letter opening that never
-        # says "I" is not usable regardless of how factual it is.
-        if not re.search(r"(?:^|\s)(?:I|I['’](?:m|ve|d|ll)|[Mm]y)\b", text):
-            print("  ⚠ CL opening not written in first person; using template opening")
-            return None
-        inverted = _has_inverted_person(text)
-        if inverted:
-            print(f"  ⚠ CL opening addresses the candidate as 'you' ({inverted}); using template opening")
-            return None
-
-        offending = _claims_unsupported_sector(text, persona)
-        if offending:
-            print(f"  ⚠ CL opening claimed unsupported '{offending}' experience; using template opening")
-            return None
-        unsupported = _verify_opening_claims(text)
-        if unsupported:
-            print(f"  ⚠ CL opening unsupported claim ({unsupported}); using template opening")
-            return None
-        return text
+        # The opening is written at temperature 0.5, so a draft that trips a gate
+        # is often just an unlucky roll — the same job frequently produces a clean
+        # opening on a re-draft. Giving up to the template after one try inflated
+        # the fallback rate (≈45%) without meaning the job COULDN'T be personalised.
+        # So we re-draft a few times, keeping every gate strict, and only fall back
+        # when the model genuinely can't produce a clean opening.
+        attempts = _OPENING_ATTEMPTS
+        last_reason = "no clean draft"
+        salvageable = None  # best draft rejected only on presentation, not honesty
+        for attempt in range(1, attempts + 1):
+            text = call_llm(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="You write concise, specific, honest cover-letter openings. Output only the requested paragraph.",
+                temperature=0.5,
+                max_tokens=300,
+            )
+            text = (text or "").strip().strip('"')
+            ok, result, kind = _vet_opening(text, company, persona)
+            if ok:
+                return result
+            last_reason = result  # a short why-rejected string
+            # A draft rejected only for being over the word cap is HONEST — it
+            # passed every fabrication, person and sector gate. Falling back to
+            # the generic template throws away a truthful, tailored paragraph to
+            # avoid a paragraph that is merely long, which is the worse trade.
+            # Keep the shortest such draft and use it if no clean one arrives.
+            if kind == "presentation" and text:
+                if salvageable is None or len(text.split()) < len(salvageable.split()):
+                    salvageable = text
+        if salvageable:
+            print(f"  ⓘ CL opening: 語数超過だが内容は健全 "
+                  f"({len(salvageable.split())}語); テンプレより優先して採用")
+            return salvageable
+        print(f"  ⚠ CL opening: {attempts}回とも不合格 ({last_reason}); using template opening")
+        return None
     except Exception as e:
         print(f"  ⚠ CL opening hook generation failed ({e}); using template opening")
         return None
+
+
+# How many times to re-draft an opening before falling back to the template.
+_OPENING_ATTEMPTS = 3
+# The prompt asks for ≤80 words, but the model clusters around 90-110 and a tight
+# cap just burned the retry budget and fell back to a generic template — worse
+# than a slightly-long tailored opening. Cap only the genuinely bloated (130+
+# originally seen); the prompt still pushes for brevity within that.
+_OPENING_MAX_WORDS = 110
+# Ethos lines the model overuses verbatim across letters — each becomes a tic
+# once the previous one is banned, so they are rejected at the gate too.
+_BANNED_PHRASES = (
+    "disappear into the workflow", "tools that disappear", "tools to disappear",
+    "invisible infrastructure", "invisible scaffolding",
+    "amplify intent without demanding attention",
+    "extend intent without demanding attention",
+    "without demanding attention",
+    "reduce friction between idea and execution",
+)
+
+
+def _vet_opening(text: str, company: str, persona: str) -> tuple[bool, str, str]:
+    """Run every opening gate.
+
+    Returns (True, clean_text, "") or (False, reason, kind), where kind marks
+    what sort of failure it was:
+      "honesty"      — fabrication, wrong person, unclaimed sector, malformed.
+                       Never usable; the template must be used instead.
+      "presentation" — the paragraph is truthful and well-formed but breaks a
+                       stylistic rule (currently only the word cap). The caller
+                       may keep it rather than fall back to a generic template.
+    """
+    # --- Honesty and well-formedness gates first ---
+    # Everything below must pass before a draft can be considered salvageable;
+    # the word cap is checked LAST so "presentation" can only ever mean "this
+    # paragraph is truthful and well-formed, just long".
+    if not (120 <= len(text) <= 1000):
+        return False, "length", "honesty"
+    if any(m in text for m in ("\n\n", "- ", "• ", "#", "Dear ")):
+        return False, "not a single plain paragraph", "honesty"
+    # Banned ethos-tic phrases: once one recurring filler line was dropped the
+    # model latched onto the next ("disappear into the workflow", "amplify intent
+    # without demanding attention"). Reject and re-draft so each opening earns its
+    # specificity instead of reciting the same ethos sentence.
+    low = text.lower()
+    hit = next((p for p in _BANNED_PHRASES if p in low), None)
+    if hit:
+        return False, f"banned filler phrase ({hit})", "honesty"
+    # (No company-name requirement: it assumed company == the addressee, but for
+    # the many recruitment-agency postings the company IS the agency, and the
+    # prompt correctly tells the model to address the CLIENT or the role instead
+    # of the agency. Requiring the agency's name rejected exactly those correct
+    # openings — e.g. a Robert Walters posting for Ofgem that named Ofgem. The
+    # remaining gates plus the prompt's specificity demand cover quality.)
+    # Voice gate: an opening that never says "I" reads as a letter addressed TO
+    # the applicant, not from them — unusable however factual.
+    if not re.search(r"(?:^|\s)(?:I|I['’](?:m|ve|d|ll)|[Mm]y)\b", text):
+        return False, "not first person", "honesty"
+    inverted = _has_inverted_person(text)
+    if inverted:
+        return False, f"inverted person ({inverted})", "honesty"
+    offending = _claims_unsupported_sector(text, persona)
+    if offending:
+        return False, f"unsupported '{offending}' experience", "honesty"
+    unsupported = _verify_opening_claims(text)
+    if unsupported:
+        return False, f"unsupported claim ({unsupported})", "honesty"
+
+    # --- Presentation gate, checked last ---
+    # The prompt asks for ≤80 words and the model tends to run long. Reject so a
+    # tighter re-draft is attempted, but flag it as presentation-only: by this
+    # point the paragraph has cleared every honesty gate, so the caller may keep
+    # it rather than fall back to a generic template.
+    if len(text.split()) > _OPENING_MAX_WORDS:
+        return False, f"too long ({len(text.split())} words)", "presentation"
+    return True, text, ""
 
 
 def generate_cover_letter(job_title: str, company: str, job_location: str = "Edinburgh", job_description: str = "") -> tuple[str, str]:

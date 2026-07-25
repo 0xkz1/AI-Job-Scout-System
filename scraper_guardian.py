@@ -267,7 +267,8 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
 
     locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    max_pages = config.get("max_pages_per_search", 3)
+    from selection import max_pages_for
+    max_pages = max_pages_for("guardian", config)
 
     async with async_playwright() as p:
         for kw in keywords:

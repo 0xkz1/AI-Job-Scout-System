@@ -397,7 +397,8 @@ async def scrape_linkedin_all(config: dict) -> list[dict]:
 
     locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    max_pages = config.get("max_pages_per_search", 3)
+    from selection import max_pages_for
+    max_pages = max_pages_for("linkedin", config)
     headless = config.get("cookie_config", {}).get("headless", True)
 
     for kw in keywords:

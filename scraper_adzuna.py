@@ -14,9 +14,11 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import datetime
 from urllib.parse import quote_plus
 
+import requests
 from playwright.async_api import async_playwright, TimeoutError as PwTimeout
 from scraper_helper import load_description_cache, fetch_descriptions_sequential
 
@@ -149,8 +151,13 @@ async def _fetch_job_description(page, job_url: str) -> str:
                 || t.includes('addEventListener') || t.includes('tokenData');
             const isContentEl = (el) => !['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(el.tagName);
 
-            // Adzuna detail page selectors
+            // Adzuna detail page selectors. '[class*="adp-body"]' leads because
+            // it is what the current markup uses — as of 2026-07-25 every one of
+            // the older selectors matched ZERO elements on a live detail page,
+            // which is why adzuna stopped yielding descriptions after 07-12 and
+            // why the tracking-script text got picked up instead.
             const selectors = [
+                '[class*="adp-body"]',
                 '[class*="job-description"]',
                 '[class*="description__text"]',
                 '[data-js*="description"]',
@@ -160,11 +167,17 @@ async def _fetch_job_description(page, job_url: str) -> str:
                 '[itemprop="description"]',
                 '[class*="detail"] p',
             ];
+            // innerText, not textContent: textContent concatenates the source of
+            // <script> tags and every hidden nav/consent string, so a page whose
+            // real prose is fine still trips looksLikeJs and returns nothing.
+            // That is how the <main> fallback below failed on pages holding 4600
+            // characters of readable posting.
+            const readable = (el) => (el.innerText || el.textContent || '').trim();
             for (const sel of selectors) {
                 const els = document.querySelectorAll(sel);
                 for (const el of els) {
                     if (!isContentEl(el)) continue;
-                    const text = el.textContent.trim();
+                    const text = readable(el);
                     if (text.length > 150 && !looksLikeJs(text)) {
                         return text.slice(0, 5000);
                     }
@@ -173,7 +186,7 @@ async def _fetch_job_description(page, job_url: str) -> str:
             // Fallback
             const main = document.querySelector('main');
             if (main) {
-                const text = main.textContent.trim();
+                const text = readable(main);
                 if (text.length > 200 && !looksLikeJs(text)) return text.slice(0, 5000);
             }
             return '';
@@ -301,15 +314,135 @@ async def scrape_adzuna(
     return jobs
 
 
+# ── Adzuna official REST API (multi-country) ──────────────────────────────
+# Preferred path when ADZUNA_APP_ID / ADZUNA_APP_KEY are set (free tier). Covers
+# gb, de, nl, fr, at, es, it, pl, us … one call returns title/company/location/
+# salary/description, so no Playwright + detail-page fetch needed.
+
+_ADZUNA_CURRENCY = {"gb": "£", "de": "€", "nl": "€", "fr": "€", "at": "€",
+                    "es": "€", "it": "€", "us": "$", "pl": "zł"}
+
+
+def _fmt_adzuna_salary(smin, smax, country: str) -> str:
+    sym = _ADZUNA_CURRENCY.get(country, "")
+    def f(v):
+        return f"{sym}{v:,.0f}"
+    if smin and smax:
+        return f"{f(smin)} - {f(smax)}"
+    if smax:
+        return f(smax)
+    if smin:
+        return f(smin)
+    return ""
+
+
+def scrape_adzuna_api(keyword: str, country: str, app_id: str, app_key: str,
+                      max_pages: int = 3, results_per_page: int = 50) -> list[dict]:
+    """Query the Adzuna API for one keyword in one country. Non-UK queries are
+    biased toward remote (a UK YMS resident works these remotely, not on-site)."""
+    jobs = []
+    # gb kept broad (UK on-site is in scope); non-UK narrowed to remote.
+    what = keyword if country == "gb" else f"{keyword} remote"
+    print(f"🔍 Adzuna API [{country}]: '{what}'...")
+    for page in range(1, max_pages + 1):
+        url = f"https://api.adzuna.com/v1/api/jobs/{country}/search/{page}"
+        params = {
+            "app_id": app_id,
+            "app_key": app_key,
+            "what": what,
+            "results_per_page": results_per_page,
+            "content-type": "application/json",
+        }
+        try:
+            r = requests.get(url, params=params, timeout=25)
+        except Exception as e:
+            print(f"  ⚠ Adzuna API {country} p{page} request error: {e}")
+            break
+        if r.status_code != 200:
+            print(f"  ⚠ Adzuna API {country} p{page}: HTTP {r.status_code}")
+            break
+        try:
+            results = r.json().get("results", [])
+        except Exception as e:
+            print(f"  ⚠ Adzuna API {country} p{page} JSON error: {e}")
+            break
+        if not results:
+            break
+        for it in results:
+            desc = (it.get("description") or "").strip()
+            # The API truncates description to 500 chars and ends it with "…";
+            # there is no full-text field, only redirect_url. That length clears a
+            # naive "is there a description" test while omitting exactly the part a
+            # review rubric is checked against — the requirements — so the reviewer
+            # would invent them. Flagged at the source so selection can keep these
+            # out of review until enrich_truncated_descriptions.py fills them in.
+            truncated = desc.endswith("…") or len(desc) >= 500
+            jobs.append({
+                "description_truncated": truncated,
+                "title": (it.get("title") or "").strip(),
+                "company": ((it.get("company") or {}).get("display_name") or "").strip(),
+                "location": ((it.get("location") or {}).get("display_name") or "").strip(),
+                "salary": _fmt_adzuna_salary(it.get("salary_min"), it.get("salary_max"), country),
+                "snippet": desc[:500],
+                "description": desc,
+                "url": it.get("redirect_url", ""),
+                "source": "adzuna",
+                "type": "auto",
+                "source_site": f"Adzuna {country.upper()}",
+                "scraped_at": datetime.utcnow().isoformat() + "Z",
+            })
+        if len(results) < results_per_page:
+            break
+        time.sleep(0.5)  # stay under free-tier rate limit
+    print(f"  ✓ Adzuna API [{country}]: {len(jobs)} jobs for '{keyword}'")
+    return jobs
+
+
+def _scrape_adzuna_api_all(config: dict, app_id: str, app_key: str) -> list[dict]:
+    """API path: keyword × country matrix over config['adzuna_countries']."""
+    keywords = config.get("keywords", [])
+    countries = config.get("adzuna_countries", ["gb"])
+    from selection import max_pages_for
+    # The API path multiplies by country as well as keyword, so it keeps its own
+    # cap of 3 on top of the per-site setting.
+    max_pages = min(max_pages_for("adzuna", config), 3)
+    seen = set()
+    all_jobs = []
+    for country in countries:
+        for kw in keywords:
+            for j in scrape_adzuna_api(kw, country, app_id, app_key, max_pages=max_pages):
+                key = (j["title"], j.get("company", ""), j.get("location", ""))
+                if key not in seen:
+                    seen.add(key)
+                    all_jobs.append(j)
+            time.sleep(0.5)
+    from scraper_indeed import filter_jobs_by_keywords
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
+    print(f"  ✓ Adzuna API total: {len(all_jobs)} unique jobs across {countries}")
+    return all_jobs
+
+
 async def scrape_adzuna_all(config: dict) -> list[dict]:
-    """Run Adzuna scraper for all keyword+location combos in config."""
+    """Run Adzuna scraper for all keyword+location combos in config.
+
+    Uses the official multi-country API when ADZUNA_APP_ID / ADZUNA_APP_KEY are
+    set; otherwise falls back to the UK-only Playwright scraper below.
+    """
+    app_id = os.getenv("ADZUNA_APP_ID")
+    app_key = os.getenv("ADZUNA_APP_KEY")
+    if app_id and app_key:
+        return _scrape_adzuna_api_all(config, app_id, app_key)
+    print("  ℹ Adzuna API keys not set (ADZUNA_APP_ID/ADZUNA_APP_KEY) — "
+          "falling back to UK-only Playwright scrape.")
+
     all_jobs = []
     seen = set()
     cache = load_description_cache()
 
     locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    max_pages = config.get("max_pages_per_search", 3)
+    from selection import max_pages_for
+    max_pages = max_pages_for("adzuna", config)
 
     async with async_playwright() as p:
         for kw in keywords:

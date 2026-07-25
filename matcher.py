@@ -89,13 +89,19 @@ def load_user_skills() -> dict[str, list[str]]:
             continue
 
         # Table rows: | **Skill Name** | Level | Notes |
-        row_match = re.match(r"^\|\s*\*\*(.+?)\*\*\s*\|\s*(\w+)\s*\|", line)
+        # The Notes column is captured too: it names the concrete tools and
+        # evidence ("GitHub Actions workflow automation", "Claude Code") that a
+        # bare skill name hides, and _llm_skill_coverage needs it to judge a
+        # requirement like "Github" or "Claude" that no row is titled after.
+        row_match = re.match(r"^\|\s*\*\*(.+?)\*\*\s*\|\s*(\w+)\s*\|(.*)$", line)
         if row_match and current_category:
             skill_name = row_match.group(1).strip()
             level = row_match.group(2).strip().lower()
             if level == "level":  # Skip header row
                 continue
-            skills[current_category].append({"name": skill_name, "level": level})
+            notes = row_match.group(3).strip().strip("|").strip()
+            skills[current_category].append(
+                {"name": skill_name, "level": level, "notes": notes})
 
     return skills
 
@@ -207,6 +213,11 @@ SKILL_SYNONYMS = {
     # Additional common abbreviations
     "ci/cd": "continuous integration",
     "continuous integration": "ci/cd",
+    "git": "git / github",
+    "github": "git / github",
+    "gitlab": "git / github",
+    "version control": "git / github",
+    "pull requests": "git / github",
     "cv": "computer vision / vlm",
     "computer vision": "computer vision / vlm",
     "rest": "rest / websockets",
@@ -217,6 +228,12 @@ SKILL_SYNONYMS = {
     "websockets": "rest / websockets",
     "sql": "postgresql",
     "postgres": "postgresql",
+    "genai": "generative ai",
+    "gen ai": "generative ai",
+    "diffusion models": "generative ai",
+    "comfyui": "generative ai",
+    "stable diffusion": "generative ai",
+    "model orchestration": "local llm orchestration",
     "llm": "local llm orchestration",
     "large language model": "local llm orchestration",
     "llm orchestration": "local llm orchestration",
@@ -325,6 +342,17 @@ SKILL_SYNONYMS = {
     # Web design variants
     "web designer": "web design",
     "website design": "web design",
+    "responsive design": "web design",
+    "frontend": "web design",
+    "front end": "web design",
+    "frontend development": "web design",
+    "frontend architecture": "web design",
+    "component based architecture": "design systems",
+    "component driven development": "design systems",
+    "backend services": "node.js / express",
+    "backend development": "node.js / express",
+    "agentic frameworks": "multi-agent systems",
+    "data orchestration": "workflow automation",
     "landing page": "web design",
     "landing pages": "web design",
     "landing page design": "web design",
@@ -347,6 +375,10 @@ NON_SKILL_FILTER: set[str] = {
     "negotiation", "mentoring",
     "marketing", "sales", "administration", "management",
     "operations", "strategy", "business development",
+    # Qualities/outcomes a posting lists as if they were skills — scoring them
+    # only inflates the denominator (user call, 2026-07-24).
+    "usability", "accessibility", "component libraries", "component library",
+    "cost efficiency", "storybook", "performance optimization",
 }
 
 
@@ -412,16 +444,45 @@ def normalize_skill_name(name: str) -> str:
     return name.lower().strip().replace("-", " ").replace("_", " ")
 
 
+def _singularize(name: str) -> str:
+    """Best-effort singular of the LAST word ("component libraries" ->
+    "component library"). Job posts name skills in the plural while skills.md and
+    SKILL_SYNONYMS are singular, so the plural silently missed.
+
+    Safe by construction: the result is only ever used as a LOOKUP KEY. A bogus
+    stem ("aws" -> "aw", "css" -> "cs") matches no entry and changes nothing, so
+    this can never invent a skill the candidate lacks.
+    """
+    words = name.split()
+    if not words:
+        return name
+    last = words[-1]
+    if len(last) > 3 and last.endswith("ies"):
+        last = last[:-3] + "y"
+    elif len(last) > 4 and last.endswith(("ches", "shes", "sses", "xes")):
+        last = last[:-2]
+    elif len(last) > 3 and last.endswith("s") and not last.endswith(("ss", "us", "is")):
+        last = last[:-1]
+    else:
+        return name
+    return " ".join(words[:-1] + [last])
+
+
 def get_user_skill_level(user_skills: dict, skill_name: str) -> float:
     """Find user's proficiency level for a skill (0.0-1.0)."""
     normalized = normalize_skill_name(skill_name)
+    # Try the plural-stripped form too (see _singularize) — lookup key only.
+    singular = _singularize(normalized)
+    candidates = [normalized] if singular == normalized else [normalized, singular]
 
-    for category, skills in user_skills.items():
-        for skill in skills:
-            if normalize_skill_name(skill["name"]) == normalized:
-                return LEVEL_WEIGHTS.get(skill["level"], 0.3)
+    for cand in candidates:
+        for category, skills in user_skills.items():
+            for skill in skills:
+                if normalize_skill_name(skill["name"]) == cand:
+                    return LEVEL_WEIGHTS.get(skill["level"], 0.3)
 
     # Synonym / abbreviation check
+    normalized = next((c for c in candidates if c in SKILL_SYNONYMS), normalized)
     if normalized in SKILL_SYNONYMS:
         synonym = SKILL_SYNONYMS[normalized]
         for category, skills in user_skills.items():
@@ -497,12 +558,35 @@ def _skill_name_embedding_similarity(job_skill: str, user_skill_list: list) -> f
 # match from collapsing to 0 under a long unmatched tail. The ceiling caps how
 # far absolute strength alone can lift the score; a top score still needs
 # breadth (high `coverage`).
+# Markers of a scrape that captured page scaffolding instead of the posting.
+# Matched against the leading slice only: a real description may legitimately
+# mention "JavaScript", but it does not OPEN with a script tag or a JWT.
+_JUNK_DESC_MARKERS = (
+    "window.addeventlistener", "document.createelement", "var tokendata",
+    "<script", "settimeout(", "function(e)", "eyjhbgci", "gtag(", "datalayer.push",
+)
+_JUNK_DESC_SCAN = 800
+
+
+def is_junk_description(text: str) -> bool:
+    """True when a description is page machinery (tracker JS, JWT blobs) rather
+    than the job posting. Such text must be treated as a MISSING description,
+    not scored as prose — see the description_missing branch in analyze_match."""
+    head = (text or "")[:_JUNK_DESC_SCAN].lower()
+    return any(m in head for m in _JUNK_DESC_MARKERS)
+
+
 _SKILL_SATURATION = 4.0
 _SKILL_STRENGTH_CEILING = 0.6
+# Floor on the coverage denominator: a job that named fewer than this many real
+# requirements has not said enough for "fraction covered" to mean anything, so
+# it is scored as if it had asked for this many. Set to the saturation point so
+# the two views agree on what "enough requirements" is.
+_SKILL_MIN_REQS = 4.0
 
 
 def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: str = "",
-                          job_description: str = "") -> dict:
+                          job_description: str = "", llm_coverage: dict | None = None) -> dict:
     """
     Calculate skill match score with embedding fallback.
     Returns: {score, matched_skills, missing_skills, partial_skills}
@@ -525,6 +609,11 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
     for job_skill in job_skills:
         # Skip non-skill terms (too generic/ambiguous)
         if _is_non_skill(job_skill):
+            continue
+        # Same idea, but decided per job by the LLM instead of a hand-kept list:
+        # extraction noise and non-skills ("16Personalities", perks, contract
+        # terms) must not sit in the denominator as if they were requirements.
+        if ((llm_coverage or {}).get(job_skill) or {}).get("verdict") == "not_a_skill":
             continue
         total_weight += 1.0
 
@@ -555,7 +644,22 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
                 partial.append({"skill": job_skill, "level": embed_sim})
                 matched_weight += 0.35
             else:
-                missing.append(job_skill)
+                # Last resort: the LLM's coverage verdict (see
+                # _llm_skill_coverage). Only ever RESCUES what the deterministic
+                # passes already gave up on — it can't overturn a dictionary
+                # match — and the displayed level comes from the covering
+                # skills.md row, not from the model.
+                verdict = (llm_coverage or {}).get(job_skill) or {}
+                v, by = verdict.get("verdict"), verdict.get("by")
+                by_level = get_user_skill_level(user_skills, by) if by else 0.0
+                if v == "full" and by_level > 0:
+                    matched.append({"skill": job_skill, "level": by_level, "via": by})
+                    matched_weight += 1.0
+                elif v == "partial" and by_level > 0:
+                    partial.append({"skill": job_skill, "level": by_level, "via": by})
+                    matched_weight += 0.35
+                else:
+                    missing.append(job_skill)
 
     # Two views of skill fit, combined so a long tail of unmatched niche/
     # duplicate terms can't zero out a candidate who genuinely covers the
@@ -570,7 +674,18 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
     #     genuine match can't fall below. Zero matches -> matched_weight 0 ->
     #     strength 0, so this never invents a fit the candidate lacks (real
     #     gaps like "Distributed Compute" still lower coverage, as they should).
-    coverage = matched_weight / total_weight if total_weight > 0 else 0.0
+    #
+    # The denominator is floored at _SKILL_MIN_REQS because a ratio is only
+    # meaningful once the job has stated enough requirements to be a ratio of
+    # anything. Unfloored, coverage rewarded vague postings: the same
+    # "Geotechnical Design Engineer" scraped three times scored 0.96, 0.24 and
+    # 0.00 off the SAME single match ("Design"), purely because each scrape
+    # extracted a different number of skill rows — a 1-row posting handed a
+    # geotechnical job a 96% skill fit. Measured against review verdicts across
+    # 122 documents, that made this component anti-correlated with real fit
+    # (r=-0.15) while context alone reached r=+0.62: postings that spelled their
+    # requirements out were penalised for it, and vague ones floated to the top.
+    coverage = matched_weight / max(total_weight, _SKILL_MIN_REQS) if total_weight > 0 else 0.0
     strength = 1.0 - math.exp(-matched_weight / _SKILL_SATURATION)
     score = max(coverage, _SKILL_STRENGTH_CEILING * strength)
 
@@ -635,6 +750,94 @@ def calculate_experience_match(job_level: str, user_exp: dict) -> dict:
     }
 
 
+_REMOTE_TARGETS_CACHE: list[str] | None = None
+
+
+def _remote_target_countries() -> list[str]:
+    """Target countries for remote roles, from config.yaml (priority order)."""
+    global _REMOTE_TARGETS_CACHE
+    if _REMOTE_TARGETS_CACHE is not None:
+        return _REMOTE_TARGETS_CACHE
+    default = ["germany", "netherlands", "luxembourg", "france", "sweden",
+              "norway", "finland", "switzerland", "austria", "spain"]
+    try:
+        import yaml
+        cfg_path = Path(__file__).parent / "config.yaml"
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        got = [c.lower().strip() for c in cfg.get("remote_target_countries", [])]
+        _REMOTE_TARGETS_CACHE = got or default
+    except Exception:
+        _REMOTE_TARGETS_CACHE = default
+    return _REMOTE_TARGETS_CACHE
+
+
+# Country -> extra surface forms (adjective, endonym, main cities) for loc match.
+_COUNTRY_ALIASES = {
+    "germany": ["german", "deutschland", "berlin", "munich", "hamburg"],
+    "netherlands": ["dutch", "holland", "amsterdam", "rotterdam"],
+    "luxembourg": ["luxembourgish"],
+    "france": ["french", "paris"],
+    "sweden": ["swedish", "stockholm"],
+    "norway": ["norwegian", "oslo"],
+    "finland": ["finnish", "helsinki"],
+    "switzerland": ["swiss", "zurich", "zürich", "geneva"],
+    "austria": ["austrian", "vienna", "wien"],
+    "spain": ["spanish", "madrid", "barcelona"],
+}
+
+_UK_MARKERS = ("united kingdom", "uk", "scotland", "england", "wales", "britain",
+               "edinburgh", "glasgow", "london", "manchester", "birmingham",
+               "dundee", "aberdeen", "leeds", "bristol")
+
+_AMERICAS_RE = re.compile(
+    r"\b(u\.?s\.?a?|united states|americas?|californ\w*|new york|canada|"
+    r"latam|brazil|mexico|seattle|san francisco|los angeles|austin|"
+    r"boston|chicago|denver|atlanta)\b")
+# US state abbreviations after a comma ("San Francisco, CA").
+_US_STATE_ABBR_RE = re.compile(r",\s*(ca|ny|tx|wa|ma|il|co|ga|or|fl|nc|va|pa|az)\b")
+
+
+def _classify_international_location(loc: str, is_remote: bool) -> dict | None:
+    """Score clearly non-UK / region-tagged locations for the multi-country
+    remote expansion. Returns a final match dict, or None to fall through to the
+    UK city tiers. UK-marked locations always fall through (return None)."""
+    if not loc:
+        return None
+    if any(m in loc for m in _UK_MARKERS):
+        return None  # UK handled by the detailed city tiers below
+
+    # Americas / US: timezone mismatch = night shift from UK/JP.
+    if _AMERICAS_RE.search(loc) or _US_STATE_ABBR_RE.search(loc):
+        if is_remote:
+            return {"score": 0.18,
+                    "notes": ["⚠️ US/Americas remote — timezone mismatch (night shift from UK/JP)"]}
+        return {"score": 0.05, "notes": ["❌ US/Americas on-site (out of scope)"]}
+
+    # Target countries (priority markets) — remote in-scope, on-site not.
+    for country in _remote_target_countries():
+        forms = [country] + _COUNTRY_ALIASES.get(country, [])
+        if any(f in loc for f in forms):
+            if is_remote:
+                return {"score": 0.85,
+                        "notes": [f"✅ Remote — {country.title()} (target market)"]}
+            return {"score": 0.20,
+                    "notes": [f"⚠️ {country.title()} on-site (relocation out of scope)"]}
+
+    # Europe / EU / EMEA generic.
+    if any(t in loc for t in ("europe", "european", "eu ", "emea")) or loc.strip() in ("eu", "europe"):
+        if is_remote:
+            return {"score": 0.80, "notes": ["✅ Europe / EMEA remote (in-scope)"]}
+        return {"score": 0.20, "notes": ["⚠️ EU-based on-site (relocation out of scope)"]}
+
+    # Worldwide / global / anywhere.
+    if any(t in loc for t in ("worldwide", "global", "anywhere")):
+        if is_remote or "remote" in loc:
+            return {"score": 0.72, "notes": ["✅ Worldwide remote (in-scope, verify timezone)"]}
+
+    return None
+
+
 def _is_remote_friendly(job_loc: str, work_style: str) -> bool:
     """Determine if the job is remote/hybrid friendly."""
     loc = job_loc.lower()
@@ -674,6 +877,13 @@ def calculate_location_match(job_location: str, job_work_style: str, user_exp: d
 
     # Work style detection
     is_remote = _is_remote_friendly(job_loc, work_style)
+
+    # International region classification (multi-country remote expansion).
+    # Fires only for clearly non-UK / region-tagged locations; UK + generic
+    # "remote" fall through to the detailed tiers below.
+    intl = _classify_international_location(job_loc, is_remote)
+    if intl is not None:
+        return intl
 
     # Location match tiered scoring
     if job_loc == "remote" or (not job_loc and work_style == "remote"):
@@ -909,6 +1119,188 @@ def _scrub_deployment_framing(text: str) -> str:
     sentences = _re_framing.split(r"(?<=[.!?。])\s*", text)
     kept = [s for s in sentences if s and not _DEPLOY_FRAMING_RX.search(s)]
     return " ".join(kept).strip() or text
+
+
+# Requirements judged per LLM call. Sized so the JSON reply stays well inside
+# max_tokens even for verbose skill names (see the 75-skill truncation above).
+_COVERAGE_BATCH = 20
+
+
+def _resolve_by(by: str, known: dict) -> str:
+    """Map an LLM-reported covering skill onto a real skills.md row name.
+
+    Returns "" when it matches no row — an unattributable credit is dropped
+    rather than trusted, so the model cannot invent a skill the candidate lacks.
+    """
+    exact = known.get(normalize_skill_name(by))
+    if exact:
+        return exact
+    # "Name (level) [category] — notes" → "Name"
+    head = re.split(r"\s*[(\[—]", by, maxsplit=1)[0].strip()
+    exact = known.get(normalize_skill_name(head))
+    if exact:
+        return exact
+    # Last resort: a known row named somewhere inside the string. Longest first
+    # so "Local LLM Orchestration" wins over a shorter row it contains.
+    hay = normalize_skill_name(by)
+    for norm in sorted(known, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(norm) + r"\b", hay):
+            return known[norm]
+    return ""
+
+
+def _llm_skill_coverage(job_title: str, job_description: str, job_skills: list[str],
+                        user_skills: dict) -> dict | None:
+    """Ask the LLM which of a job's required skills the candidate actually covers.
+
+    The dictionary path (exact → SKILL_SYNONYMS → substring → TF-IDF) can only
+    match shared words, so a paraphrase with no lexical overlap ("Software
+    Engineering" vs "Code Standards"/"Python") silently reads as a gap, and the
+    synonym dict can never enumerate job-posting vocabulary. A bare-name
+    embedding fallback was measured and REJECTED: nomic-embed-text scores
+    "Mechanical Design ~ Visual Design" at 0.707, above every genuine pair, so
+    it would resurrect the physical-design false positives the ambiguity guards
+    exist to stop (see _AMBIGUOUS_DESIGN_TERMS). Two-word skill names carry too
+    little context to disambiguate discipline.
+
+    The LLM gets what the embedding lacked — the job title and description — so
+    it can tell a gas-pipe "Design Engineer" from a UI one. It returns which
+    CANDIDATE skill covers each requirement; the level shown to the user is then
+    looked up from skills.md for that skill, never invented by the model.
+
+    Returns {job_skill: {"verdict": "full"|"partial"|"none", "by": <skill name>}}
+    or None on failure. Callers treat None as "no opinion" and keep the
+    dictionary verdict.
+    """
+    if not job_skills or not user_skills:
+        return None
+
+    # A 75-skill posting produced JSON longer than max_tokens, so the response
+    # was truncated mid-object, failed to parse, and the whole job silently got
+    # NO verdict at all. Judge in fixed-size batches instead, so cost and output
+    # length scale with the list rather than the model's token ceiling.
+    if len(job_skills) > _COVERAGE_BATCH:
+        merged: dict = {}
+        for i in range(0, len(job_skills), _COVERAGE_BATCH):
+            part = _llm_skill_coverage(job_title, job_description,
+                                       job_skills[i:i + _COVERAGE_BATCH], user_skills)
+            if part:
+                merged.update(part)
+        return merged or None
+
+    catalogue = []
+    for category, skills in user_skills.items():
+        for skill in skills:
+            # Notes carry the concrete evidence ("GitHub Actions workflow
+            # automation", "Claude Code / agentic coding") that lets the model
+            # credit a requirement no row is literally titled after.
+            note = (skill.get("notes") or "").strip()
+            line = f"- {skill['name']} ({skill['level']}) [{category}]"
+            if note:
+                line += f" — {note[:180]}"
+            catalogue.append(line)
+    if not catalogue:
+        return None
+
+    prompt = f"""You decide which of a job's required skills a candidate already covers.
+
+## Candidate's skills (the ONLY skills they have — nothing else may be claimed)
+{chr(10).join(catalogue)}
+
+## The job
+Title: {job_title}
+Description: {(job_description or '')[:3000]}
+
+## Required skills to judge
+{chr(10).join('- ' + s for s in job_skills)}
+
+## Task
+For EACH required skill, decide:
+  "full"        — a candidate skill above clearly covers it (same thing, or a direct superset)
+  "partial"     — a candidate skill is adjacent/related but does not fully cover it
+  "none"        — the candidate has nothing that covers it
+  "not_a_skill" — the term is not a professional skill at all, so it should not
+                  be scored either way: personality tests (16Personalities,
+                  Myers-Briggs), perks, company names, locations, contract terms,
+                  vague qualities (cost efficiency, attention to detail), or
+                  extraction noise. Use this ONLY for non-skills — a real skill
+                  the candidate lacks is "none", never "not_a_skill".
+
+Rules:
+- Use the JOB TITLE and DESCRIPTION to read what a required skill MEANS here.
+  "Design" at a gas/mechanical/automotive engineering job is physical CAD design
+  and is NOT covered by the candidate's Web/UI/Visual Design skills — answer
+  "none". The same word at a web/product job IS covered.
+- "by" must be ONLY the candidate skill's NAME, copied exactly as written above
+  — nothing else. Do NOT include the level, the [category], or the notes.
+  Correct: "Multi-Agent Systems".  Wrong: "Multi-Agent Systems (intermediate) [ML / AI]".
+- Do NOT be generous. If the candidate genuinely lacks a platform or tool
+  (AWS, Azure, GCP, Salesforce, a specific framework they never listed),
+  answer "none". Inventing coverage produces a false CV claim.
+- Judge every required skill, using its exact spelling as the key.
+
+Respond ONLY with JSON:
+{{"<required skill>": {{"verdict": "full|partial|none|not_a_skill", "by": "<candidate skill or empty>"}}, ...}}"""
+
+    try:
+        from llm_client import call_llm as _call_llm
+        content = _call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=("You are a strict skill-coverage adjudicator. Output ONLY valid JSON. "
+                           "Never credit a skill the candidate did not list. "
+                           "Read the job description to disambiguate what a skill word means."),
+            temperature=0.0,
+            max_tokens=1500,
+        )
+        import json as _json
+        matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
+        known = {normalize_skill_name(s["name"]): s["name"]
+                 for skills in user_skills.values() for s in skills}
+        # Models echo the requirement with their own casing ("AI Tools" for the
+        # job's "Ai Tools"). Map every verdict back onto the job's EXACT string
+        # so callers can look it up directly — a case mismatch silently dropped
+        # the verdict before.
+        job_key = {normalize_skill_name(s): s for s in job_skills}
+        for m in reversed(matches):
+            try:
+                raw = _json.loads(m.group(), strict=False)
+            except (ValueError, TypeError):
+                continue
+            out = {}
+            for job_skill, verdict in raw.items():
+                if isinstance(verdict, str):
+                    verdict = {"verdict": verdict, "by": ""}
+                if not isinstance(verdict, dict):
+                    continue
+                v = str(verdict.get("verdict", "none")).lower().strip()
+                if v not in ("full", "partial", "none", "not_a_skill"):
+                    continue
+                by = str(verdict.get("by", "") or "").strip()
+                # Reject a "by" that is not a real skills.md row — the model
+                # occasionally answers with the JOB's wording instead. It also
+                # likes to echo the whole catalogue line back ("Multi-Agent
+                # Systems (intermediate) [ML / AI] — Hermes 9-agent…"), so strip
+                # the level/category/notes decoration before matching, then fall
+                # back to finding a known row named inside the string.
+                by = _resolve_by(by, known) if by else ""
+                if v in ("full", "partial") and not by:
+                    # Unattributable credit is not credit — the model sometimes
+                    # cites a phrase from the JOB AD ("Supporting recruitment
+                    # activity") as the covering skill. Record the refusal as
+                    # "none" rather than dropping the entry: discarding it left
+                    # the job with no verdict at all, so it looked uncovered and
+                    # was retried forever, when the honest answer is simply that
+                    # the candidate does not cover it.
+                    v, by = "none", ""
+                key = job_key.get(normalize_skill_name(job_skill))
+                if not key:
+                    continue  # a requirement this job never listed
+                out[key] = {"verdict": v, "by": by}
+            if out:
+                return out
+        return None
+    except Exception:
+        return None
 
 
 def _ollama_context_score(job_description: str, persona_summary: str,
@@ -1315,8 +1707,17 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     job_location = job.get("location", "")
     job_description = job.get("description", "") or job.get("snippet", "")
 
-    # Detect if description is genuinely missing (< 100 chars means nothing useful)
-    description_missing = not job_description or len(job_description.strip()) < 100
+    # Detect if description is genuinely missing. Length alone is not enough:
+    # a failed scrape can return kilobytes of tracker JavaScript, which is worse
+    # than an empty string because it passes the length test and then gets fed to
+    # the LLM context scorer as if it were prose (69 adzuna entries did exactly
+    # this, and 32 of them landed inside the top 30% on context scores up to
+    # 0.88 derived from reading a JWT).
+    description_missing = (
+        not job_description
+        or len(job_description.strip()) < 100
+        or is_junk_description(job_description)
+    )
 
     if description_missing:
         # Build a minimal pseudo-description from metadata only (for partial scoring)
@@ -1332,8 +1733,12 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             parts.append("Employment: " + ", ".join(emp_types))
         job_description = ". ".join(p for p in parts if p)
 
-    # Individual scores
-    skill_match = calculate_skill_match(job_skills, user_skills, job.get("title", ""), job_description)
+    # Individual scores. Skill coverage is an LLM verdict computed ONCE per job
+    # and stored on the job (see _llm_skill_coverage / skill_coverage_backfill),
+    # so offline reruns (recompute_skill_scores) reuse it for free.
+    llm_coverage = analysis.get("skill_coverage")
+    skill_match = calculate_skill_match(job_skills, user_skills, job.get("title", ""),
+                                        job_description, llm_coverage=llm_coverage)
     exp_match = calculate_experience_match(job_level, user_exp)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
@@ -1495,6 +1900,37 @@ def _tier_short(tier: str) -> str:
     return tier.replace("🟢 ", "").replace("🟡 ", "").replace("🟠 ", "").replace("🔴 ", "").strip()
 
 
+_ADZUNA_CODE_COUNTRY = {"gb": "UK", "de": "Germany", "nl": "Netherlands",
+                        "fr": "France", "at": "Austria", "es": "Spain",
+                        "it": "Italy", "pl": "Poland", "us": "US"}
+
+
+def _infer_country(job: dict) -> str:
+    """Best-effort country label for match-report frontmatter. Prefers the
+    Adzuna country code embedded in source_site ('Adzuna DE'), else infers from
+    the location text using the same markers as the location matcher."""
+    site = (job.get("source_site") or "").lower()
+    m = re.match(r"adzuna\s+([a-z]{2})$", site)
+    if m:
+        return _ADZUNA_CODE_COUNTRY.get(m.group(1), m.group(1).upper())
+    loc = (job.get("location") or "").lower()
+    if not loc:
+        return ""
+    if any(k in loc for k in _UK_MARKERS):
+        return "UK"
+    if _AMERICAS_RE.search(loc) or _US_STATE_ABBR_RE.search(loc):
+        return "US"
+    for country in _remote_target_countries():
+        forms = [country] + _COUNTRY_ALIASES.get(country, [])
+        if any(f in loc for f in forms):
+            return country.title()
+    if any(t in loc for t in ("europe", "european", "emea")) or loc.strip() in ("eu", "europe"):
+        return "Europe"
+    if any(t in loc for t in ("worldwide", "global", "anywhere")):
+        return "Worldwide"
+    return ""
+
+
 def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None) -> str:
     """
     Generate a Markdown match report with YAML frontmatter for Obsidian Dataview.
@@ -1520,6 +1956,7 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     cl_link = f'\ncover_letter: "[[{cl_filename.replace(".md", "")}]]"' if cl_filename else ""
     categories = classify_job_categories(title)
     categories_yaml = "[" + ", ".join(categories) + "]" if categories else "[]"
+    country = _infer_country(job)
 
     frontmatter = f"""---
 match_score: {score}
@@ -1529,6 +1966,7 @@ company: "{company}"
 title: "{title}"
 categories: {categories_yaml}
 location: "{location}"
+country: "{country}"
 source: "{source}"
 type: "{jtype}"{route_yaml}
 saved_at: {saved_at}

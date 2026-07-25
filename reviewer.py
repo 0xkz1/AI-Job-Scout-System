@@ -43,20 +43,21 @@ def _review_chain() -> list[tuple[str, str]]:
     FIRST; the free reasoning model (deepseek-v4-flash) sits low because it can
     silently return empty content on long docs (burns max_tokens on hidden
     reasoning) — llm_client now raises on empty so the chain falls through, but
-    it's still a poor primary. The three mistral entries use independent API
+    it's still a poor primary. The four mistral entries use independent API
     keys (own rate limits); nvidia is a fully independent provider (survives a
-    mistral.ai outage that would take out all three keys at once):
-      1. mistral          / REVIEW_MODEL                      — strong, paid primary
-      2. mistral-backup   / REVIEW_MODEL                      — 2nd key, own rate limit
-      3. mistral-tertiary / REVIEW_MODEL                      — 3rd key (set MISTRAL_API_KEY_TERTIARY)
-      4. nvidia           / mistralai/mistral-medium-3.5-128b — independent provider (NIM)
-      5. opencode         / deepseek-v4-flash-free            — FREE reasoning model (Zen)
-      6. opencode         / big-pickle                        — independent Zen model
-      7. ollama           / local                             — offline last resort
+    mistral.ai outage that would take out all four keys at once):
+      1. mistral            / REVIEW_MODEL                      — strong, paid primary
+      2. mistral-backup     / REVIEW_MODEL                      — 2nd key, own rate limit
+      3. mistral-tertiary   / REVIEW_MODEL                      — 3rd key (MISTRAL_API_KEY_TERTIARY)
+      4. mistral-quaternary / REVIEW_MODEL                      — 4th key (MISTRAL_API_KEY_QUATERNARY)
+      5. nvidia             / mistralai/mistral-medium-3.5-128b — independent provider (NIM)
+      6. opencode           / deepseek-v4-flash-free            — FREE reasoning model (Zen)
+      7. opencode           / big-pickle                        — independent Zen model
+      8. ollama             / local                             — offline last resort
 
-    Entries whose key is unset raise on call and are skipped, so mistral-tertiary
-    is harmless until MISTRAL_API_KEY_TERTIARY exists. Dead accounts (stepfun 402,
-    zai 429) are left out; add back via REVIEW_FALLBACKS once recharged.
+    Entries whose key is unset raise on call and are skipped, so a missing
+    MISTRAL_API_KEY_QUATERNARY is harmless. Dead accounts (stepfun 402, zai 429)
+    are left out; add back via REVIEW_FALLBACKS once recharged.
     """
     env = os.environ.get("REVIEW_FALLBACKS", "").strip()
     if env:
@@ -65,16 +66,39 @@ def _review_chain() -> list[tuple[str, str]]:
             for p in env.split(",") if ":" in p
         ]
         if chain:
-            return chain
-    return [
+            return _drop_quarantined(chain)
+    return _drop_quarantined([
         ("mistral", REVIEW_MODEL),
         ("mistral-backup", REVIEW_MODEL),
         ("mistral-tertiary", REVIEW_MODEL),
+        ("mistral-quaternary", REVIEW_MODEL),
         ("nvidia", "mistralai/mistral-medium-3.5-128b"),
         ("opencode", "deepseek-v4-flash-free"),
         ("opencode", "big-pickle"),
         ("ollama", os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")),
-    ]
+    ])
+
+
+def _drop_quarantined(chain: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Skip providers whose key is sidelined by key_quarantine, so a review call
+    doesn't burn its full retry budget on a dead key (two exhausted Mistral keys
+    otherwise cost ~12s per review before reaching the live one). Never returns
+    empty — if every provider is sidelined, fall back to the full chain.
+
+    A missing provider here is EXPECTED, not a fault to repair. Quarantine
+    entries expire on their own (key_quarantine.DEFAULT_COOLDOWN_DAYS = 5); do
+    not `key_quarantine.py --release` them to "restore" the chain. Nor does a
+    small probe call prove a key recovered — a max_tokens=5 request can succeed
+    on a key whose allowance is spent, because a real review sends a long prompt
+    to mistral-medium. Releasing early puts a dead key back ahead of working
+    ones and slows every subsequent review.
+    """
+    try:
+        from key_quarantine import is_quarantined
+        active = [(p, m) for p, m in chain if not is_quarantined(p)]
+        return active or chain
+    except Exception:
+        return chain
 
 
 def _load_skills_md() -> str:
@@ -279,12 +303,21 @@ Then, provide the detailed findings using the following categories:
 求人票の主要な要求のうちドキュメントが触れていないもの、今回の求人に無関係な記述、
 および「事実ではあるが求人の求めるものとは種類・規模・文脈が異なる」記述。
 
+**このセクションの修正案は、検証済み事実に無い経歴・スキル・業界経験を新たに書かせてはならない**（これは最優先の絶対規則）。候補者が本当に持っていない要件（例: モバイルアプリUX、React Native、金融業界、ユーザーリサーチ）に対し、「近いことをやったと書け」式の置き換え文を提案することは、事実欄で禁じている捏造そのものである。埋められないギャップには:
+- 検証済み事実に**実在する隣接経験**があればそれを挙げる（無理に関連づけない）。
+- 実在しないなら、修正案の代わりに `→ 補強不可（検証済み事実に該当経験なし。この求人は適合度が低い）` と正直に書く。捏造してスコアを上げるより、低スコアのまま正直でいることを優先する。
+「Terra Droneでコンプライアンス文書を担当した」「ECシステムでユーザーリサーチを実施した」のような、記録に無い業務を作り出す提案は禁止。
+
 ### ✍️ 文体
 UK英語の問題、クリシェ、冗長表現、日付の不整合、不自然な言い回し。各指摘に英語原文の引用を付けること。
 
 各指摘の形式: 英語原文の引用 → 何が問題か（日本語）→ 具体的な修正案（英語の置き換え文。候補者がそのまま採用/却下できるもの）。
 指摘がないカテゴリには「問題なし」と書くこと。
 最後に2〜3文の **総評**（日本語）: 修正案を反映すればこのドキュメントは提出可能か。
+ただし、求人の中核要件を候補者が本当に満たしておらず、捏造なしでは適合を上げられない場合は、
+無理に「修正すれば提出可能」と書いてはならない。「この求人は適合度が低く、寄せて仕上げる価値が
+薄い。優先度を下げるか、素の強みで数を打つ対象とすべき」と正直に述べること。低スコアは文書の
+欠陥ではなく、求人と候補者のミスマッチを正確に示すシグナルである。
 具体的かつ正直に — 社交辞令だけの空のレビューは誰の役にも立たない。
 
 {translation_section}"""
@@ -369,13 +402,13 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
 
     # Deterministic score from the rubric; ready is derived with the CURRENT
     # config threshold (display recomputes live, this is for nightly filters)
-    score, fact_block = _extract_score(review_body)
+    score, fact_block, style_nits = _extract_score(review_body)
     ready = score is not None and not fact_block and score >= get_score_threshold()
 
     # Mirror the score into the body too (not just frontmatter) so it stays
     # visible where Properties are collapsed/stripped — inserted right before
     # 総評 since that section is the natural "so what" reader checkpoint.
-    score_line = _score_line(score, fact_block)
+    score_line = _score_line(score, fact_block, style_nits)
     if re.search(r'###\s*総評', review_body):
         review_body = re.sub(r'(###\s*総評)', f'{score_line}\n\n\\1', review_body, count=1)
     else:
@@ -393,6 +426,7 @@ reviewed_sha: "{doc_sha}"
 review_model: "{used_model}"
 reviewed_at: {date.today().isoformat()}
 submission_score: {score if score is not None else "null"}
+style_nits: {style_nits}
 fact_block: {"true" if fact_block else "false"}
 submission_ready: {"true" if ready else "false"}
 ---
@@ -447,13 +481,22 @@ def _has_findings(section: str) -> bool:
 
 
 def _extract_score(text: str) -> tuple[int | None, bool]:
-    """(submission_score or None, fact_block) from a review body.
+    """(submission_score or None, fact_block, style_nits) from a review body.
 
     score is None when the review has no parseable rubric (pre-rubric reviews,
     or the LLM dropped the YAML block) — an unknown score must never be
     reported as 100.
     fact_block: the ❗事実 section has findings → not submittable regardless
     of score.
+    style_nits: count of ✍️ 文体 findings. Reported alongside the score, NOT
+    subtracted from it. It used to be a penalty of up to -30 on a 30-100 rubric
+    scale, which was wrong three ways: 84% of reviews hit the cap so it acted
+    as a constant offset (and made the 85 threshold unreachable — max was
+    100-30=70); nit count correlated POSITIVELY with rubric coverage (r=+0.42,
+    because a well-matched job earns a longer review), so it punished the best
+    fits hardest and produced 287 ranking inversions; and the nits target
+    reused CV blocks, so they say nothing about job fit. Style is pre-submission
+    editing work — a separate axis from whether the role fits at all.
     """
     score: int | None = None
 
@@ -480,31 +523,32 @@ def _extract_score(text: str) -> tuple[int | None, bool]:
     if fact_match and _has_findings(fact_match.group(1)):
         fact_block = True
 
-    # 3. Style penalty (capped — style nits are endless by nature and must
-    #    not be able to sink an otherwise strong document)
+    # 3. Style nits — counted and reported, never subtracted (see docstring)
+    style_nits = 0
+    style_match = re.search(r'###\s*✍️\s*文体(.*?)(?=\n###|\n##\s|\Z)', text, re.DOTALL)
+    if style_match and _has_findings(style_match.group(1)):
+        style_nits = len(_ITEM_RE.findall(style_match.group(1)))
     if score is not None:
-        style_match = re.search(r'###\s*✍️\s*文体(.*?)(?=\n###|\n##\s|\Z)', text, re.DOTALL)
-        if style_match:
-            style_items = len(_ITEM_RE.findall(style_match.group(1)))
-            score -= min(style_items * 3, 30)
         score = max(0, min(100, score))
 
-    return score, fact_block
+    return score, fact_block, style_nits
 
 
-def _score_line(score: int | None, fact_block: bool) -> str:
+def _score_line(score: int | None, fact_block: bool, style_nits: int = 0) -> str:
     """One-line submission badge for the review BODY (same wording as
     app.py's _score_badge, which reads the frontmatter copy) — keeps the
     number visible even where Properties are hidden (mobile, print, sync
-    clients that don't render frontmatter)."""
+    clients that don't render frontmatter). Style nits ride along as editing
+    workload, deliberately outside the score (see _extract_score)."""
+    nits_txt = f" / 文体指摘 {style_nits}件" if style_nits else ""
     if fact_block:
         score_txt = f" {score}%" if score is not None else ""
-        return f"**提出スコア:**{score_txt} ⛔ 事実要修正"
+        return f"**提出スコア:**{score_txt} ⛔ 事実要修正{nits_txt}"
     if score is None:
-        return "**提出スコア:** ⚪ 未算出"
+        return f"**提出スコア:** ⚪ 未算出{nits_txt}"
     threshold = get_score_threshold()
     verdict = "🟢 提出可" if score >= threshold else "🔴 要修正"
-    return f"**提出スコア:** {score}/100 (基準 {threshold}) {verdict}"
+    return f"**提出スコア:** {score}/100 (基準 {threshold}) {verdict}{nits_txt}"
 
 
 def detect_annotations(review_path: Path) -> list[str] | None:
@@ -655,13 +699,19 @@ def respond_to_annotations(doc_kind: str, md_path: Path, job: dict) -> Path:
 
     # Dialogue may withdraw findings or change the rubric — recompute the
     # score so the badge tracks the revised review, not the original.
-    score, fact_block = _extract_score(new_body)
+    score, fact_block, style_nits = _extract_score(new_body)
     ready = score is not None and not fact_block and score >= get_score_threshold()
     for key, val in (("submission_score", score if score is not None else "null"),
+                     ("style_nits", style_nits),
                      ("fact_block", "true" if fact_block else "false"),
                      ("submission_ready", "true" if ready else "false")):
         if re.search(rf"^{key}:", fm, flags=re.MULTILINE):
             fm = re.sub(rf"^{key}:.*$", f"{key}: {val}", fm, flags=re.MULTILINE)
+        elif key == "style_nits":
+            # Review predates the score/style split — add the field after
+            # submission_score rather than appending past the closing "---".
+            fm = re.sub(r"^(submission_score:.*)$", rf"\1\nstyle_nits: {val}",
+                        fm, count=1, flags=re.MULTILINE)
 
     # Replace (not duplicate) the in-body score line — the LLM saw it in the
     # prompt and may have echoed the old one back verbatim.
@@ -742,7 +792,11 @@ def apply_review_fixes(md_path: Path, review_path: Path,
         else:
             unmatched.append(original)
     if applied:
-        REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+        # backup.parent, not REVIEWS_DIR: the target is REVIEWS_DIR/.backups, so
+        # creating only REVIEWS_DIR left the write to fail wherever .backups did
+        # not already happen to exist — losing the pre-apply copy at the one
+        # moment it matters, right before the document is overwritten.
+        backup.parent.mkdir(parents=True, exist_ok=True)
         backup.write_text(md_path.read_text(encoding="utf-8"), encoding="utf-8")
         md_path.write_text(doc, encoding="utf-8")
     return applied, unmatched

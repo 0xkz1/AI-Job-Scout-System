@@ -17,7 +17,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from matcher import calculate_skill_match, load_user_skills  # noqa: E402
+import yaml  # noqa: E402
+from matcher import (  # noqa: E402
+    DEFAULT_WEIGHTS,
+    calculate_skill_match,
+    load_user_skills,
+)
 
 ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
 
@@ -25,6 +30,7 @@ ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
 def main():
     db = json.loads(ANALYZED_PATH.read_text())
     user_skills = load_user_skills()
+    config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
 
     changed, tier_changed = 0, 0
     ups, downs = [], []
@@ -32,22 +38,34 @@ def main():
         m = job.get("match")
         if not m:
             continue
+        # No early skip for a job with no extracted skills: composite must be
+        # recomputed for EVERY entry, or a weight change (or a title_relevance
+        # that has since gone to 0) never reaches it. Skipping these left "Class 2
+        # Driver" holding composite 0.49 while its own title_relevance was 0.0 —
+        # a hard-excluded job sitting inside the top 30%. calculate_skill_match
+        # already returns its own no-skills default, so just let it run.
         job_skills = job.get("analysis", {}).get("skills", [])
-        if not job_skills:
-            continue
         desc = job.get("description", "") or job.get("snippet", "")
         old_score = m["skills"]["score"]
-        new_skill = calculate_skill_match(job_skills, user_skills, job.get("title", ""), desc)
-        if new_skill["score"] == old_score:
-            continue
-        changed += 1
-        (ups if new_skill["score"] > old_score else downs).append(
-            f"  {'↑' if new_skill['score'] > old_score else '↓'} "
-            f"{old_score:.2f}->{new_skill['score']:.2f}  "
-            f"{job.get('company','?')[:22]} — {job.get('title','?')[:45]}"
-        )
+        new_skill = calculate_skill_match(
+            job_skills, user_skills, job.get("title", ""), desc,
+            llm_coverage=job.get("analysis", {}).get("skill_coverage"))
+        if new_skill["score"] != old_score:
+            changed += 1
+            (ups if new_skill["score"] > old_score else downs).append(
+                f"  {'↑' if new_skill['score'] > old_score else '↓'} "
+                f"{old_score:.2f}->{new_skill['score']:.2f}  "
+                f"{job.get('company','?')[:22]} — {job.get('title','?')[:45]}"
+            )
         m["skills"] = new_skill
-        w = m["weights"]
+        # Weights come from config, NOT from m["weights"] — that field records the
+        # weights this entry was LAST scored with, so reusing it made a weight
+        # change in config.yaml permanently unreachable for already-scored jobs.
+        # Recomputing unconditionally (rather than only when the skill sub-score
+        # moved) is what lets a pure weight change take effect at all.
+        w = dict(DEFAULT_WEIGHTS)
+        w.update(config.get("weights") or {})
+        m["weights"] = w
         composite = (
             new_skill["score"] * w["skills"]
             + m["experience"]["score"] * w["experience"]

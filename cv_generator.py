@@ -34,7 +34,7 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 ## EXPERIENCE
 {employment}
 
-## SELECTED PROJECTS — Taifunomé (Independent Studio, 2023 – Present)
+## SELECTED PROJECTS
 {experience}
 
 ## TECHNICAL TOOLKIT
@@ -252,16 +252,27 @@ ROLE_KEYWORDS = {
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
     "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
-    "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma"],
+    "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma", "digital designer", "graphic designer", "brand designer", "creative designer", "web designer", "motion designer"],
     "camera_assistant": ["camera assistant", "photography assistant", "photo assistant", "camera operator", "studio photographer", "photographer", "photography"],
 }
 
 def detect_role_type(job_title: str, job_description: str = "") -> str:
-    """Detect best role type from job title and description."""
-    text = f"{job_title} {job_description}".lower()
+    """Detect best role type from job title and description.
+
+    The title names the role; the description only supports it. Weighting them
+    equally let a single incidental word in the body outvote the title — a
+    "Digital Designer" posting that mentions "product photography" once was
+    classified camera_assistant and got a photographer's CV. So a title match is
+    worth far more than a body match, and a clear title winner is taken directly.
+    """
+    title = (job_title or "").lower()
+    body = (job_description or "").lower()
+    TITLE_WEIGHT = 10  # a title hit outweighs any number of body hits
     scores = {}
     for role, keywords in ROLE_KEYWORDS.items():
-        scores[role] = sum(1 for kw in keywords if kw in text)
+        title_hits = sum(1 for kw in keywords if kw in title)
+        body_hits = sum(1 for kw in keywords if kw in body)
+        scores[role] = TITLE_WEIGHT * title_hits + body_hits
     if scores:
         best = max(scores, key=scores.get)
         if scores[best] > 0:
@@ -371,11 +382,41 @@ def load_projects_from_md() -> list[dict]:
             
     return projects
 
+_MONTH_NUM = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _period_end_key(period: str) -> tuple[int, int]:
+    """(year, month) of a period's END, for reverse-chronological sorting.
+    Plain string sort broke on mixed formats ("Oct 2018 – Apr 2019" sorted
+    before "2019 – 2022" because "O" > "2" in ASCII, regardless of actual
+    dates) — this parses the last "[Mon] YYYY" occurrence instead.
+    "Present"/ongoing sorts as latest. A year with no month (e.g. "2017 –
+    2019") defaults to January, not December: treating an unspecified month
+    as the LATEST possible reading would let a vague year silently outrank a
+    same-year entry that has an explicit, later month — January is the
+    conservative default that lets precise dates win same-year ties."""
+    if not period:
+        return (0, 0)
+    if re.search(r"present", period, re.IGNORECASE):
+        return (9999, 12)
+    matches = list(re.finditer(
+        r"(?:(?P<mon>[A-Za-z]{3,9})\s+)?(?P<year>\d{4})", period))
+    if not matches:
+        return (0, 0)
+    m = matches[-1]
+    year = int(m.group("year"))
+    month = _MONTH_NUM.get((m.group("mon") or "")[:3].lower(), 1)
+    return (year, month)
+
+
 _ALL_ENTRIES = load_projects_from_md()
 # Employment history (fixed, always shown, newest first) vs selectable projects
 EMPLOYMENT = sorted(
     (p for p in _ALL_ENTRIES if p["type"] == "employment"),
-    key=lambda p: p.get("period", ""), reverse=True,
+    key=lambda p: _period_end_key(p.get("period", "")), reverse=True,
 )
 PROJECTS = [p for p in _ALL_ENTRIES if p["type"] != "employment"]
 

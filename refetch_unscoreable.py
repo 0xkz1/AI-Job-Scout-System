@@ -1,0 +1,281 @@
+"""Re-fetch full descriptions for jobs held out as unscoreable.
+
+The backlog these target came from two scraper faults, both since fixed:
+adzuna's detail-page selector matched its own tracking scripts and stored
+`window.addEventListener(...tokenData...)` as the description (67 jobs), and
+some postings stored nothing at all (20 jobs). Every one was scraped on
+2026-07-11/12, before commit b84bf12 landed the extraction fix — so re-fetching
+with today's code should recover them.
+
+Why not `run.py --fetch-descriptions`: it only targets jobs where the description
+is FALSY, so the 67 JavaScript ones are invisible to it; it applies
+scraper_indeed's extractor to every URL regardless of host; and it launches
+headless=False, so it cannot run unattended.
+
+It also covers the standing case, not just that backlog. With ADZUNA_APP_ID set,
+scrape_adzuna_all takes the API branch, and the Adzuna API caps `description` at
+500 characters ending in "…" with no full-text field at all — so every job it
+returns is marked description_truncated and held out of review until this script
+fills it in from the detail page.
+
+Prefer `--top-only` for routine use. Detail pages are rate-limited (adzuna starts
+answering 403 "suspicious behaviour" and then blocks everything), so the budget
+should go to jobs a stage will actually act on; a truncated description is already
+enough to rank one.
+
+    python3 refetch_unscoreable.py --dry-run
+    python3 refetch_unscoreable.py --limit 10      # try a few first
+    python3 refetch_unscoreable.py --top-only      # routine
+    python3 refetch_unscoreable.py                 # whole backlog
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(ROOT / ".env")
+
+from matcher import is_junk_description  # noqa: E402
+from selection import unscoreable_jobs  # noqa: E402
+
+ANALYZED = ROOT / "10_output" / "_analyzed.json"
+# Adzuna answers 403 "Our systems have detected suspicious behaviour" once it
+# decides a client is scraping, and every request after that returns a ~288-char
+# block page. At 2s between requests it tripped partway through a 5-job trial, so
+# the delay is deliberately slower than the scrapers' own and rises after a block.
+SETTLE_MS = 4000
+BLOCKED_BACKOFF_MS = 30000
+# Consecutive blocks after which continuing only deepens the ban. The remaining
+# jobs are left untouched for a later run rather than recorded as unrecoverable.
+MAX_CONSECUTIVE_BLOCKS = 3
+
+
+def _extractor(source: str):
+    """(module-level fetch fn, returns_dict) for a job source, or None.
+
+    Each scraper carries selectors for its own site, and reed's returns a dict
+    while the others return a string — dispatching on source keeps the wrong
+    site's selectors from being applied, which is what made run.py's shared
+    indeed extractor useless here.
+    """
+    try:
+        if source == "adzuna":
+            from scraper_adzuna import _fetch_job_description
+            return _fetch_job_description, False
+        if source == "reed":
+            from scraper_reed import _fetch_job_description
+            return _fetch_job_description, True
+        if source == "guardian":
+            from scraper_guardian import _fetch_job_description
+            return _fetch_job_description, False
+        if source in ("indeed", "url_list"):
+            from scraper_indeed import _fetch_job_description
+            return _fetch_job_description, False
+    except ImportError:
+        return None
+    return None
+
+
+async def _page_state(page, url: str) -> str:
+    """'ok' | 'blocked' | 'gone' — checked before extraction.
+
+    A 0-character result has three unrelated causes that must not be conflated: the
+    posting was taken down (permanent), the site is rate-limiting us (retry later),
+    or the selectors are stale (a bug). Treating a 403 block as "unrecoverable"
+    would discard live postings, and treating it as a normal miss would keep
+    hammering a site that has already started refusing.
+    """
+    try:
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=25000)
+    except Exception:
+        return "blocked"
+    status = resp.status if resp else 0
+    await page.wait_for_timeout(1500)
+    body = (await page.evaluate("() => (document.body.innerText || '').slice(0, 400)")).lower()
+    if status == 403 or "suspicious behaviour" in body or "unusual behaviour" in body:
+        return "blocked"
+    if "no longer available" in body or (status == 404 and "adp-body" not in body):
+        # 404 alone is not proof: some removed-listing pages still render the
+        # posting body, so the visible notice decides.
+        gone = await page.evaluate(
+            "() => document.querySelectorAll('[class*=\"adp-body\"]').length === 0")
+        if gone:
+            return "gone"
+    return "ok"
+
+
+async def refetch(targets: list[dict], headless: bool = True) -> tuple[dict[str, str], list[str]]:
+    """({url: description}, gone_urls) — gone_urls are confirmed-removed postings."""
+    from playwright.async_api import async_playwright
+
+    got: dict[str, str] = {}
+    gone: list[str] = []
+    blocks = 0
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
+                  "--disable-dev-shm-usage"],
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="en-GB",
+            timezone_id="Europe/London",
+        )
+        page = await context.new_page()
+        for i, job in enumerate(targets, 1):
+            url, source = job.get("url"), job.get("source") or ""
+            found = _extractor(source)
+            if not url or not found:
+                print(f"  [{i}/{len(targets)}] skip ({source}: no extractor)", flush=True)
+                continue
+            fetch_fn, returns_dict = found
+            state = await _page_state(page, url)
+            if state == "blocked":
+                blocks += 1
+                print(f"  [{i}/{len(targets)}] ⛔ rate-limited ({blocks}/"
+                      f"{MAX_CONSECUTIVE_BLOCKS})", flush=True)
+                if blocks >= MAX_CONSECUTIVE_BLOCKS:
+                    print(f"  stopping: {len(targets) - i} jobs left untouched for a "
+                          f"later run", flush=True)
+                    break
+                await page.wait_for_timeout(BLOCKED_BACKOFF_MS)
+                continue
+            blocks = 0
+            if state == "gone":
+                gone.append(url)
+                print(f"  [{i}/{len(targets)}] ✗ removed  {(job.get('title') or '?')[:42]}",
+                      flush=True)
+                await page.wait_for_timeout(SETTLE_MS)
+                continue
+            try:
+                result = await fetch_fn(page, url)
+                desc = (result.get("description", "") if returns_dict and isinstance(result, dict)
+                        else result) or ""
+                desc = desc.strip()
+            except Exception as e:
+                print(f"  [{i}/{len(targets)}] ✗ {type(e).__name__}: {str(e)[:50]}", flush=True)
+                continue
+            # Same bar the exclusion uses, so a "recovered" job cannot come back
+            # still unreviewable — a short or scripted result is not a recovery.
+            if len(desc) < 400 or is_junk_description(desc):
+                reason = "junk" if is_junk_description(desc) else f"{len(desc)}c"
+                print(f"  [{i}/{len(targets)}] – {reason:6s} {(job.get('title') or '?')[:42]}",
+                      flush=True)
+                continue
+            got[url] = desc
+            print(f"  [{i}/{len(targets)}] ✓ {len(desc):5d}c {(job.get('title') or '?')[:42]}",
+                  flush=True)
+            await page.wait_for_timeout(SETTLE_MS)
+        await browser.close()
+    return got, gone
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--source", help="only this source (e.g. adzuna)")
+    ap.add_argument("--show-browser", action="store_true",
+                    help="run with a visible browser (debugging a blocked site)")
+    ap.add_argument("--top-only", action="store_true",
+                    help="only jobs inside the generation/review top-%% — use this for "
+                         "routine runs, where fetching the whole backlog would spend "
+                         "the rate-limit budget on jobs no stage will act on")
+    args = ap.parse_args()
+
+    targets = unscoreable_jobs()
+    if args.top_only:
+        # Ranking works from a truncated description; only review needs the full
+        # text, so the fetch budget belongs to jobs that actually reach a stage.
+        # ranked_jobs excludes unscoreable jobs, so the top-% must be computed from
+        # the pool WITH them present — otherwise nothing here would ever qualify.
+        from selection import _dedupe, load_config, stage_percent, top_percent_count
+        from filter import passes_filter
+
+        cfg = load_config()
+        pool = [
+            j for j in _dedupe(json.loads(ANALYZED.read_text(encoding="utf-8")))
+            if j.get("match") and passes_filter(j, cfg)[0]
+            and j.get("match", {}).get("composite_score", 0) > 0
+        ]
+        pool.sort(key=lambda j: j["match"]["composite_score"], reverse=True)
+        pct = max(stage_percent(cfg, s) for s in ("generation", "review"))
+        wanted = {id(j) for j in pool[: top_percent_count(len(pool), pct)]}
+        by_url = {j.get("url") for j in pool if id(j) in wanted}
+        targets = [j for j in targets if j.get("url") in by_url]
+        print(f"--top-only: {len(targets)} of the backlog sit inside the top {pct:g}%")
+    if args.source:
+        targets = [j for j in targets if j.get("source") == args.source]
+    targets = [j for j in targets if j.get("url") and not j.get("listing_removed")]
+    if args.limit:
+        targets = targets[: args.limit]
+
+    from collections import Counter
+    print(f"unscoreable with a URL: {len(targets)}  "
+          f"{dict(Counter(j.get('source') for j in targets))}")
+    if args.dry_run:
+        for j in targets:
+            state = "junk" if is_junk_description(j.get("description") or "") else \
+                f"{len((j.get('description') or '').strip())}c"
+            print(f"  {j.get('source'):9s} {state:6s} {(j.get('title') or '?')[:46]}")
+        print("\nDRY RUN — nothing fetched")
+        return 0
+    if not targets:
+        return 0
+
+    got, gone = asyncio.run(refetch(targets, headless=not args.show_browser))
+    print(f"\nrecovered: {len(got)}/{len(targets)}   confirmed removed: {len(gone)}")
+    if not got and not gone:
+        return 0
+
+    db = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    updated = 0
+    for job in db:
+        url = job.get("url")
+        if url in gone:
+            # Marked, not deleted: the job stays out of every re-fetch attempt from
+            # here on, while remaining visible as a lead lost to a dead listing
+            # rather than silently vanishing from the backlog.
+            job["listing_removed"] = True
+            continue
+        desc = got.get(url)
+        if desc:
+            job["description"] = desc
+            # Full text now, so the API-summary flag no longer applies — leaving it
+            # set would keep the job out of review after it had been repaired.
+            job.pop("description_truncated", None)
+            # Drop the analysis computed from the broken text: skills were
+            # extracted from JavaScript, and context was scored on it. Leaving
+            # them would keep a fixed description paired with a poisoned score.
+            job.pop("match", None)
+            if isinstance(job.get("analysis"), dict):
+                job["analysis"].pop("skills", None)
+                job["analysis"].pop("skill_coverage", None)
+            updated += 1
+
+    backup = ANALYZED.with_suffix(".json.prerefetch")
+    shutil.copy2(ANALYZED, backup)
+    ANALYZED.write_text(json.dumps(db, ensure_ascii=False, indent=2, default=str),
+                        encoding="utf-8")
+    print(f"updated {updated} jobs in {ANALYZED.name} (backup: {backup.name})")
+    print("\nNext: re-analyse the cleared jobs, then re-review them:")
+    print("  .venv/bin/python3 run.py --reanalyze --llm-context")
+    print("  .venv/bin/python3 rereview_top.py --new-only")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

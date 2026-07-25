@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 from filter import passes_filter  # noqa: E402
 from matcher import make_safe_name  # noqa: E402
-from reviewer import run_review, _extract_score  # noqa: E402
+from reviewer import REVIEWS_DIR, run_review, _extract_score  # noqa: E402
 
 ANALYZED = ROOT / "10_output" / "_analyzed.json"
 CV_DIR = ROOT / "10_output" / "10_cvs"
@@ -36,28 +36,59 @@ CL_DIR = ROOT / "10_output" / "10_cover-letters"
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=56)
+    # --limit is an explicit count override; without it the stage acts on the
+    # configured review_top_percent, the same selection generation uses.
+    ap.add_argument("--limit", type=int, default=None,
+                    help="review the best N jobs (overrides review_top_percent)")
+    ap.add_argument("--percent", type=float, default=None,
+                    help="review the top P%% (overrides review_top_percent)")
     ap.add_argument("--kind", choices=["CV", "CL", "both"], default="both")
+    ap.add_argument("--only", metavar="FILE",
+                    help="review just the base names listed in FILE (one per line) — "
+                         "for re-checking a handful of documents after a targeted rebuild")
+    # Widening the top-% pulls in never-reviewed jobs AND documents whose review
+    # went stale for an unrelated reason (a bulk text edit changes reviewed_sha).
+    # --new-only spends the LLM budget on the former only.
+    ap.add_argument("--new-only", action="store_true",
+                    help="skip documents that already have a review file, even a stale one")
     args = ap.parse_args()
 
-    jobs = json.loads(ANALYZED.read_text())
     config = yaml.safe_load((ROOT / "config.yaml").read_text()) or {}
-    passed = [j for j in jobs if j.get("match") and passes_filter(j, config)[0]]
-    passed.sort(key=lambda j: j["match"]["composite_score"], reverse=True)
-    top = passed[:args.limit]
+    from selection import ranked_jobs, select_top
+    if args.limit is not None:
+        top = ranked_jobs(config)[:args.limit]
+        scope = f"上位{args.limit}求人"
+    else:
+        top = select_top("review", config, percent=args.percent)
+        pct = args.percent if args.percent is not None else config.get("review_top_percent", 20)
+        scope = f"上位{pct}%={len(top)}求人"
+
+    only = None
+    if args.only:
+        only = {l.strip() for l in Path(args.only).read_text().splitlines() if l.strip()}
+        scope = f"指定{len(only)}件"
 
     kinds = ["CV", "CL"] if args.kind == "both" else [args.kind]
     todo = []
+    skipped_reviewed = 0
     for job in top:
         base = make_safe_name(job.get("company", ""), job.get("title", ""))
+        if only is not None and base not in only:
+            continue
         for kind in kinds:
             d = CV_DIR if kind == "CV" else CL_DIR
             p = d / f"{base}_{kind}.md"
-            if p.exists():
-                todo.append((kind, p, job))
+            if not p.exists():
+                continue
+            if args.new_only and (REVIEWS_DIR / f"{p.stem}_review.md").exists():
+                skipped_reviewed += 1
+                continue
+            todo.append((kind, p, job))
 
     print(f"[{time.strftime('%H:%M:%S')}] 再レビュー対象: {len(todo)}件 "
-          f"(上位{args.limit}求人 / {args.kind})", flush=True)
+          f"({scope} / {args.kind})"
+          + (f" / 既レビューをスキップ: {skipped_reviewed}件" if args.new_only else ""),
+          flush=True)
 
     done = failed = 0
     cleared = still_blocked = 0
@@ -69,7 +100,7 @@ def main():
             print(f"  ✗ {path.stem}: {str(e)[:70]}", flush=True)
             continue
         done += 1
-        score, fact_block = _extract_score(rp.read_text(encoding="utf-8"))
+        score, fact_block, _nits = _extract_score(rp.read_text(encoding="utf-8"))
         if fact_block:
             still_blocked += 1
         else:

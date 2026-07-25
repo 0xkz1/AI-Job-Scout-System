@@ -13,6 +13,11 @@ def _reset_provider(monkeypatch):
     # Isolate from the real .env
     monkeypatch.delenv("FALLBACK_PROVIDERS", raising=False)
     monkeypatch.delenv("FALLBACK_PROVIDER", raising=False)
+    # ...and from the real quarantine state. These tests assert an exact provider
+    # call order, but call_llm drops sidelined providers from the chain first, so a
+    # live quarantine entry (a normal, intended condition — see key_quarantine)
+    # made them fail for reasons that have nothing to do with fallback logic.
+    monkeypatch.setattr(llm_client, "_quarantine_filter_chain", lambda chain: chain)
 
 
 def test_falls_through_transient_error_to_next_provider(monkeypatch):

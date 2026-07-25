@@ -20,13 +20,18 @@ python run.py --saved
 
 ## Why This Exists
 
-Job hunting is a numbers game, but manual tailoring doesn't scale. This pipeline:
+I'm a perfectionist about the job search. If I'm going to do it, I want **exhaustive coverage of the entire market I'm eligible for** and **precision about which roles actually fit me** — done efficiently, without reading thousands of listings by hand.
 
-1. **Scrapes** five sites — Indeed UK, LinkedIn, Reed, Guardian Jobs, Adzuna — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
-2. **Analyzes** each job with an LLM — salary parsing, skill extraction, title-only seniority classification
-3. **Matches** each job against your profile using 5-axis weighted scoring (skills, experience, location, salary, context/ethos)
-4. **Generates** a tailored CV and cover letter for every job scoring ≥ 50%
-5. **Outputs** Obsidian-ready Markdown with YAML frontmatter (incl. `categories`) — queryable via Dataview, operated via a Streamlit UI
+That was the original thesis, scoped to the UK. It hasn't changed — it just **grew from the UK to EU/EMEA + remote**. As a UK resident on a Youth Mobility Scheme (YMS) visa I can hold remote roles for foreign employers, so the reachable market is far larger than "UK jobs." The system encodes *my own eligibility* — visa, timezone, relocation limits — as a scoring function, so **"the whole market" means "the whole market I can actually work in,"** not raw job count.
+
+The pipeline:
+
+1. **Scrapes** the full reachable market — Reed, Guardian Jobs, Indeed, LinkedIn (UK) + **Adzuna's multi-country API (GB/DE/NL/FR/AT/ES)** + **remote-native boards (Remotive, RemoteOK, Arbeitnow)** that surface Nordics/CH/LU remote roles Adzuna doesn't cover — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
+2. **Guards** the widened pool *before* matching — timezone-locked (Americas-hours) and on-site-abroad roles are dropped or down-scored, so a bigger pool doesn't become a noisier one
+3. **Analyzes** each job with an LLM — salary parsing, skill extraction, title-only seniority classification
+4. **Matches** each job on 5 weighted axes, including an **eligibility-aware location model** (target-country remote 0.85, EU/EMEA remote 0.80, US remote 0.18 — the timezone penalty is deliberate)
+5. **Selects** the top-ranked slice (top N%, capped) and **generates** a tailored CV + cover letter *only* for those — quality over spray-and-pray, human review before anything is sent
+6. **Outputs** Obsidian-ready Markdown with YAML frontmatter (incl. `country` + `categories`) — queryable via Dataview, operated via a Streamlit UI, delivered nightly via Telegram
 
 All LLM calls go through one provider chain — **Mistral (cloud, primary) → StepFun step-3.5-flash (cloud, fallback) → Ollama Gemma-4 (local, last resort on an RTX 5080)** — so batches are fast and cheap, and the pipeline keeps working offline. Job text and your persona are sent to the cloud providers; switch `ANALYSIS_PROVIDER=ollama` for a fully local run. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
 
@@ -34,9 +39,30 @@ All LLM calls go through one provider chain — **Mistral (cloud, primary) → S
 
 ## Architecture
 
-![System architecture](docs/architecture.svg)
+```mermaid
+flowchart TD
+    subgraph SRC["Sources — full reachable market (UK → EU/EMEA + remote)"]
+        UK["UK boards<br/>Reed · Guardian · Indeed · LinkedIn"]
+        ADZ["Adzuna API<br/>GB · DE · NL · FR · AT · ES"]
+        REM["Remote-native boards<br/>Remotive · RemoteOK · Arbeitnow"]
+        MAN["Manual intake<br/>url-list · watched · saved"]
+    end
+    SRC --> STG["00_saved/ staging<br/>raw JSON, URL-deduped"]
+    STG --> GUARD["Guard — filter.py<br/>drop timezone-locked / on-site-abroad"]
+    GUARD --> AN["analyzer.py<br/>salary · skills · seniority (LLM)"]
+    AN --> MATCH["matcher.py — 5-axis score<br/>skills · exp · eligibility-location · salary · context"]
+    MATCH --> DB[("_analyzed.json<br/>incremental DB")]
+    MATCH --> SEL["selection.py<br/>rank → top N% → cap"]
+    SEL --> GEN["cv_generator + cover_letter_generator<br/>tailored, per top match"]
+    GEN --> REV["reviewer.py<br/>LLM review dialogue"]
+    GEN --> OUT["10_output/*.md<br/>Obsidian frontmatter (country · categories)"]
+    OUT --> UIS["Streamlit UI · Obsidian Dataview"]
+    OUT --> CRON["nightly Hermes cron<br/>→ Telegram (new high matches only)"]
+```
 
-**Flow in one line:** five Playwright scrapers + manual intake → `00_saved/` staging (auto-ingested every run) → `run.py` pipeline (`analyzer` → `filter` → `matcher` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit** — then an **LLM review dialogue** (annotate findings in Obsidian, LLM replies, apply agreed fixes per-fix to the document or back to the reusable masters), and a **nightly Hermes cron** that runs the whole pipeline unattended and Telegram-notifies only new high matches. Details: [ARCHITECTURE.md](ARCHITECTURE.md) §6–7.
+*High-level render: [docs/architecture.svg](docs/architecture.svg). The Mermaid flow above is the maintained source of truth.*
+
+**Flow in one line:** UK Playwright scrapers + Adzuna/remote-board **APIs across UK + EU/EMEA** + manual intake → `00_saved/` staging (auto-ingested every run) → **eligibility guard** → `run.py` pipeline (`analyzer` → `filter` → `matcher` → `selection` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit** — then an **LLM review dialogue** (annotate findings in Obsidian, LLM replies, apply agreed fixes per-fix to the document or back to the reusable masters), and a **nightly Hermes cron** that runs the whole pipeline unattended and Telegram-notifies only new high matches. Details: [ARCHITECTURE.md](ARCHITECTURE.md) §6–7.
 
 CV headers (title + tagline) are **per-role**: each `career/cv/profile/<role>.md` carries `role_title` / `role_tagline` frontmatter that `cv_generator.py` injects, so a Product Designer application leads with a different identity than a Creative Technologist one.
 
@@ -52,11 +78,26 @@ Each job is scored on five weighted axes:
 | ------------ | --------------- | ------------------------------------------------ |
 | **Skills**   | 40%             | Word-boundary keyword + synonym mapping + TF-IDF name similarity |
 | **Experience** | 25%           | Seniority level matching (entry/mid/senior/director) |
-| **Location** | 10%             | City match + remote-friendliness bonus            |
+| **Location** | 10%             | **Eligibility model** — UK city match; target-country & EU/EMEA remote rewarded; US-remote (timezone) & on-site-abroad penalised |
 | **Salary**   | 5%              | Salary range vs. minimum expectation              |
 | **Context**  | 20%             | Brand & ethos alignment (profile, ethos, about) via TF-IDF max-similarity |
 
 Weights are **adjustable in real-time** via the Streamlit UI — no code changes needed.
+
+### Eligibility-Aware Location Model
+
+Widening from the UK to Europe only helps if the pool stays *applicable*. The location axis (`matcher._classify_international_location`) encodes my real constraints instead of a flat "remote = good":
+
+| Job location / style                    | Score | Rationale                                             |
+| --------------------------------------- | ----- | ----------------------------------------------------- |
+| Edinburgh / Glasgow (home cities)       | 1.00  | On-site viable                                        |
+| Target-country **remote** (DE/NL/LU/FR/Nordics/CH/AT/ES) | 0.85 | Priority markets, worked remotely on YMS |
+| EU / EMEA **remote**                    | 0.80  | In-scope                                              |
+| Worldwide **remote**                    | 0.72  | In-scope, timezone to verify                          |
+| On-site abroad (relocation)             | 0.20  | Out of scope — no relocation on this visa             |
+| **US / Americas remote**                | 0.18  | Deliberate penalty — Americas hours = night shifts    |
+
+Country priority (drives Adzuna's country list and board relevance): **DE > NL > LU > FR > Nordics > CH > AT > ES**. A hard filter (`exclude_timezone_keywords`) drops postings explicitly locked to Americas working hours *before* scoring, and match reports carry an inferred `country` frontmatter field for Dataview slicing. Target countries live in `config.yaml` — the model is data-driven, not hard-coded.
 
 ### Tier System
 

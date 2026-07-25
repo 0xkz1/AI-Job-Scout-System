@@ -37,6 +37,16 @@ def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
         if kw_lower and re.search(r'\b' + re.escape(kw_lower) + r'\b', desc_lower):
             return False, f"description contains excluded keyword '{kw}'"
 
+    # --- Exclude by timezone lock (Americas-hours remote = night shift) ---
+    # Scans title + description. Phrases in config are specific enough that a
+    # plain substring check won't false-positive on incidental "EST"/"CET" text.
+    exclude_tz = config.get("exclude_timezone_keywords", [])
+    haystack = (title_lower + " " + desc_lower)
+    for kw in exclude_tz:
+        kw_lower = kw.lower().strip()
+        if kw_lower and kw_lower in haystack:
+            return False, f"timezone-locked (Americas): '{kw}'"
+
     # --- Filter by experience level ---
     allowed_levels = config.get("include_levels", [])
     if allowed_levels:

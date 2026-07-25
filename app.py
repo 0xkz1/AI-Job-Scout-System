@@ -227,7 +227,7 @@ with tab_scraper:
         )
         sites = st.multiselect(
             "Sites",
-            options=["indeed", "linkedin", "reed", "guardian", "adzuna"],
+            options=["indeed", "linkedin", "reed", "guardian", "adzuna", "remote_apis"],
             default=st.session_state.config.get("sites", ["indeed"]),
         )
         max_pages = st.slider(
@@ -243,10 +243,35 @@ with tab_scraper:
             options=["full_time", "part_time", "contract", "internship", "freelance"],
             default=st.session_state.config.get("employment_types", ["full_time", "part_time", "contract"]),
         )
+        # --- Per-stage selection: one top-% number governs each stage ---
+        st.markdown("**🎯 対象範囲(上位N%)** — 各段階が処理する求人の割合")
+        gen_percent = st.slider(
+            "📄 CV+CL 生成対象 (generation_top_percent)",
+            1, 100, int(st.session_state.config.get("generation_top_percent", 20)), 1,
+            help="ランク付き求人プールの上位何%にCV+カバーレターを生成するか。"
+        )
+        review_percent = st.slider(
+            "🧐 レビュー対象 (review_top_percent)",
+            1, 100, int(st.session_state.config.get("review_top_percent", 20)), 1,
+            help="上位何%を再レビューするか。生成と揃えると整合が取れる。"
+        )
+        # Live "top N% = how many jobs" readout from the current pool.
+        try:
+            from selection import ranked_jobs, top_percent_count
+            _pool = len(ranked_jobs(st.session_state.config))
+            st.caption(
+                f"現在の母数 {_pool}件 → 生成 上位{gen_percent}% = "
+                f"**{top_percent_count(_pool, gen_percent)}件** / "
+                f"レビュー 上位{review_percent}% = "
+                f"**{top_percent_count(_pool, review_percent)}件**"
+            )
+        except Exception:
+            pass
+
         cv_threshold = st.slider(
-            "📄 CV & Cover Letter Generation Threshold", 
-            0.0, 1.0, float(st.session_state.config.get("match_score_threshold", 0.50)), 0.05,
-            help="Minimum match score required to generate a tailored CV and Cover Letter."
+            "📄 品質下限スコア (match_score_threshold)",
+            0.0, 1.0, float(st.session_state.config.get("match_score_threshold", 0.60)), 0.05,
+            help="上位N%内でも、このスコア未満の求人にはCVを生成しない品質下限。0で無効。"
         )
         review_threshold = st.slider(
             "🧐 Review Submission Threshold",
@@ -255,7 +280,9 @@ with tab_scraper:
         )
 
     if st.button("💾 Save Configuration"):
-        st.session_state.config = {
+        # Merge onto the existing config so keys not exposed here (weights,
+        # cv_generation_limit, output_dir, …) are preserved, not dropped.
+        st.session_state.config.update({
             "keywords": [k.strip() for k in keywords_text.split("\n") if k.strip()],
             "locations": [l.strip() for l in locations_text.split("\n") if l.strip()],
             "sites": sites,
@@ -265,11 +292,13 @@ with tab_scraper:
             "employment_types": emp_types,
             "exclude_title_keywords": [k.strip() for k in exclude_title_text.split("\n") if k.strip()],
             "exclude_description_keywords": [k.strip() for k in exclude_desc_text.split("\n") if k.strip()],
+            "generation_top_percent": gen_percent,
+            "review_top_percent": review_percent,
             "match_score_threshold": cv_threshold,
             "review_score_threshold": review_threshold,
-        }
+        })
         save_config(st.session_state.config)
-        st.success("✅ Configuration saved! Run `python3 run.py --reanalyze` in your terminal to apply the new threshold.")
+        st.success("✅ 保存しました。適用するにはターミナルで `python3 run.py --reanalyze` を実行。")
 
     # === Section 2: Run Scraper ===
     st.subheader("🚀 Run Scraper")
@@ -1663,8 +1692,9 @@ with tab_watched:
     )
 
     from email_outreach import (
-        parse_email_list, generate_all, draft_path, link_drafts_into_list,
-        generate_outreach_cv, outreach_cv_path, OUT_DIR as EMAIL_OUT_DIR,
+        parse_email_list, generate_all, draft_path, link_outputs_into_list,
+        generate_outreach_cv, outreach_cv_path, resolved_profile,
+        OUT_DIR as EMAIL_OUT_DIR,
     )
     _email_rows = parse_email_list()
     if _email_rows:
@@ -1673,6 +1703,8 @@ with tab_watched:
             "メール": r["email"],
             "会社名": r["company"] + (" (推定)" if r["company_guessed"] else "") if r["company"] else "❌ 要記入",
             "ロール": r["role"],
+            "プロファイル": resolved_profile(r["role"]) + (
+                "" if resolved_profile(r["role"]) == r["role"] else " (フォールバック)"),
             "CV": (outreach_cv_path(r).name if outreach_cv_path(r) and outreach_cv_path(r).exists() else "—"),
             "下書き": (draft_path(r).name if draft_path(r) and draft_path(r).exists() else "—"),
             "メモ": r["notes"],
@@ -1693,9 +1725,15 @@ with tab_watched:
                     st.success("生成: " + ", ".join(f"`{p.name}`" for _r, p in created)
                                + " → `10_output/31_outreach_cvs/`")
                 if skipped:
-                    st.info(f"{len(skipped)}件は既存のCVあり — 作り直すにはファイルを削除")
+                    st.info(f"{len(skipped)}件は最新版のためスキップ "
+                            "(CV生成の仕様やデータが変わると次回自動で作り直します)")
                 for r, s in failed:
                     st.warning(f"{r['email']}: {s}")
+                # Write [[wikilinks]] back into email-list.md's CV column so
+                # Obsidian readers can jump straight from the list to the CV.
+                if created or skipped:
+                    if link_outputs_into_list():
+                        st.caption("📎 email-list.md の「CV」列にリンクを記入しました")
                 if created:
                     st.rerun()
         with col_mail:
@@ -1715,7 +1753,7 @@ with tab_watched:
                 # Write [[wikilinks]] back into email-list.md's 下書き column so
                 # Obsidian readers can jump straight from the list to the draft.
                 if created or skipped:
-                    if link_drafts_into_list():
+                    if link_outputs_into_list():
                         st.caption("📎 email-list.md の「下書き」列にリンクを記入しました")
                     st.rerun()
         with col_regen:

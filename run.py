@@ -29,6 +29,7 @@ from scraper_linkedin import scrape_linkedin_all
 from scraper_reed import scrape_reed_all
 from scraper_guardian import scrape_guardian_all
 from scraper_adzuna import scrape_adzuna_all
+from scraper_remote_apis import scrape_remote_apis_all
 from analyzer import analyze_job
 from filter import filter_jobs, print_filter_summary
 from matcher import analyze_match, generate_match_report, load_user_skills, load_user_experience, make_safe_name
@@ -303,27 +304,17 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
     os.makedirs(letter_dir, exist_ok=True)
 
     cv_threshold = config.get("match_score_threshold", 0.50)
-    # Reports are written for every filter-passed job, but CV/CL generation is
-    # the expensive part (one LLM pass each) — cap it at the best N matches.
-    # The cap ranks only jobs that still NEED a CV — jobs whose CV already
-    # exists are skipped anyway, and letting them occupy slots would starve
-    # newly scraped matches as the archive grows.
-    cv_limit = config.get("cv_generation_limit", 150)
-    eligible_ids: set[int] = set()
-    if cv_limit:
-        _seen: set[str] = set()
-        needs_cv = []
-        for j in passed_jobs:
-            if not j.get("match"):
-                continue
-            b = make_safe_name(j.get('company', 'company'), j.get('title', 'job'))
-            if b in _seen:
-                b = f"{b}_{hashlib.md5((j.get('url') or '').encode()).hexdigest()[:6]}"
-            _seen.add(b)
-            if not os.path.exists(os.path.join(cv_dir, f"{b}_CV.md")):
-                needs_cv.append(j)
-        needs_cv.sort(key=lambda j: j["match"].get("composite_score", 0), reverse=True)
-        eligible_ids = {id(j) for j in needs_cv[:cv_limit]}
+    # CV/CL generation is the expensive part (one LLM pass each), so it acts only
+    # on the top generation_top_percent of the ranked pool — the same selection
+    # every stage uses (selection.py), so generation and review stay in step.
+    # A count cap still guards against a huge first run.
+    from selection import select_top
+    eligible_ids: set[int] = {id(j) for j in select_top("generation", config, jobs=passed_jobs)}
+    cv_limit = config.get("cv_generation_limit", 0)
+    if cv_limit and len(eligible_ids) > cv_limit:
+        # Keep only the best cv_limit of the eligible set (already score-ranked).
+        capped = [j for j in select_top("generation", config, jobs=passed_jobs)][:cv_limit]
+        eligible_ids = {id(j) for j in capped}
 
     cv_generated = 0
     cv_skipped = 0
@@ -467,7 +458,7 @@ def print_summary(jobs: list[dict]):
 
 async def main():
     parser = argparse.ArgumentParser(description="Job Scraper Pipeline")
-    parser.add_argument("--site", choices=["indeed", "linkedin", "reed", "guardian", "adzuna", "all"], default="all")
+    parser.add_argument("--site", choices=["indeed", "linkedin", "reed", "guardian", "adzuna", "remote_apis", "all"], default="all")
     parser.add_argument("--pages", type=int, default=None, help="Pages per search")
     parser.add_argument("--headless", action="store_true", default=False,
                         help="Headless mode (Indeed only; LinkedIn needs login)")
@@ -859,9 +850,16 @@ async def main():
             print(f"  → Loaded {len(_saved_jobs_to_merge)} saved jobs from 00_saved/ for analysis")
             print(f"{'='*60}\n")
 
-        sites = ["reed", "guardian", "adzuna", "indeed", "linkedin"] if args.site == "all" else [args.site]
+        sites = ["reed", "guardian", "adzuna", "remote_apis", "indeed", "linkedin"] if args.site == "all" else [args.site]
 
         all_jobs = []
+        # Each scraper's except prints and continues, so one dead site never stops
+        # the others — right for a nightly run, but it also meant the process exited
+        # 0 no matter what. Indeed failed on Cloudflare for 11 consecutive nights
+        # and the cron recorded success every time, because the only trace was a
+        # line in a log nobody reads. Collected here and turned into a non-zero exit
+        # at the end when EVERY requested site failed.
+        scraper_failures: list[str] = []
 
         if "indeed" in sites:
             print(f"\n{'='*60}")
@@ -874,6 +872,7 @@ async def main():
                 all_jobs.extend(indeed_jobs)
             except Exception as e:
                 print(f"  ❌ Indeed scraper failed: {e}")
+                scraper_failures.append("indeed")
 
         if "linkedin" in sites:
             print(f"\n{'='*60}")
@@ -887,6 +886,7 @@ async def main():
                 all_jobs.extend(linkedin_jobs)
             except Exception as e:
                 print(f"  ❌ LinkedIn scraper failed: {e}")
+                scraper_failures.append("linkedin")
 
         if "guardian" in sites:
             print(f"\n{'='*60}")
@@ -900,6 +900,7 @@ async def main():
                 all_jobs.extend(guardian_jobs)
             except Exception as e:
                 print(f"  ❌ Guardian scraper failed: {e}")
+                scraper_failures.append("guardian")
 
         if "adzuna" in sites:
             print(f"\n{'='*60}")
@@ -913,6 +914,21 @@ async def main():
                 all_jobs.extend(adzuna_jobs)
             except Exception as e:
                 print(f"  ❌ Adzuna scraper failed: {e}")
+                scraper_failures.append("adzuna")
+
+        if "remote_apis" in sites:
+            print(f"\n{'='*60}")
+            print("🌍 REMOTE APIs (Remotive / RemoteOK / Arbeitnow)")
+            print(f"{'='*60}")
+            print("  (Free remote-native boards — Nordics/CH/LU/EU remote roles)")
+            try:
+                remote_jobs = scrape_remote_apis_all(config)
+                print(f"  → {len(remote_jobs)} jobs from remote APIs")
+                save_raw_to_saved(remote_jobs, "remote_apis")
+                all_jobs.extend(remote_jobs)
+            except Exception as e:
+                print(f"  ❌ Remote APIs scraper failed: {e}")
+                scraper_failures.append("remote_apis")
 
         if "reed" in sites:
             print(f"\n{'='*60}")
@@ -925,6 +941,7 @@ async def main():
                 all_jobs.extend(reed_jobs)
             except Exception as e:
                 print(f"  ❌ Reed scraper failed: {e}")
+                scraper_failures.append("reed")
 
     if not _from_saved_mode:
         # Always ingest staged jobs (url-list.md extracts, raw staging, manual
@@ -952,7 +969,10 @@ async def main():
 
     if not all_jobs:
         print("\n⚠ No jobs scraped.")
-        return
+        # Every site failing is the case that produces an empty all_jobs, so
+        # returning None here would exit 0 and hide exactly the outage the exit
+        # code at the end of this function exists to report.
+        return 1 if (locals().get("scraper_failures") or []) else 0
 
     # --- Load existing _analyzed.json FIRST (incremental dedup) ---
     output_dir = os.path.join(os.path.dirname(__file__), config.get("output_dir", "output"))
@@ -1094,6 +1114,21 @@ async def main():
     if _saved_lock is not None:
         _saved_lock.close()
 
+    # Non-zero exit when every requested site failed. Per-site failures stay
+    # non-fatal on purpose (one dead board must not cost a night's other sites),
+    # but "nothing scraped at all" has to be distinguishable from success, or the
+    # cron keeps recording green runs — which is exactly how Indeed's Cloudflare
+    # failure went unnoticed for 11 nights.
+    failures = locals().get("scraper_failures") or []
+    requested = locals().get("sites") or []
+    if failures and requested and len(set(failures)) >= len(set(requested)):
+        print(f"  ❌ every requested site failed: {', '.join(sorted(set(failures)))}")
+        return 1
+    if failures:
+        print(f"  ⚠ {len(set(failures))}/{len(set(requested))} sites failed: "
+              f"{', '.join(sorted(set(failures)))}")
+    return 0
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()) or 0)

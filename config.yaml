@@ -33,21 +33,126 @@ locations:
 - Manchester
 - Birmingham
 - Remote
-max_pages_per_search: 10
+max_pages_per_search: 3
+
+# Per-site page depth, read through selection.max_pages_for (falls back to
+# max_pages_per_search above). Depth costs wall-clock linearly: every site walks
+# 9 keywords x 7 locations = 63 searches serially, and at depth 10 both reed and
+# adzuna blew the 1500s per-site cron timeout and were killed mid-run — leaving
+# the truncated descriptions that produced the unscoreable backlog. Guardian
+# finished at 1421s, which is not comfortable either.
+#
+# Depth is only worth paying for where results actually live. Of jobs found on
+# page 4+: reed 157 (22% of its 706, incl. 18 of the current top-30% set), adzuna
+# 0. So reed keeps depth, adzuna does not.
+#
+# reed sits at 6, not 10, on a timing budget: page walking costs ~63 x (2 + 2 x
+# depth) seconds, so depth 10 = ~1386s against the 1500s cap, leaving ~114s for
+# description fetches. Those are serial with a 1s delay (scraper_helper says
+# concurrency was tried and caused EPIPE), and only NEW jobs pay it — every one of
+# reed's current 706 is cached, which is why depth 10 survived until the
+# multi-country expansion produced a night with enough new postings to blow it.
+# Depth 6 = ~882s, leaving room for ~600 new descriptions.
+#
+# Known cost of this: reed pages 7-10 hold only 14 jobs but 10 of them are in the
+# top 30% — a 71% hit rate against 11% on page 1, because results are not ordered
+# by relevance. Depth 6 gives that up to stay inside the timeout. Raising it back
+# needs the description fetch made concurrent first (or the cap raised), not just
+# a bigger number here — a site that times out returns less than a shallow run
+# that finishes. Re-measure before changing any of these.
+max_pages_per_site:
+  reed: 6
+  adzuna: 3
+  guardian: 3
+  indeed: 3
+  linkedin: 3
 min_salary_gbp: 26000
 sites:
 - reed
 - guardian
 - adzuna
+- remote_apis
 - indeed
 - linkedin
+
+# --- Multi-country / remote expansion (2026-07-25) ---
+# Target countries for REMOTE roles, in priority order. A UK-resident on a YMS
+# visa can hold these remotely; on-site abroad is out of scope (no relocation).
+# Drives Adzuna country domains (scraper_adzuna) + relevance in matcher.
+remote_target_countries:
+- germany
+- netherlands
+- luxembourg
+- france
+- sweden
+- norway
+- finland
+- switzerland
+- austria
+- spain
+
+# Adzuna API country codes to query (subset of the above that Adzuna covers).
+# Requires ADZUNA_APP_ID + ADZUNA_APP_KEY env (free tier). gb kept for UK.
+adzuna_countries:
+- gb
+- de
+- nl
+- fr
+- at
+- es
+
+# Remote roles locked to Americas working hours = night shifts from UK/JP.
+# Hard-dropped in filter.py. Phrases kept specific to avoid false positives.
+exclude_timezone_keywords:
+- must be based in the us
+- must be located in the us
+- us residents only
+- authorized to work in the us
+- us work authorization
+- americas time zone
+- overlap with pst
+- overlap with pacific time
+- pacific time zone required
+- eastern time zone required
+
+# Composite match weights. Fitted against review verdicts on 139 documents with
+# a real job description (r = +0.595 here vs +0.518 for the old 0.35/0.25/0.10/
+# 0.01/0.29 split). Context carries most of it because it is the only component
+# that reads the posting semantically, the way the reviewer does — measured alone
+# it reaches r=+0.562 while skills manages +0.192. experience is near-zero weight
+# because its spread across postings is sd=0.024 (the candidate's years are fixed,
+# so it barely varies), and salary is held at 0.01 because it correlates NEGATIVELY
+# with review outcome (r=-0.089). Skills keeps a real share: dropping it entirely
+# scores worse (+0.557) than keeping it small.
+weights:
+  skills: 0.20
+  experience: 0.05
+  location: 0.10
+  salary: 0.01
+  context: 0.64
 
 # Review submission gate: CV/CL scoring >= this is badged 提出可 (badge only)
 review_score_threshold: 85
 
-# Minimum composite match score for CV/cover-letter generation.
-match_score_threshold: 0.60
+# --- Per-stage selection (primary control) ---
+# Each stage acts on the top N% of the ranked, filter-passed pool. One number
+# per stage, read through selection.py so generation and review stay in step.
+generation_top_percent: 30   # top N% get a CV + cover letter (paired)
+review_top_percent: 30       # top N% get reviewed
 
-# Cap CV/cover-letter generation to the best N matches per run (0 = no cap).
-# Match reports are still written for every job that passes the filter.
+# Quality floor (secondary): a job below this composite score never gets a CV
+# even if it lands inside the top N% of a small pool. It only trims — it never
+# widens the selection. Set to 0 to disable.
+#
+# Must stay BELOW the top-N% cutoff, or it silently becomes the real selector.
+# It sat at 0.60 while the weight rebalance moved the median composite to 0.40,
+# which cut 75 of the top 143 jobs and shrank "top 30%" to 68 — and dropped 6 of
+# the 31 jobs that reviewed at 73+. Re-fit against those review outcomes: 0.45
+# loses none of them and stays under the current 30% cutoff (0.480). Re-check
+# this number whenever `weights` changes, since it is an absolute score and the
+# weights decide the scale.
+match_score_threshold: 0.45
+
+# Safety cap on how many NEW CVs one run may generate, independent of percent
+# (0 = no cap). Guards against a huge first run; top-% is the real selector.
 cv_generation_limit: 150

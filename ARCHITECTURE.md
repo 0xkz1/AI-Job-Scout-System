@@ -31,7 +31,9 @@ flowchart TD
         S1["run.py (Main Runner)"]
         S2["scraper_indeed.py (Indeed)"]
         S3["scraper_linkedin.py (LinkedIn — interactive only)"]
-        S5["scraper_reed / guardian / adzuna"]
+        S5["scraper_reed / guardian (UK Playwright)"]
+        S6["scraper_adzuna.py (multi-country API: GB/DE/NL/FR/AT/ES, Playwright fallback)"]
+        S7["scraper_remote_apis.py (Remotive / RemoteOK / Arbeitnow)"]
         S4["scraper_saved.py (Bookmarks)"]
     end
 
@@ -304,7 +306,7 @@ Note for maintainers: Streamlit auto-reloads `app.py` but **not** imported modul
 
 An unattended nightly run (02:00 JST) is scheduled in the **Hermes archivist profile's cron** (`~/.hermes/profiles/archivist/cron/jobs.json`, script `job_scout_nightly.sh`, `no_agent: true`):
 
-1. `scraper_saved.py` + `run.py --site indeed/reed/guardian/adzuna` (LinkedIn is excluded — it needs an interactive login; its saved jobs still enter via staging). The full pipeline runs: scrape → analyze → match → generate CV/CL.
+1. `scraper_saved.py` + `run.py --site indeed/reed/guardian/adzuna/remote_apis` (LinkedIn is excluded — it needs an interactive login; its saved jobs still enter via staging). `adzuna` uses the multi-country Adzuna API when `ADZUNA_APP_ID`/`ADZUNA_APP_KEY` are set (UK Playwright fallback otherwise); `remote_apis` pulls Remotive/RemoteOK/Arbeitnow. The full pipeline runs: scrape → analyze → match → generate CV/CL.
 2. `nightly_scout.py` post-processing: diffs `_analyzed.json` against `_nightly_state.json` (seen URLs) → picks **new** matches ≥ `SCOUT_NOTIFY_MIN` (0.70) → auto-reviews the CV/CL of those ≥ `SCOUT_REVIEW_MIN` (0.80) → prints a summary to stdout.
 3. Delivery: the job's stdout **is** the Telegram message, sent via the archivist profile's own gateway/bot to the configured DM (`deliver: telegram:<chat_id>`). Empty stdout = silent night. All scraper logs go to `10_output/_nightly_scout.log` only.
 

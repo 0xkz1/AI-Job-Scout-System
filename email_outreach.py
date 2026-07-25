@@ -20,6 +20,29 @@ EMAIL_LIST = ROOT / "00_saved" / "email-list.md"
 TEMPLATE_DIR = ROOT.parent / "email"
 SIGNATURE_PATH = TEMPLATE_DIR / "_signature.md"
 OUT_DIR = ROOT / "10_output" / "30_emails"
+PROFILE_DIR = ROOT.parent / "cv" / "profile"
+
+
+def _normalize_role(role: str) -> str:
+    """email-list.md's ロール column is free text ("Product Designer"), but
+    profile/email-template filenames are snake_case ("product_designer.md") —
+    an exact-string lookup on the raw text never matches even when the right
+    profile exists, and silently falls back to general.md with no warning.
+    Slugify so casing/spacing differences stop mattering; a role with no
+    matching file (e.g. "Web Designer", no web_designer.md) still falls back
+    to general — that part is unavoidable without a role→profile alias
+    table, but at least a real match is no longer missed by accident."""
+    slug = re.sub(r"[^a-z0-9]+", "_", role.strip().lower()).strip("_")
+    return slug or "general"
+
+
+def resolved_profile(role: str) -> str:
+    """Which profile role_type generate_outreach_cv/generate_draft will
+    actually use for this role text — "general" whenever no matching
+    profile file exists, so the UI can show the fallback instead of hiding
+    it."""
+    slug = _normalize_role(role)
+    return slug if (PROFILE_DIR / f"{slug}.md").exists() else "general"
 
 FREEMAIL = {
     "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "yahoo.com",
@@ -52,6 +75,7 @@ _HEADER_MAP = [
     ("url", "url"),
     ("ロール", "role"), ("role", "role"),
     ("下書き", "draft"), ("draft", "draft"),
+    ("cv", "cv"),
     ("メモ", "notes"), ("notes", "notes"),
 ]
 
@@ -72,7 +96,10 @@ def parse_email_list(path: Path = EMAIL_LIST) -> list[dict]:
     company_guessed}]. Columns are located by header text, not position, so
     reordering the table (e.g. company before email) does not break parsing.
     Rows without an @ in the email column are ignored; company falls back to
-    a domain guess when left blank."""
+    a domain guess when left blank. role is slugified (_normalize_role) so
+    it can be used directly as a profile/email-template lookup key — use
+    resolved_profile(row["role"]) to see whether it actually matched a file
+    or will fall back to general."""
     rows = []
     try:
         text = path.read_text(encoding="utf-8")
@@ -110,7 +137,7 @@ def parse_email_list(path: Path = EMAIL_LIST) -> list[dict]:
             "email": email,
             "company": company,
             "url": by_key.get("url", ""),
-            "role": by_key.get("role", "") or "general",
+            "role": _normalize_role(by_key.get("role", "") or "general"),
             "notes": by_key.get("notes", ""),
             "company_guessed": guessed,
         })
@@ -137,7 +164,21 @@ def outreach_cv_path(row: dict) -> Path | None:
     return CV_OUT_DIR / f"{make_safe_name(row['company'], 'cv')}_CV.md"
 
 
-def generate_outreach_cv(row: dict) -> tuple[Path | None, str]:
+def _stamp_fingerprint(text: str, stamp_line: str) -> str:
+    """Insert/replace the gen_fingerprint line inside a doc's frontmatter —
+    same stamping regen_top_docs applies to scrape-route CVs, so outreach CVs
+    carry a comparable staleness marker."""
+    if not text.startswith("---"):
+        return text
+    if re.search(r"^gen_fingerprint:.*$", text, re.MULTILINE):
+        return re.sub(r"^gen_fingerprint:.*$", stamp_line, text, count=1, flags=re.MULTILINE)
+    m = re.search(r"\n---\s*\n", text)
+    if not m:
+        return text
+    return text[:m.start()] + f"\n{stamp_line}" + text[m.start():]
+
+
+def generate_outreach_cv(row: dict, force: bool = False) -> tuple[Path | None, str]:
     """Generic (non-job-specific) CV for a speculative-application row.
 
     There is no job posting here — only a company and a role — so this
@@ -146,20 +187,36 @@ def generate_outreach_cv(row: dict) -> tuple[Path | None, str]:
     role-appropriate project list when job_description is empty, which is
     exactly the generic CV this needs. Returns (path, status): 'created',
     'exists', or an error string; path is None on error.
+
+    Staleness, not just existence, decides a skip: an existing CV is kept only
+    when its stamped gen_fingerprint still matches the current generation spec
+    (gen_version). Change the CV template/logic (bump GEN_SPEC_VERSION) or the
+    source data (projects/*.md, profiles, skills, …) and the fingerprint moves,
+    so the next run rebuilds these outreach CVs in lockstep with the
+    scrape-route CVs instead of leaving them frozen at an old version.
+    force=True rebuilds regardless.
     """
     if not row["company"]:
         return None, "会社名なし"
 
     out = outreach_cv_path(row)
-    if out.exists():
-        return out, "exists"
+    import gen_version
+    # Use the RESOLVED profile (general when the row's role has no profile file)
+    # for both generation and the fingerprint, so the two always agree.
+    role = resolved_profile(row["role"])
+    if out.exists() and not force:
+        try:
+            if gen_version.is_current(out.read_text(encoding="utf-8"), role):
+                return out, "exists"
+        except Exception:
+            pass  # unreadable/unstamped → treat as stale, rebuild
 
     from cv_generator import generate_cv
-    role = row["role"] or "general"
     # job_title left blank (there is no posting); frontmatter's match_report/
     # cover_letter links stay empty by design — neither exists for this row.
     cv = generate_cv(role_type=role, job_title="Speculative Application",
-                      company=row["company"], job_description="")
+                     company=row["company"], job_description="")
+    cv = _stamp_fingerprint(cv, gen_version.stamp_line(role))
 
     CV_OUT_DIR.mkdir(parents=True, exist_ok=True)
     out.write_text(cv, encoding="utf-8")
@@ -245,13 +302,20 @@ def generate_all(force: bool = False) -> list[tuple[dict, Path | None, str]]:
     return [(r, *generate_draft(r, force=force)) for r in parse_email_list()]
 
 
-def link_drafts_into_list(path: Path = EMAIL_LIST) -> bool:
-    """Add/update a 下書き column in email-list.md with an Obsidian wikilink
-    to each row's draft, matched by email address. Only touches the header
-    row (inserts the column if missing) and existing data rows' draft cell —
-    every other cell, and any non-table content (prose, comments, blank
-    lines), is copied through byte-for-byte. Returns False (no write) when
-    the table can't be safely located, so a hand-edited file is never risked.
+_LINK_COLUMN_SPECS = [
+    ("draft", "下書き", draft_path),
+    ("cv", "CV", outreach_cv_path),
+]
+
+
+def link_outputs_into_list(path: Path = EMAIL_LIST) -> bool:
+    """Add/update 下書き and CV columns in email-list.md with Obsidian
+    wikilinks to each row's generated draft / outreach CV, matched by email
+    address. Only touches the header row (inserts either column if missing)
+    and existing data rows' draft/CV cells — every other cell, and any
+    non-table content (prose, comments, blank lines), is copied through
+    byte-for-byte. Returns False (no write) when the table can't be safely
+    located, so a hand-edited file is never risked.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -281,18 +345,25 @@ def link_drafts_into_list(path: Path = EMAIL_LIST) -> bool:
 
     header_cells = split_row(lines[header_idx])
     ncols = len(header_cells)
-    draft_pos = next((i for i, k in cols.items() if k == "draft"), None)
-    changed = draft_pos is None  # adding the column is itself a change to persist
-    if draft_pos is None:
-        header_cells.append("下書き")
-        draft_pos = ncols
-        ncols += 1
+    positions: dict[str, int] = {}
+    header_added = False
+    for key, label, _fn in _LINK_COLUMN_SPECS:
+        pos = next((i for i, k in cols.items() if k == key), None)
+        if pos is None:
+            header_cells.append(label)
+            pos = ncols
+            ncols += 1
+            header_added = True
+            sep_cells = split_row(lines[sep_idx])
+            sep_cells.append("---")
+            lines[sep_idx] = "| " + " | ".join(sep_cells) + " |\n"
+        positions[key] = pos
+    changed = header_added
+    if header_added:
         lines[header_idx] = "| " + " | ".join(header_cells) + " |\n"
-        sep_cells = split_row(lines[sep_idx])
-        sep_cells.append("---")
-        lines[sep_idx] = "| " + " | ".join(sep_cells) + " |\n"
 
     email_col = next(i for i, k in cols.items() if k == "email")
+    rows_by_email = {r["email"]: r for r in parse_email_list(path)}
     for i in range(sep_idx + 1, len(lines)):
         stripped = lines[i].strip()
         if "|" not in stripped:
@@ -304,15 +375,17 @@ def link_drafts_into_list(path: Path = EMAIL_LIST) -> bool:
         m = re.search(r"[\w.+-]+@[\w.-]+", email)
         if not m:
             continue
-        row = next((r for r in parse_email_list(path) if r["email"] == m.group(0)), None)
+        row = rows_by_email.get(m.group(0))
         if row is None:
             continue
-        dp = draft_path(row)
-        if dp and dp.exists():
-            link = f"[[{dp.stem}]]"
-            if cells[draft_pos] != link:
-                cells[draft_pos] = link
-                changed = True
+        for key, _label, path_fn in _LINK_COLUMN_SPECS:
+            p = path_fn(row)
+            if p and p.exists():
+                link = f"[[{p.stem}]]"
+                pos = positions[key]
+                if cells[pos] != link:
+                    cells[pos] = link
+                    changed = True
         lines[i] = "| " + " | ".join(cells) + " |\n"
 
     if changed:

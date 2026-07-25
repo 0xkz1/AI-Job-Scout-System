@@ -142,9 +142,18 @@ async def scrape_indeed(
         force_bypass = False
         import os as _os
         if cookie_path and not _os.path.exists(cookie_path):
-            print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
-            is_headless = False
-            force_bypass = True
+            if _os.environ.get("DISPLAY"):
+                print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
+                is_headless = False
+                force_bypass = True
+            else:
+                # Same trap as the Cloudflare relaunch below: headed chromium cannot
+                # start without an X server, so forcing it here would crash instead
+                # of falling back. Stay headless and let the Cloudflare check report
+                # the real problem.
+                print("  🔑 No cookies found and DISPLAY is unset — staying headless; "
+                      "Cloudflare will likely block. Use `xvfb-run`, or run "
+                      "interactively once to create cookies/indeed_cookies.json.")
 
         browser = await p.chromium.launch(
             headless=is_headless,
@@ -178,6 +187,19 @@ async def scrape_indeed(
             print("  ⚠️ Cloudflare verification detected!")
             
             # If we are headless, we must restart in non-headless mode to let user bypass it
+            if is_headless and not _os.environ.get("DISPLAY"):
+                # No X server: chromium cannot start headed, so the relaunch below
+                # would die with "Target page, context or browser has been closed"
+                # and the caller's except would print a failure and exit 0. That is
+                # how Indeed went 11 days contributing nothing while the cron
+                # recorded success every night. Say what to do instead of retrying
+                # into a guaranteed crash.
+                print("  ⛔ Cloudflare requires a headed browser, but DISPLAY is unset "
+                      "(no X server). Indeed cannot be scraped unattended — wrap the "
+                      "command in `xvfb-run`, or run it interactively once to refresh "
+                      "cookies/<cookies/indeed_cookies.json>.")
+                await browser.close()
+                return []
             if is_headless:
                 print("  🔄 Headless mode blocked by Cloudflare. Relaunching in non-headless mode...")
                 await browser.close()
@@ -421,7 +443,8 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
 
     locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    max_pages = config.get("max_pages_per_search", 3)
+    from selection import max_pages_for
+    max_pages = max_pages_for("indeed", config)
     cache = load_description_cache()
 
     for kw in keywords:

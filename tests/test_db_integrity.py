@@ -53,11 +53,11 @@ def test_dedupe_merges_matching_duplicate_postings():
         _job("Acme", "Product Designer", "https://x.com/1", desc, match={"composite_score": 0.5}),
         _job("Acme", "Product Designer", "https://x.com/2", desc, match={"composite_score": 0.9}),
     ]
-    result = dedupe_by_company_title(jobs)
-    assert len(result) == 1
+    kept, _archived = dedupe_by_company_title(jobs)
+    assert len(kept) == 1
     # Keeps the higher-scoring/better-described entry, records the loser's URL
-    assert result[0]["url"] == "https://x.com/2"
-    assert result[0]["duplicate_urls"] == ["https://x.com/1"]
+    assert kept[0]["url"] == "https://x.com/2"
+    assert kept[0]["duplicate_urls"] == ["https://x.com/1"]
 
 
 def test_dedupe_keeps_distinct_jobs_with_different_descriptions_separate():
@@ -69,8 +69,8 @@ def test_dedupe_keeps_distinct_jobs_with_different_descriptions_separate():
         _job("Acme", "Designer", "https://x.com/1", "Brand identity and print design role. " * 20),
         _job("Acme", "Designer", "https://x.com/2", "Backend API and database design role. " * 20),
     ]
-    result = dedupe_by_company_title(jobs)
-    assert len(result) == 2
+    kept, _archived = dedupe_by_company_title(jobs)
+    assert len(kept) == 2
 
 
 def test_dedupe_preserves_total_job_count_when_no_duplicates():
@@ -79,8 +79,8 @@ def test_dedupe_preserves_total_job_count_when_no_duplicates():
         _job("Beta", "Engineer", "https://x.com/2", "desc " * 30),
         _job("Gamma", "Analyst", "https://x.com/3", "desc " * 30),
     ]
-    result = dedupe_by_company_title(jobs)
-    assert len(result) == 3
+    kept, _archived = dedupe_by_company_title(jobs)
+    assert len(kept) == 3
 
 
 def test_same_posting_treats_missing_description_as_matching():
