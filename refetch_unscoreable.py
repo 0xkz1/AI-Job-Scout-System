@@ -23,10 +23,15 @@ answering 403 "suspicious behaviour" and then blocks everything), so the budget
 should go to jobs a stage will actually act on; a truncated description is already
 enough to rank one.
 
+Runs in small batches by design (DEFAULT_BATCH). Adzuna tolerates a short burst
+then refuses: 7 of 12 succeeded, and an uncapped 103-target run that followed
+recovered 0 of 5 before being stopped — and left the site more hostile for the next
+attempt. Working through a large backlog means repeating this command over hours,
+not raising the cap.
+
     python3 refetch_unscoreable.py --dry-run
-    python3 refetch_unscoreable.py --limit 10      # try a few first
-    python3 refetch_unscoreable.py --top-only      # routine
-    python3 refetch_unscoreable.py                 # whole backlog
+    python3 refetch_unscoreable.py --top-only        # routine, 12 at a time
+    python3 refetch_unscoreable.py --top-only --limit 0   # no cap (expect blocks)
 """
 from __future__ import annotations
 
@@ -53,8 +58,13 @@ ANALYZED = ROOT / "10_output" / "_analyzed.json"
 # decides a client is scraping, and every request after that returns a ~288-char
 # block page. At 2s between requests it tripped partway through a 5-job trial, so
 # the delay is deliberately slower than the scrapers' own and rises after a block.
-SETTLE_MS = 4000
-BLOCKED_BACKOFF_MS = 30000
+SETTLE_MS = 6000
+BLOCKED_BACKOFF_MS = 60000
+# Default cap per run. Adzuna tolerates a short burst and then refuses: 7 of 12
+# succeeded, and the next run — 103 targets, no cap — recovered 0 of 5 before being
+# stopped. Small batches spaced hours apart get through; one long run does not, and
+# it deepens the block for the next attempt. Override with --limit.
+DEFAULT_BATCH = 12
 # Consecutive blocks after which continuing only deepens the ban. The remaining
 # jobs are left untouched for a later run rather than recorded as unrecoverable.
 MAX_CONSECUTIVE_BLOCKS = 3
@@ -239,6 +249,23 @@ async def refetch(targets: list[dict], headless: bool = True) -> tuple[dict[str,
             except Exception as e:
                 print(f"  [{i}/{len(targets)}] ✗ {type(e).__name__}: {str(e)[:50]}", flush=True)
                 continue
+            # An empty extraction on a page that answered 200 is soft throttling:
+            # the block page renders, so _page_state sees no 403 and no notice, but
+            # the selectors find nothing. Counting it as a plain miss reset the block
+            # counter, so alternating block/empty results never reached
+            # MAX_CONSECUTIVE_BLOCKS and the run kept hammering a site that had
+            # already stopped answering — 0 recoveries in 5 attempts, right after 7
+            # of 12 had succeeded. Treated as a block so the backoff applies.
+            if not desc:
+                blocks += 1
+                print(f"  [{i}/{len(targets)}] ⛔ empty extraction — treating as "
+                      f"throttling ({blocks}/{MAX_CONSECUTIVE_BLOCKS})", flush=True)
+                if blocks >= MAX_CONSECUTIVE_BLOCKS:
+                    print(f"  stopping: {len(targets) - i} jobs left for a later run "
+                          f"(site is refusing; retry in a few hours)", flush=True)
+                    break
+                await page.wait_for_timeout(BLOCKED_BACKOFF_MS)
+                continue
             # Same bar the exclusion uses, so a "recovered" job cannot come back
             # still unreviewable — a short or scripted result is not a recovery.
             if len(desc) < 400 or is_junk_description(desc):
@@ -261,7 +288,10 @@ async def refetch(targets: list[dict], headless: bool = True) -> tuple[dict[str,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--limit", type=int, default=DEFAULT_BATCH,
+                    help=f"jobs per run (default {DEFAULT_BATCH}); 0 for no cap. "
+                         f"Adzuna refuses after a short burst, so repeat small "
+                         f"batches hours apart rather than raising this")
     ap.add_argument("--source", help="only this source (e.g. adzuna)")
     ap.add_argument("--show-browser", action="store_true",
                     help="run with a visible browser (debugging a blocked site)")
@@ -295,7 +325,7 @@ def main() -> int:
     if args.source:
         targets = [j for j in targets if j.get("source") == args.source]
     targets = [j for j in targets if j.get("url") and not j.get("listing_removed")]
-    if args.limit:
+    if args.limit:  # 0 disables the cap
         targets = targets[: args.limit]
 
     from collections import Counter
