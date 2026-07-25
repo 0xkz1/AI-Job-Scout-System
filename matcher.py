@@ -798,10 +798,51 @@ _AMERICAS_RE = re.compile(
 _US_STATE_ABBR_RE = re.compile(r",\s*(ca|ny|tx|wa|ma|il|co|ga|or|fl|nc|va|pa|az)\b")
 
 
-def _classify_international_location(loc: str, is_remote: bool) -> dict | None:
+def _classify_international_location(loc: str, is_remote: bool,
+                                     country: str | None = None) -> dict | None:
     """Score clearly non-UK / region-tagged locations for the multi-country
     remote expansion. Returns a final match dict, or None to fall through to the
-    UK city tiers. UK-marked locations always fall through (return None)."""
+    UK city tiers. UK-marked locations always fall through (return None).
+
+    `country` (from _infer_country, i.e. the Adzuna country code) is checked BEFORE
+    the location text, because the text route needs every place name spelled out:
+    "Deutschland" matched and scored 0.20 as German on-site, while "Hagsfeld,
+    Karlsruhe" and "España" missed every alias and landed on 0.15 "location
+    unknown" — same countries, and 0.15 sat ABOVE the 0.20 that on-site abroad is
+    supposed to get, so an unrecognised spelling quietly scored better than a
+    recognised one.
+    """
+    if country:
+        cl = country.strip().lower()
+        if cl == "uk":
+            return None  # UK handled by the detailed city tiers below
+        if cl == "us":
+            if is_remote:
+                return {"score": 0.18,
+                        "notes": ["⚠️ US/Americas remote — timezone mismatch "
+                                  "(night shift from UK/JP)"]}
+            return {"score": 0.05, "notes": ["❌ US/Americas on-site (out of scope)"]}
+        if cl in _remote_target_countries():
+            if is_remote:
+                return {"score": 0.85,
+                        "notes": [f"✅ Remote — {country} (target market)"]}
+            return {"score": 0.20,
+                    "notes": [f"⚠️ {country} on-site (relocation out of scope)"]}
+        if cl in ("europe", "worldwide"):
+            if is_remote:
+                return {"score": 0.80 if cl == "europe" else 0.72,
+                        "notes": [f"✅ {country} remote (in-scope)"]}
+            return {"score": 0.20,
+                    "notes": [f"⚠️ {country} on-site (relocation out of scope)"]}
+        # A named country outside the target list is still abroad, so on-site is out
+        # of scope; remote is unknown-but-plausible rather than scored as a fit.
+        if is_remote:
+            return {"score": 0.45,
+                    "notes": [f"⚠️ Remote — {country} (not a target market; "
+                              f"verify timezone and right to work)"]}
+        return {"score": 0.10,
+                "notes": [f"❌ {country} on-site (out of scope)"]}
+
     if not loc:
         return None
     if any(m in loc for m in _UK_MARKERS):
@@ -862,10 +903,19 @@ def _get_remote_score(job_loc: str, work_style: str) -> tuple:
     return None, None
 
 
-def calculate_location_match(job_location: str, job_work_style: str, user_exp: dict) -> dict:
+def calculate_location_match(job_location: str, job_work_style: str, user_exp: dict,
+                             country: str | None = None) -> dict:
     """
     Match location and work style preferences.
     Returns 0.0-1.0 to allow actual variance in composite score.
+
+    `country` is the authoritative country label when the caller has one (see
+    _infer_country, which reads the Adzuna country code out of source_site). Pass
+    it: matching on the location TEXT alone depends on a hand-kept list of place
+    names, so "Deutschland" scored 0.20 as German on-site while "Hagsfeld,
+    Karlsruhe" and "España" fell through to 0.15 "location unknown" — same country,
+    different spelling. The alias list cannot be completed by hand; the country code
+    does not need to be.
     """
     user_loc = user_exp.get("location", "").lower()
     job_loc = (job_location or "").lower()
@@ -881,7 +931,7 @@ def calculate_location_match(job_location: str, job_work_style: str, user_exp: d
     # International region classification (multi-country remote expansion).
     # Fires only for clearly non-UK / region-tagged locations; UK + generic
     # "remote" fall through to the detailed tiers below.
-    intl = _classify_international_location(job_loc, is_remote)
+    intl = _classify_international_location(job_loc, is_remote, country)
     if intl is not None:
         return intl
 
@@ -1750,7 +1800,10 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     skill_match = calculate_skill_match(job_skills, user_skills, job.get("title", ""),
                                         job_description, llm_coverage=llm_coverage)
     exp_match = calculate_experience_match(job_level, user_exp)
-    loc_match = calculate_location_match(job_location, job_work_style, user_exp)
+    # Pass the inferred country so location scoring does not depend on whether the
+    # place name happens to be in _COUNTRY_ALIASES.
+    loc_match = calculate_location_match(job_location, job_work_style, user_exp,
+                                         country=_infer_country(job))
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
     # Reuse pre-existing LLM context score instead of re-scoring: LLM scores
     # are expensive and must survive plain --reanalyze runs. Accepts the

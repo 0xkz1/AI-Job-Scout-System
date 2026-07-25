@@ -1,4 +1,10 @@
-"""Recompute stored skill scores + composite/tier after a matcher logic change.
+"""Recompute stored skill AND location scores, plus composite/tier, after a matcher
+logic change.
+
+Despite the name it covers location as well: both are deterministic sub-scores, and
+both were unreachable once stored. LLM context scores, summaries and reasoning are
+still left alone — those are expensive and unrelated to matcher rules.
+
 
 Local-only (no LLM calls, runs in seconds): rereads every job in
 _analyzed.json, reruns calculate_skill_match with the CURRENT matcher logic,
@@ -20,7 +26,10 @@ sys.path.insert(0, str(ROOT))
 import yaml  # noqa: E402
 from matcher import (  # noqa: E402
     DEFAULT_WEIGHTS,
+    _infer_country,
+    calculate_location_match,
     calculate_skill_match,
+    load_user_experience,
     load_user_skills,
 )
 
@@ -30,6 +39,7 @@ ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
 def main():
     db = json.loads(ANALYZED_PATH.read_text())
     user_skills = load_user_skills()
+    user_exp = load_user_experience()
     config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
 
     changed, tier_changed = 0, 0
@@ -58,6 +68,21 @@ def main():
                 f"{job.get('company','?')[:22]} — {job.get('title','?')[:45]}"
             )
         m["skills"] = new_skill
+
+        # Location too, for the same reason the weights are re-read from config:
+        # a stored sub-score makes a rule change unreachable for jobs already in the
+        # DB. Location scoring now takes the country label rather than matching place
+        # names against a hand-kept alias list, which moved 45 jobs — "España" and
+        # "Hagsfeld, Karlsruhe" had been scoring 0.15 "location unknown", ABOVE the
+        # 0.20 that on-site abroad is meant to get.
+        if m.get("location"):
+            m["location"] = calculate_location_match(
+                job.get("location", ""),
+                job.get("analysis", {}).get("work_style", ""),
+                user_exp,
+                country=_infer_country(job),
+            )
+
         # Weights come from config, NOT from m["weights"] — that field records the
         # weights this entry was LAST scored with, so reusing it made a weight
         # change in config.yaml permanently unreachable for already-scored jobs.
