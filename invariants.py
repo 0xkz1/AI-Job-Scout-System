@@ -346,13 +346,30 @@ def check_review_scores_track_rubric(config: dict) -> list[str]:
 # ~/.hermes/profiles/archivist/cron/jobs.json — so it is mirrored here and must be
 # updated alongside it.
 SITE_TIMEOUT_SECONDS = 1500
-# Observed per-search overhead: one navigation plus a fixed 2s settle per page
-# (scraper_reed / scraper_adzuna both wait_for_timeout(2000)).
-_SECONDS_PER_PAGE = 2.0
-_SECONDS_PER_SEARCH_SETUP = 2.0
-# Leave room for description fetches, which are serial at 1s each for NEW jobs
-# only. This is the number of new postings a night must be able to absorb.
-_NEW_DESCRIPTION_HEADROOM = 200
+# MEASURED seconds per search, per site. Two earlier attempts at this were wrong:
+#   1. Modelling it as "2s setup + 2s per page" gave 14s at depth 6 — off by 5x,
+#      because page navigation is not the cost. The per-job description fetch is:
+#      serial, 1s apart, paid for every NEW posting. Dismissing it as cached was
+#      backwards, since a productive site is mostly new postings each night.
+#   2. Applying reed's measured 68s to every site flagged all five, including
+#      guardian, which demonstrably completes.
+# Sites differ by an order of magnitude, so each carries its own number:
+#   reed      68.0  observed directly (37 searches in 42 min, depth 6)
+#   guardian  22.6  back-computed from a completing run (1421s / 63 searches)
+#   adzuna     ---  API path now; the old Playwright timeout says only ">23.8"
+#   indeed     ---  its 27s runs were instant Cloudflare failures, not work
+# A site with no entry is NOT judged: warning off a guess would train the reader
+# to ignore this check. Add a number only from `time run.py --site <site>`.
+# Stored as (seconds_per_search, depth_it_was_measured_at) so lowering depth is
+# reflected instead of ignored. Cost splits into a fixed page walk — ~2s of settle
+# per page — and the description fetch, which scales with how many postings the
+# depth returns; both fall as depth falls, so the figure is scaled linearly by
+# depth. Linear is an approximation, deliberately kept simple: it is calibrated at
+# the depth actually measured, and re-measuring is cheap (`time run.py --site X`).
+_SECONDS_PER_SEARCH = {
+    "reed": (68.0, 6),
+    "guardian": (22.6, 3),
+}
 
 
 def check_scrape_fits_its_timeout(config: dict) -> list[str]:
@@ -376,16 +393,21 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
     for site in (config.get("sites") or []):
         if site == "remote_apis":  # API path, no page walking
             continue
+        measured = _SECONDS_PER_SEARCH.get(site)
+        if measured is None:
+            continue  # unmeasured — see _SECONDS_PER_SEARCH
+        rate, measured_depth = measured
         depth = max_pages_for(site, config)
-        walk = searches * (_SECONDS_PER_SEARCH_SETUP + depth * _SECONDS_PER_PAGE)
-        budget = SITE_TIMEOUT_SECONDS - _NEW_DESCRIPTION_HEADROOM
-        if walk > budget:
+        per_search = rate * depth / measured_depth
+        needed = searches * per_search
+        if needed > SITE_TIMEOUT_SECONDS:
             out.append(
-                f"{site}: page walking alone needs ~{walk:.0f}s of the "
-                f"{SITE_TIMEOUT_SECONDS}s cron timeout ({searches} searches x depth "
-                f"{depth}), leaving under {_NEW_DESCRIPTION_HEADROOM}s for new "
-                f"descriptions (1s each, serial). Expect exit 124 and truncated "
-                f"postings. Lower max_pages_per_site[{site}]."
+                f"{site}: ~{needed:.0f}s needed against a {SITE_TIMEOUT_SECONDS}s cron "
+                f"timeout ({searches} searches x {per_search:.0f}s measured, depth "
+                f"{depth}). Expect exit 124 and truncated postings. Cut `keywords` x "
+                f"`locations` to at most {int(SITE_TIMEOUT_SECONDS / per_search)} "
+                f"searches, or make the description fetch concurrent — depth is not the "
+                f"main cost, the serial 1s-per-job description fetch is."
             )
     return out
 

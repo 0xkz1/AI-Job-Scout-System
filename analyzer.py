@@ -646,9 +646,22 @@ Return JSON: {{"experience_level": "internship|entry_level|mid|senior|director",
 
 # --- Main analysis ---
 
-def analyze_job(job: dict) -> dict:
+def analyze_job(job: dict, skip_llm: bool = False) -> dict:
     """
     Run all analyzers on a job and return enriched data.
+
+    skip_llm=True stops before the two LLM top-ups (skill extraction when the
+    keyword pass finds <3, and experience/work-style when the rules return
+    "unknown"). Everything the filter reads — salary, experience_level,
+    employment_types, work_style — still gets computed, because all of it comes
+    from regex and rules; only the *quality* of those fields degrades.
+
+    That split exists so filtering can run BEFORE the expensive calls. The
+    pipeline used to analyse every scraped job, then filter, so 35% of the LLM
+    spend went to postings dropped moments later on a title keyword. Run the cheap
+    pass, filter, then re-run without skip_llm on what survived: analyze_job is
+    idempotent, and re-analysing a filtered-in job costs only the LLM top-ups it
+    actually needs.
     """
     title = job.get("title", "")
     description = job.get("description", "") or job.get("snippet", "")
@@ -675,7 +688,7 @@ def analyze_job(job: dict) -> dict:
 
     # P0: Ollama fallback for skill extraction
     # If keyword extraction yields < 3 skills, try Ollama
-    if len(skills) < 3:
+    if len(skills) < 3 and not skip_llm:
         ollama_skills = extract_skills_ollama(title, description)
         if ollama_skills:
             # Merge and deduplicate
@@ -687,7 +700,7 @@ def analyze_job(job: dict) -> dict:
 
     # P1: Ollama fallback for experience_level and work_style
     # If keyword classification returns "unknown", try Ollama
-    if experience_level == "unknown" or work_style == "unknown":
+    if (experience_level == "unknown" or work_style == "unknown") and not skip_llm:
         ollama_class = classify_experience_work_style_ollama(title, description)
         if experience_level == "unknown":
             experience_level = ollama_class.get("experience_level", "unknown")

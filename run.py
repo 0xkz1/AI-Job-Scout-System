@@ -487,7 +487,12 @@ async def main():
     config = load_config()
     from filter import filter_jobs, print_filter_summary
     if args.pages:
+        # Clear the per-site table too, or --pages is silently ignored: selection.
+        # max_pages_for prefers max_pages_per_site and only falls back to
+        # max_pages_per_search, so setting the fallback alone left the Streamlit
+        # page slider (and this flag) with no effect on any configured site.
         config["max_pages_per_search"] = args.pages
+        config["max_pages_per_site"] = {}
 
     # --- Fetch descriptions from detail pages ---
     if args.fetch_descriptions:
@@ -1031,7 +1036,60 @@ async def main():
         print(f"\n{'='*60}")
         print("🔬 ANALYZING NEW JOBS...")
         print(f"{'='*60}")
-        new_analyzed = [analyze_job(j) for j in (new_jobs + no_url_jobs)]
+        # One job at a time, with the failure contained. This was a single list
+        # comprehension, so an exception on any job discarded the analysis of every
+        # job before it: an adzuna run scraped 774 postings, then died inside this
+        # line when every LLM provider was exhausted, and stored none of them. The
+        # scrape survived only because save_raw_to_saved had already staged it.
+        #
+        # analyze_job reaches call_llm (extract_skills_ollama), so exhausting the
+        # provider chain raises here — a normal end-state after a bulk day, not an
+        # exceptional one. It must cost that job's enrichment, not the whole run.
+        _to_analyze = new_jobs + no_url_jobs
+
+        def _analyze_all(jobs, skip_llm, label):
+            """Analyse a batch, containing per-job failures. Returns (results, fails)."""
+            out, fails = [], 0
+            for i, job in enumerate(jobs, 1):
+                try:
+                    out.append(analyze_job(job, skip_llm=skip_llm))
+                except Exception as e:
+                    fails += 1
+                    if fails <= 3:
+                        print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
+                              f"{type(e).__name__}: {str(e)[:70]}")
+                    out.append(job)  # keep the posting, unenriched
+                if i % 100 == 0 or i == len(jobs):
+                    print(f"  … {i}/{len(jobs)} {label} ({fails} failed)", flush=True)
+            return out, fails
+
+        # Pass 1, no LLM. Everything passes_filter reads (salary, experience_level,
+        # employment_types, work_style) comes from regex and rules, so the filter can
+        # decide on this alone.
+        print(f"  ① regex/rule pass over {len(_to_analyze)} jobs (no LLM)")
+        _cheap, _ = _analyze_all(_to_analyze, True, "scanned")
+
+        # Filter here, before paying for anything. Analysis used to run in full over
+        # every scraped job and the filter came ~60 lines later, so ~35% of the LLM
+        # spend went to postings dropped immediately afterwards — 213 of 890 on a
+        # title keyword alone, which needs no model at all.
+        _keep, _drop = filter_jobs(_cheap, config)
+        print(f"  ② filter: {len(_keep)} kept, {len(_drop)} dropped before any LLM call")
+
+        # Pass 2, LLM top-ups, on survivors only. analyze_job is idempotent, and the
+        # top-ups only fire where the cheap pass fell short (<3 skills, or an
+        # "unknown" level), so this re-run costs just the calls that add something.
+        print(f"  ③ LLM enrichment for {len(_keep)} kept jobs")
+        _enriched, _analyze_failures = _analyze_all(_keep, False, "enriched")
+        if _analyze_failures:
+            print(f"  ⚠ {_analyze_failures}/{len(_keep)} jobs kept without LLM "
+                  f"enrichment (likely every provider rate-limited). Re-run "
+                  f"`run.py --reanalyze` once keys recover.")
+
+        # Dropped jobs stay in the DB with their cheap analysis: _analyzed.json is
+        # deliberately a superset of what passes, so loosening a filter keyword later
+        # does not need a re-scrape.
+        new_analyzed = _enriched + _drop
 
         print(f"\n{'='*60}")
         print("🎯 MATCHING AGAINST YOUR PROFILE...")

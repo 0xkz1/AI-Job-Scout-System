@@ -30,6 +30,13 @@ ARCHIVE_DIR = REVIEWS_DIR / ".archive"      # old versions saved on re-review / 
 # shortlisted applications and its output gates what actually gets sent.
 REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "mistral-medium-latest")
 
+# Single source of truth for which Mistral keys exist, in priority order. Read from
+# llm_client rather than restated here: the two lists drifted before, and a chain
+# entry with no dispatch branch fails every call to that provider.
+from llm_client import MISTRAL_PROVIDERS as _MISTRAL_PROVIDERS  # noqa: E402
+
+MISTRAL_KEYS = tuple(_MISTRAL_PROVIDERS)
+
 
 def _review_chain() -> list[tuple[str, str]]:
     """Ordered (provider, model) candidates for a review call, tried in turn.
@@ -43,21 +50,23 @@ def _review_chain() -> list[tuple[str, str]]:
     FIRST; the free reasoning model (deepseek-v4-flash) sits low because it can
     silently return empty content on long docs (burns max_tokens on hidden
     reasoning) — llm_client now raises on empty so the chain falls through, but
-    it's still a poor primary. The four mistral entries use independent API
-    keys (own rate limits); nvidia is a fully independent provider (survives a
-    mistral.ai outage that would take out all four keys at once):
-      1. mistral            / REVIEW_MODEL                      — strong, paid primary
-      2. mistral-backup     / REVIEW_MODEL                      — 2nd key, own rate limit
-      3. mistral-tertiary   / REVIEW_MODEL                      — 3rd key (MISTRAL_API_KEY_TERTIARY)
-      4. mistral-quaternary / REVIEW_MODEL                      — 4th key (MISTRAL_API_KEY_QUATERNARY)
-      5. nvidia             / mistralai/mistral-medium-3.5-128b — independent provider (NIM)
-      6. opencode           / deepseek-v4-flash-free            — FREE reasoning model (Zen)
-      7. opencode           / big-pickle                        — independent Zen model
-      8. ollama             / local                             — offline last resort
+    it's still a poor primary. Every MISTRAL_API_KEY* in the environment becomes an
+    entry (each key has its own allowance); nvidia is a fully independent provider,
+    so it survives a mistral.ai outage that would take out all of them at once:
 
-    Entries whose key is unset raise on call and are skipped, so a missing
-    MISTRAL_API_KEY_QUATERNARY is harmless. Dead accounts (stepfun 402, zai 429)
-    are left out; add back via REVIEW_FALLBACKS once recharged.
+      1..N. mistral / mistral-backup / mistral-tertiary / ...  (see MISTRAL_KEYS)
+      N+1.  nvidia    / mistralai/mistral-medium-3.5-128b — independent (NIM)
+      N+2.  opencode  / deepseek-v4-flash-free            — FREE reasoning (Zen)
+      N+3.  opencode  / big-pickle                        — independent Zen model
+      N+4.  ollama    / local                             — offline last resort
+
+    Key depth is not redundancy for its own sake: a single day of work (182 reviews
+    plus analysis) exhausted the first three keys AND nvidia AND stepfun, leaving
+    one live cloud provider. Free-tier Mistral allowances are monthly, so depth buys
+    throughput for exactly that kind of bulk day. Entries whose key is unset raise
+    on call and are skipped, so listing a key that does not exist is harmless —
+    which is why the list is fixed here rather than probed from os.environ. Dead
+    accounts (zai 429) are left out; add back via REVIEW_FALLBACKS once recharged.
     """
     env = os.environ.get("REVIEW_FALLBACKS", "").strip()
     if env:
@@ -68,10 +77,7 @@ def _review_chain() -> list[tuple[str, str]]:
         if chain:
             return _drop_quarantined(chain)
     return _drop_quarantined([
-        ("mistral", REVIEW_MODEL),
-        ("mistral-backup", REVIEW_MODEL),
-        ("mistral-tertiary", REVIEW_MODEL),
-        ("mistral-quaternary", REVIEW_MODEL),
+        *((provider, REVIEW_MODEL) for provider in MISTRAL_KEYS),
         ("nvidia", "mistralai/mistral-medium-3.5-128b"),
         ("opencode", "deepseek-v4-flash-free"),
         ("opencode", "big-pickle"),

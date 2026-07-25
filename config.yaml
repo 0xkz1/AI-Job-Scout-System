@@ -15,15 +15,25 @@ include_levels:
 - entry_level
 - mid
 - internship
+# Keyword x location is the multiplier on everything downstream: each pair is one
+# serial search (~68s on reed), and each job it returns costs 2-5 LLM calls to
+# analyse. Both lists are therefore kept to terms that actually yield.
+#
+# Dropped 2026-07-26, measured as share of scraped jobs reaching the top 30%:
+#   Design Engineer     110 jobs -> 3  (2.7%)  pulls in mechanical/electrical/
+#                                              geotechnical roles wholesale
+#   Builder              26 -> 0  (0%)
+#   Development Support   2 -> 0  (0%)
+#   Birmingham           61 -> 3  (4.9%)
+# Kept despite a low rate, by preference: Glasgow (39 -> 2), Dundee (10 -> 1).
+# Best performers, for reference: Creative Technologist 66.7%, Technical Artist
+# 42.9%, Digital Designer 40%, Web Designer 40%, Remote 37.9%, Edinburgh 33.3%.
 keywords:
 - Creative Technologist
-- Development Support
 - Technical Artist
 - Web Developer
 - Web Designer
 - Digital Designer
-- Design Engineer
-- Builder
 - Designer
 locations:
 - Edinburgh
@@ -31,7 +41,6 @@ locations:
 - Glasgow
 - London
 - Manchester
-- Birmingham
 - Remote
 max_pages_per_search: 3
 
@@ -46,22 +55,23 @@ max_pages_per_search: 3
 # page 4+: reed 157 (22% of its 706, incl. 18 of the current top-30% set), adzuna
 # 0. So reed keeps depth, adzuna does not.
 #
-# reed sits at 6, not 10, on a timing budget: page walking costs ~63 x (2 + 2 x
-# depth) seconds, so depth 10 = ~1386s against the 1500s cap, leaving ~114s for
-# description fetches. Those are serial with a 1s delay (scraper_helper says
-# concurrency was tried and caused EPIPE), and only NEW jobs pay it — every one of
-# reed's current 706 is cached, which is why depth 10 survived until the
-# multi-country expansion produced a night with enough new postings to blow it.
-# Depth 6 = ~882s, leaving room for ~600 new descriptions.
+# reed sits at 3 on a MEASURED timing budget, not a modelled one. A full run on
+# 2026-07-26 took 68s per search at depth 6 — the earlier estimate of 14s counted
+# only page navigation, and page navigation is not the cost. The description fetch
+# is: serial, 1s apart, paid for every NEW posting, ~54 of the 68 seconds.
 #
-# Known cost of this: reed pages 7-10 hold only 14 jobs but 10 of them are in the
-# top 30% — a 71% hit rate against 11% on page 1, because results are not ordered
-# by relevance. Depth 6 gives that up to stay inside the timeout. Raising it back
-# needs the description fetch made concurrent first (or the cap raised), not just
-# a bigger number here — a site that times out returns less than a shallow run
-# that finishes. Re-measure before changing any of these.
+# At 30 searches (after the keyword/location cut above), depth 6 needs ~2040s
+# against the 1500s cap; depth 3 needs ~1050s and fits with real headroom.
+#
+# Depth 3 costs nothing measurable here: re-counting the top 30% AFTER the keyword
+# cut, reed page 4 contributes 0 — the 3 jobs it used to supply all came from
+# "Design Engineer", now dropped. Pages 5 and 8-10 still hold 8 between them, but
+# reaching page 10 costs ~2x the whole time budget for those 8. Raising depth again
+# needs the description fetch made concurrent (scraper_helper notes an earlier
+# attempt caused EPIPE) or a higher cap — not just a bigger number here, since a
+# site that times out returns less than a shallow run that finishes.
 max_pages_per_site:
-  reed: 6
+  reed: 3
   adzuna: 3
   guardian: 3
   indeed: 3

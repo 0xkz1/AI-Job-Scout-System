@@ -49,6 +49,27 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 call_llm_counter = 0  # module-level call counter for structured logging
 
+# provider name -> env var holding its key. One Mistral account per key, each with
+# its own monthly allowance, so depth here is throughput: a single bulk day (182
+# reviews plus analysis) drained three keys, nvidia and stepfun.
+#
+# A table rather than an if/elif per key: adding one used to mean editing this
+# dispatch AND reviewer's chain list, and the review chain silently kept working
+# while the analysis chain in .env lagged a key behind. Keep the ORDER — reviewer
+# and key_quarantine both treat it as priority, best first.
+MISTRAL_PROVIDERS = {
+    "mistral": "MISTRAL_API_KEY",
+    "mistral-backup": "MISTRAL_API_KEY_BACKUP",
+    "mistral-tertiary": "MISTRAL_API_KEY_TERTIARY",
+    "mistral-quaternary": "MISTRAL_API_KEY_QUATERNARY",
+    "mistral-quinary": "MISTRAL_API_KEY_QUINARY",
+    "mistral-senary": "MISTRAL_API_KEY_SENARY",
+    "mistral-septenary": "MISTRAL_API_KEY_SEPTENARY",
+    "mistral-octonary": "MISTRAL_API_KEY_OCTONARY",
+    "mistral-nonary": "MISTRAL_API_KEY_NONARY",
+    "mistral-denary": "MISTRAL_API_KEY_DENARY",
+}
+
 
 def _quarantine_filter_chain(chain: list[str]) -> list[str]:
     """Skip providers currently sidelined by key_quarantine (import kept lazy so
@@ -164,17 +185,9 @@ def _call_provider(
     """Route to the appropriate provider implementation. `model` overrides the
     provider's env-configured model for this call only (e.g. a stronger model
     for document review)."""
-    if provider == "mistral":
-        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model)
-    elif provider == "mistral-backup":
+    if provider in MISTRAL_PROVIDERS:
         return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
-                              key_env="MISTRAL_API_KEY_BACKUP")
-    elif provider == "mistral-tertiary":
-        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
-                              key_env="MISTRAL_API_KEY_TERTIARY")
-    elif provider == "mistral-quaternary":
-        return _call_mistral(messages, system_prompt, temperature, max_tokens, retries, model,
-                              key_env="MISTRAL_API_KEY_QUATERNARY")
+                              key_env=MISTRAL_PROVIDERS[provider])
     elif provider == "stepfun":
         return _call_stepfun(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider == "openrouter":

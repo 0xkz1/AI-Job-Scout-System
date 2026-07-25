@@ -203,33 +203,39 @@ def test_unscoreable_review_is_exempt_from_score_drift(monkeypatch, config, tmp_
     assert invariants.check_review_scores_track_rubric(config) == []
 
 
-def _scrape_config(depth):
+def _scrape_config(searches, sites=("reed",)):
+    """searches = len(keywords) x len(locations)."""
     return {
-        "keywords": [f"k{i}" for i in range(9)],
-        "locations": [f"l{i}" for i in range(7)],
-        "sites": ["reed", "adzuna"],
+        "keywords": [f"k{i}" for i in range(searches)],
+        "locations": ["l0"],
+        "sites": list(sites),
         "max_pages_per_search": 3,
-        "max_pages_per_site": {"reed": depth, "adzuna": depth},
     }
 
 
-def test_depth_that_exceeds_the_cron_timeout_is_reported():
-    """Depth 10 over 63 serial searches needs ~1386s of a 1500s cap, so any night
-    with enough new postings is killed at exit 124 and stores truncated data."""
-    found = invariants.check_scrape_fits_its_timeout(_scrape_config(10))
-    assert len(found) == 2
+def test_search_count_that_exceeds_the_cron_timeout_is_reported():
+    """reed measured 68s per search, so 63 searches needs ~4300s of a 1500s cap."""
+    found = invariants.check_scrape_fits_its_timeout(_scrape_config(63))
+    assert len(found) == 1
     assert "exit 124" in found[0]
 
 
-def test_depth_within_the_cron_timeout_is_silent():
-    assert invariants.check_scrape_fits_its_timeout(_scrape_config(3)) == []
+def test_search_count_within_the_cron_timeout_is_silent():
+    """At 68s per search, 1500s affords 22 — 20 must pass."""
+    assert invariants.check_scrape_fits_its_timeout(_scrape_config(20)) == []
+
+
+def test_unmeasured_site_is_not_judged():
+    """Guessing a rate for an unmeasured site would produce warnings the reader
+    learns to ignore. adzuna and indeed have no observed per-search figure."""
+    assert invariants.check_scrape_fits_its_timeout(
+        _scrape_config(63, sites=("adzuna", "indeed"))) == []
 
 
 def test_api_only_site_is_not_charged_for_page_walking():
-    """remote_apis has no page walk, so it must not be judged on depth."""
-    config = _scrape_config(10)
-    config["sites"] = ["remote_apis"]
-    assert invariants.check_scrape_fits_its_timeout(config) == []
+    """remote_apis has no page walk, so it must not be judged on search count."""
+    assert invariants.check_scrape_fits_its_timeout(
+        _scrape_config(63, sites=("remote_apis",))) == []
 
 
 def _analyzed(monkeypatch, tmp_path, jobs):

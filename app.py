@@ -231,7 +231,11 @@ with tab_scraper:
             default=st.session_state.config.get("sites", ["indeed"]),
         )
         max_pages = st.slider(
-            "Pages per search", 1, 10, st.session_state.config.get("max_pages_per_search", 3)
+            "Pages per search", 1, 10, st.session_state.config.get("max_pages_per_search", 3),
+            help="Overrides config.yaml's per-site depth (max_pages_per_site) for this "
+                 "run — every site uses this number. Depth is the main driver of "
+                 "runtime: reed measured ~68s per search at depth 6, so raising this "
+                 "past 3 pushes a full run past the 1500s nightly timeout.",
         )
         levels = st.multiselect(
             "Experience Levels",
