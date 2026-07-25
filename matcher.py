@@ -1398,7 +1398,17 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
                     reasoning = (f"{reasoning_en}\n\n**和訳:** {reasoning_ja}"
                                  if reasoning_ja else reasoning_en)
 
-                return {"score": round(score, 2), "reasoning": reasoning, "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja}
+                # Which model produced this, not just "an LLM did". context carries
+                # 0.64 of the composite weight, and the provider chain silently
+                # changes what answers: when all ten Mistral keys hit their monthly
+                # limit mid-run, scoring fell through to ollama, recorded
+                # indistinguishably. Stored so a weaker model's scores can be found
+                # and refreshed later — `--reanalyze --llm-context` skips anything
+                # already tagged "llm", so without this they never would be.
+                import llm_client as _lc
+                return {"score": round(score, 2), "reasoning": reasoning,
+                        "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja,
+                        "provider": _lc.last_provider}
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
         return None
@@ -1757,6 +1767,9 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             "reasoning_en": old_match.get("context_reasoning_en", ""),
             "reasoning_ja": old_match.get("context_reasoning_ja", ""),
             "top_terms": old_match.get("context_top_terms", []),
+            # Carry the recorded provider forward, or a rerun that reuses the stored
+            # score would blank it and lose the only record of what produced it.
+            "provider": old_match.get("context_provider"),
         }
     elif isinstance(legacy_ctx, dict) and "score" in legacy_ctx:
         ctx_match = legacy_ctx
@@ -1847,6 +1860,10 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "context_reasoning_ja": ctx_match.get("reasoning_ja", ""),
         "context_top_terms": ctx_match.get("top_terms", []),
         "context_source": ctx_source,
+        # context_source only says "llm" vs "tfidf"; this says which model, so a
+        # score produced by a fallback after the primary keys ran out can be told
+        # apart from one produced by the intended model and refreshed on its own.
+        "context_provider": ctx_match.get("provider"),
         "title_relevance": relevance,
         "weights": weights,
         "summary_en": summary_en,

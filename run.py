@@ -1058,6 +1058,12 @@ async def main():
                     if fails <= 3:
                         print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
                               f"{type(e).__name__}: {str(e)[:70]}")
+                        # Location too, not just the message. A bare
+                        # "TypeError: unhashable type: 'list'" is unactionable —
+                        # the frame is what says which field carried the list.
+                        import traceback
+                        print("    " + "    ".join(
+                            traceback.format_exc(limit=4).splitlines(True)[-6:]).rstrip())
                     out.append(job)  # keep the posting, unenriched
                 if i % 100 == 0 or i == len(jobs):
                     print(f"  … {i}/{len(jobs)} {label} ({fails} failed)", flush=True)

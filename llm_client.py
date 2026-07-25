@@ -49,6 +49,22 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 call_llm_counter = 0  # module-level call counter for structured logging
 
+# Provider that answered the most recent successful call_llm. Callers that store a
+# model's judgement alongside it read this to record WHICH model judged.
+#
+# Needed because the chain silently changes what produced a score. On 2026-07-26
+# all ten Mistral keys hit their monthly limit mid-run, so context scores began
+# coming from ollama and TF-IDF instead — recorded identically, since
+# context_source only distinguishes "llm" from "tfidf". With context carrying 0.64
+# of the composite weight, a DB can end up holding scores from three different
+# models with no way to tell them apart, and `--reanalyze --llm-context` skips
+# anything already tagged "llm", so the weaker ones are never refreshed.
+#
+# Module-level rather than a changed return type: call_llm returns a plain string
+# to a dozen call sites, and widening that signature to thread one optional field
+# through all of them would be a worse trade.
+last_provider: str | None = None
+
 # provider name -> env var holding its key. One Mistral account per key, each with
 # its own monthly allowance, so depth here is throughput: a single bulk day (182
 # reviews plus analysis) drained three keys, nvidia and stepfun.
@@ -156,7 +172,11 @@ def call_llm(
     for i, prov in enumerate(chain):
         is_last = i == len(chain) - 1
         try:
-            return _call_provider(prov, messages, system_prompt, temperature, max_tokens, retries, model)
+            out = _call_provider(prov, messages, system_prompt, temperature, max_tokens,
+                                 retries, model)
+            global last_provider
+            last_provider = prov
+            return out
         except ValueError as e:
             # Missing API key — skip to the next provider in the chain
             if is_last:
