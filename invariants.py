@@ -479,13 +479,21 @@ def check_every_site_still_yields(config: dict) -> list[str]:
 
 
 def check_truncated_descriptions_get_enriched(config: dict) -> list[str]:
-    """Jobs held out for a truncated description must not pile up inside the top-%.
+    """Report how much of the enrichment backlog would outrank real postings.
 
-    The Adzuna API returns only a 500-char summary, so every job from it is parked
-    as unreviewable by design. That is correct — but it makes a silent failure
-    possible in the other direction: if the enrichment step stops running, adzuna
-    keeps contributing to the ranking while none of it can ever be reviewed, and
-    nothing looks broken because the jobs are present and scored.
+    The Adzuna API returns a 500-char summary and has no job-details endpoint at
+    all (every candidate path 404s), so its postings arrive unreviewable by design.
+    Measured over 980 filter-passing jobs, a summary does not merely carry less
+    information — it scores HIGHER than a full description: composite 0.440 vs
+    0.340, context 0.454 vs 0.398. The reason is structural. A 500-char excerpt is
+    the opening pitch; the requirements and constraints are what got cut, so the
+    model reads only what the posting is selling. That is the same failure as the
+    invented review rubric, one stage earlier.
+
+    So these are excluded from ranking too, not just from review, and this check
+    measures the size of what is being held back rather than a fault. It is worth
+    surfacing because the exclusion is invisible: the jobs are present and scored,
+    and only a comparison against full-text postings shows the inflation.
     """
     from filter import passes_filter
     from selection import _dedupe, stage_percent, top_percent_count
@@ -506,9 +514,11 @@ def check_truncated_descriptions_get_enriched(config: dict) -> list[str]:
     if not stuck:
         return []
     return [
-        f"{len(stuck)} of the top {pct:g}% ({len(band)} jobs) hold only a truncated API "
-        f"summary, so no stage can review them. Run "
-        f"`refetch_unscoreable.py --top-only` to fetch their detail pages."
+        f"{len(stuck)} jobs would sit in the top {pct:g}% on a 500-char API summary "
+        f"alone (band of {len(band)} before exclusions). Summaries score ~0.10 higher "
+        f"than full text because the cut part is the requirements, so these are held "
+        f"out of ranking as well as review. Recover them a batch at a time with "
+        f"`refetch_unscoreable.py --top-only` — adzuna refuses long runs."
     ]
 
 

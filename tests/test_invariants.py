@@ -286,9 +286,11 @@ def test_site_reporting_under_alias_sources_counts_as_yielding(monkeypatch, tmp_
     assert invariants.check_every_site_still_yields({"sites": ["remote_apis"]}) == []
 
 
-def test_truncated_summaries_stuck_in_the_top_band_are_reported(monkeypatch, tmp_path):
-    """Adzuna's API only returns a 500-char summary, so its jobs rank but cannot be
-    reviewed. If enrichment stops running they accumulate while looking healthy."""
+def test_truncated_summaries_in_the_top_band_are_reported(monkeypatch, tmp_path):
+    """Adzuna's API returns only a 500-char summary, and a summary scores HIGHER than
+    full text (0.440 vs 0.340) because the cut part is the requirements. So these are
+    held out of ranking as well as review, and the size of that backlog is worth
+    surfacing — the exclusion is otherwise invisible."""
     jobs = [_job(title=f"D{i}", composite=0.9 - i * 0.01) for i in range(20)]
     jobs[0]["description_truncated"] = True
     jobs[1]["description_truncated"] = True
@@ -296,7 +298,9 @@ def test_truncated_summaries_stuck_in_the_top_band_are_reported(monkeypatch, tmp
     monkeypatch.setattr("filter.passes_filter", lambda j, c: (True, ""))
     found = invariants.check_truncated_descriptions_get_enriched(
         {"generation_top_percent": 30, "review_top_percent": 30})
-    assert found and "truncated API summary" in found[0]
+    assert found
+    assert "500-char API summary" in found[0]
+    assert "refetch_unscoreable.py --top-only" in found[0], "must name the recovery step"
 
 
 def test_full_descriptions_in_the_top_band_are_silent(monkeypatch, tmp_path):
@@ -305,6 +309,37 @@ def test_full_descriptions_in_the_top_band_are_silent(monkeypatch, tmp_path):
     monkeypatch.setattr("filter.passes_filter", lambda j, c: (True, ""))
     assert invariants.check_truncated_descriptions_get_enriched(
         {"generation_top_percent": 30, "review_top_percent": 30}) == []
+
+
+def test_truncated_summaries_really_do_outscore_full_text():
+    """The measurement the exclusion rests on, asserted against the live DB.
+
+    A 500-char summary scoring HIGHER than a full description is counter-intuitive
+    enough that it needs guarding: if it ever reverses, excluding these from ranking
+    stops being justified and this test should fail loudly rather than let the
+    exclusion persist on a stale premise. Skipped when the DB has too few of either
+    kind to compare.
+    """
+    import json
+    import statistics
+
+    from filter import passes_filter
+    from selection import _dedupe, is_unscoreable, load_config
+
+    if not invariants.ANALYZED.exists():
+        pytest.skip("no live DB")
+    config = load_config()
+    pool = [j for j in _dedupe(json.loads(invariants.ANALYZED.read_text(encoding="utf-8")))
+            if j.get("match") and passes_filter(j, config)[0]]
+    trunc = [j["match"]["composite_score"] for j in pool if j.get("description_truncated")]
+    full = [j["match"]["composite_score"] for j in pool if not is_unscoreable(j)]
+    if len(trunc) < 30 or len(full) < 30:
+        pytest.skip("not enough of each kind to compare")
+    assert statistics.mean(trunc) > statistics.mean(full), (
+        f"summaries no longer outscore full text (summary {statistics.mean(trunc):.3f} "
+        f"vs full {statistics.mean(full):.3f}) — re-examine whether they still need "
+        f"holding out of the ranking"
+    )
 
 
 def test_truncated_api_summary_counts_as_unscoreable():

@@ -130,8 +130,15 @@ def is_unscoreable(job: dict) -> bool:
     from matcher import is_junk_description  # local import: avoids a cycle
 
     # An API summary counts as no description. Adzuna's API caps description at 500
-    # chars ending in "…" with no full-text field, and what it cuts is the tail —
-    # the requirements list. Long enough to look present, too short to check.
+    # chars ending in "…", has no full-text field and no job-details endpoint (every
+    # candidate path 404s), and what it cuts is the tail — the requirements list.
+    #
+    # Excluded from RANKING too, not just review, because a summary scores higher
+    # than a full description rather than lower: across 980 filter-passing jobs,
+    # composite 0.440 vs 0.340 and context 0.454 vs 0.398. A 500-char excerpt is the
+    # opening pitch, so the model sees only what the posting is selling and none of
+    # what it demands. Left in the pool these outrank real postings — "Billing
+    # Specialist" and several "Talent Pool" registrations scored 0.81-0.83 that way.
     if job.get("description_truncated"):
         return True
 
