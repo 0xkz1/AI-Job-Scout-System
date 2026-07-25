@@ -1922,6 +1922,23 @@ _ADZUNA_CODE_COUNTRY = {"gb": "UK", "de": "Germany", "nl": "Netherlands",
                         "it": "Italy", "pl": "Poland", "us": "US"}
 
 
+def _is_summary_only(job: dict) -> bool:
+    """True when this job's text is too thin to score or review honestly.
+
+    Mirrored into match-report frontmatter as `scoreable`, because Dataview reads
+    the reports and nothing in them said so: a query over 00_matches showed
+    "Billing Specialist" and several "Talent Pool" registrations at 0.81-0.83, all
+    of them Adzuna API summaries. Those scores are inflated by construction — a
+    500-char excerpt is the opening pitch with the requirements cut off — so a
+    hand-written query had no way to avoid ranking them above real postings.
+
+    selection.is_unscoreable is the authority for pipeline stages and applies the
+    same rule plus the junk/length checks; this is deliberately just the flag that
+    reaches the report, kept here so generate_match_report has no import cycle.
+    """
+    return bool(job.get("description_truncated"))
+
+
 def _infer_country(job: dict) -> str:
     """Best-effort country label for match-report frontmatter. Prefers the
     Adzuna country code embedded in source_site ('Adzuna DE'), else infers from
@@ -1992,6 +2009,7 @@ experience_score: {int(match['experience']['score'] * 100)}
 location_score: {int(match['location']['score'] * 100)}
 salary_score: {int(match['salary']['score'] * 100)}
 context_score: {int(match.get('context_score', 0) * 100)}
+scoreable: {"false" if _is_summary_only(job) else "true"}
 url: "{url}"{cv_link}{cl_link}
 ---"""
 
