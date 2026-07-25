@@ -30,16 +30,45 @@ STATE_FILE = Path(__file__).resolve().parent / "10_output" / ".key_quarantine.js
 # is still spent just fails once on release and is quarantined again for another
 # 5 days, so retrying cheaply beats guessing when the quota actually resets.
 DEFAULT_COOLDOWN_DAYS = 5
-_QUOTA_MARKERS = (
-    "429", "rate limit", "too many requests", "quota", "insufficient",
-    "401", "403", "unauthorized", "forbidden",
-)
+
+# A 429 is NOT the same failure as a 401, and treating them alike sidelined seven
+# working keys for five days. Mistral answers 429 both for a spent monthly
+# allowance (retry in weeks) and for exceeding requests-per-second (retry in
+# seconds). Six freshly created keys were quarantined within a 10-second window,
+# each "after 1 attempts", while iterating the chain — throttling, not exhaustion;
+# with 3s between calls all seven answered normally.
+#
+# So a rate-limit response gets minutes, not days. If the allowance really is gone
+# the key fails again on release and is re-quarantined, which costs one wasted call
+# — far cheaper than losing a live key for five days.
+RATE_LIMIT_COOLDOWN_MINUTES = 15
+_RATE_LIMIT_MARKERS = ("429", "rate limit", "too many requests")
+_AUTH_MARKERS = ("401", "403", "unauthorized", "forbidden", "quota", "insufficient")
+_QUOTA_MARKERS = _RATE_LIMIT_MARKERS + _AUTH_MARKERS
 
 
 def is_quota_or_auth_error(err: str) -> bool:
     """True when the failure looks like an exhausted or rejected key."""
     e = (err or "").lower()
     return any(m in e for m in _QUOTA_MARKERS)
+
+
+def is_rate_limit_error(err: str) -> bool:
+    """True for throttling (retry in minutes) rather than a spent/rejected key.
+
+    Checked before the auth markers so a message carrying both reads as the
+    recoverable one — the cost of guessing "throttled" wrongly is one failed call,
+    while guessing "exhausted" wrongly costs the key for days.
+    """
+    e = (err or "").lower()
+    return any(m in e for m in _RATE_LIMIT_MARKERS)
+
+
+def cooldown_for(err: str) -> float:
+    """Cooldown in days appropriate to the failure in `err`."""
+    if is_rate_limit_error(err):
+        return RATE_LIMIT_COOLDOWN_MINUTES / (24 * 60)
+    return DEFAULT_COOLDOWN_DAYS
 
 
 def _load() -> dict:
@@ -57,8 +86,14 @@ def _save(state: dict) -> None:
         print(f"  ⚠ could not write quarantine state: {e}")
 
 
-def quarantine(provider: str, reason: str = "", cooldown_days: int = DEFAULT_COOLDOWN_DAYS) -> None:
-    """Sideline `provider` for `cooldown_days`. Re-quarantining refreshes the clock."""
+def quarantine(provider: str, reason: str = "", cooldown_days: float | None = None) -> None:
+    """Sideline `provider`. Re-quarantining refreshes the clock.
+
+    cooldown_days defaults to a length chosen from `reason` (see cooldown_for), so
+    throttling costs minutes and a spent key costs days. Pass a number to override.
+    """
+    if cooldown_days is None:
+        cooldown_days = cooldown_for(reason)
     state = _load()
     now = datetime.now(timezone.utc)
     state[provider] = {
@@ -67,7 +102,9 @@ def quarantine(provider: str, reason: str = "", cooldown_days: int = DEFAULT_COO
         "reason": (reason or "")[:200],
     }
     _save(state)
-    print(f"  🔒 {provider} quarantined for {cooldown_days}d ({reason[:60]})")
+    span = (f"{cooldown_days * 24 * 60:.0f}min" if cooldown_days < 1
+            else f"{cooldown_days:g}d")
+    print(f"  🔒 {provider} quarantined for {span} ({reason[:60]})")
 
 
 def release(provider: str) -> bool:
