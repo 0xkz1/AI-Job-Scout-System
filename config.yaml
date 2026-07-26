@@ -3,8 +3,24 @@ employment_types:
 - part_time
 - contract
 - freelance
+# Matched with word boundaries (see filter.passes_filter), so a term here will not
+# fire on a longer word that merely contains it.
 exclude_description_keywords:
 - driver license
+# Native-level German is a hard requirement the candidate cannot meet, and it
+# appears in 6 of 13 Arbeitnow postings — the single biggest reason EU jobs are
+# unusable. Only phrases VERIFIED present in the scraped corpus are listed;
+# "fluent german", "german language skills", "fließend deutsch",
+# "verhandlungssicheres deutsch" and the Spanish/French equivalents all matched zero
+# postings, so they are left out. tests/test_german_language_filter.py fails if a
+# phrase here stops matching anything, which is how the two guesses above got caught.
+#
+# The word boundary matters here: "deutschlandticket" (a commuter-pass perk) must
+# NOT count as a language requirement. It appears in the Berlin posting that
+# reviewed at 79 — the best EU match found — which a substring match would have
+# thrown away.
+- deutschkenntnisse            # incl. "sehr gute Deutschkenntnisse"
+- gute deutsch                 # "sehr gute Deutsch- und Englischkenntnisse"
 exclude_title_keywords:
 - senior
 - lead
