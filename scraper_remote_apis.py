@@ -173,6 +173,62 @@ def scrape_arbeitnow(keywords: list[str], max_pages: int = _ARBEITNOW_MAX_PAGES)
     return jobs
 
 
+# ── We Work Remotely (RSS, no key) ────────────────────────────────────────
+# RSS rather than JSON because there is no public API. Each <item> carries
+# <region>/<country>/<category> as siblings of <title>, and <title> is always
+# "Company: Role" (38/38 sampled), so company and role split on the first colon.
+# Descriptions are HTML-escaped inside <description> and run ~3400 chars — the
+# whole posting, unlike Adzuna's 500-char cap.
+#
+# Not Europe-specific: 31 of 38 sampled rows are "Anywhere in the World". Included
+# for full-text remote coverage, not as an EU source.
+_WWR_CATEGORIES = (
+    "remote-design-jobs",
+    "remote-programming-jobs",
+    "remote-front-end-programming-jobs",
+)
+
+
+def _rss_tag(item: str, tag: str) -> str:
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", item, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def scrape_weworkremotely(keywords: list[str]) -> list[dict]:
+    jobs = []
+    for cat in _WWR_CATEGORIES:
+        try:
+            r = requests.get(f"https://weworkremotely.com/categories/{cat}.rss",
+                             headers=_UA, timeout=25)
+            if r.status_code != 200:
+                print(f"  ⚠ WeWorkRemotely {cat}: HTTP {r.status_code}")
+                continue
+            items = re.findall(r"<item>(.*?)</item>", r.text, re.S)
+        except Exception as e:
+            print(f"  ⚠ WeWorkRemotely {cat} error: {e}")
+            continue
+        for it in items:
+            raw_title = _rss_tag(it, "title")
+            if not _matches_keywords(raw_title, keywords):
+                continue
+            company, _, role = raw_title.partition(":")
+            if not role:                      # no colon → treat the whole thing as the role
+                company, role = "", raw_title
+            region = _rss_tag(it, "region") or _rss_tag(it, "country")
+            jobs.append(_job(
+                role.strip(),
+                company.strip(),
+                region,
+                "",
+                _rss_tag(it, "description"),
+                _rss_tag(it, "link"),
+                "weworkremotely",
+            ))
+        time.sleep(1.0)
+    print(f"  ✓ WeWorkRemotely: {len(jobs)} keyword-matched jobs")
+    return jobs
+
+
 def scrape_remote_apis_all(config: dict) -> list[dict]:
     """Run all remote-native APIs, dedup, keyword-filter."""
     keywords = config.get("keywords", [])
@@ -195,6 +251,7 @@ def scrape_remote_apis_all(config: dict) -> list[dict]:
     # min(max_pages_per_search, 5) examined ~300 of 895 jobs and found 3 matches
     # where a full walk finds 13.
     _add(scrape_arbeitnow(keywords))
+    _add(scrape_weworkremotely(keywords))
 
     # Final keyword gate (title-level) reusing the shared filter.
     from scraper_indeed import filter_jobs_by_keywords

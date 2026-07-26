@@ -73,6 +73,22 @@ def test_missing_salary_never_rejects(config):
     assert passes_filter(_job(None, None, None), config)[0]
 
 
+def test_implausible_hourly_rate_is_treated_as_no_data(config):
+    """A year range in prose gets parsed as a pay range. A WeWorkRemotely "Junior
+    Designer" posting stated no salary and was read as £1-£3/hour from "1-3 years of
+    design experience", annualised to £5,850, and rejected — a well-matched junior
+    role deleted by a sentence about experience."""
+    ok, reason = passes_filter(_job(1.0, 3.0, "hourly"), config)
+    assert ok, reason
+
+
+def test_real_low_hourly_rate_is_still_rejected(config):
+    """The guard must sit below UK minimum wage, not above it, or genuinely
+    underpaid work stops being filtered."""
+    ok, _reason = passes_filter(_job(9, 10, "hourly"), config)
+    assert not ok
+
+
 def test_annualise_returns_none_rather_than_zero_for_untrusted_input():
     """None means "do not filter on this"; zero would mean "pays nothing"."""
     assert _annualise(None, "annual") is None

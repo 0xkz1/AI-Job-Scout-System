@@ -17,6 +17,14 @@ _HOURS_PER_YEAR = 37.5 * 52
 # absurd, so an implausible annual figure is treated as no data at all.
 _MIN_PLAUSIBLE_ANNUAL = 1000
 
+# Same guard for hourly. UK minimum wage is around £11-12, so anything under this
+# is a misparse, not a rate. A WeWorkRemotely "Junior Designer" posting stated no
+# salary at all and was read as £1-£3/hour from the phrase "1-3 years of design
+# experience" — annualised to £5,850 and rejected. Without this the hourly branch
+# had no plausibility check at all, so a year range in prose could delete an
+# otherwise well-matched junior role.
+_MIN_PLAUSIBLE_HOURLY = 8
+
 
 def _annualise(amount: float, period: str | None) -> float | None:
     """`amount` as an annual figure, or None when it cannot be trusted.
@@ -27,7 +35,7 @@ def _annualise(amount: float, period: str | None) -> float | None:
     if amount is None:
         return None
     if period == "hourly":
-        return amount * _HOURS_PER_YEAR
+        return amount * _HOURS_PER_YEAR if amount >= _MIN_PLAUSIBLE_HOURLY else None
     # annual, or unknown-but-annual-shaped
     return amount if amount >= _MIN_PLAUSIBLE_ANNUAL else None
 
