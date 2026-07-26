@@ -30,10 +30,93 @@ async def _stealth_context(context):
     await stealth.apply_stealth_async(context)
 
 
+# The card element on the search listing. Used both to extract the card fields and
+# to click through to the preview pane, so the two stay in the same DOM order.
+_CARD_SELECTOR = "div.job_seen_beacon"
+
+# The pane renders client-side after the click. Waiting on the selector rather than
+# a fixed sleep is what keeps the per-job cost near 1s instead of the 4s a blind
+# wait needed.
+_PANE_TIMEOUT_MS = 8000
+
+# Description containers in the preview pane, best first. The second is the
+# wrapper and carries the "Job details / Pay / Job type" header as well, so it is
+# only a fallback — it inflates every description by the same ~220 chars.
+_PANE_SELECTORS = ("#jobDescriptionText", ".jobsearch-JobComponent-description")
+
+
+async def _pane_description(page) -> str:
+    """The description text currently shown in the listing page's preview pane."""
+    for selector in _PANE_SELECTORS:
+        el = await page.query_selector(selector)
+        if not el:
+            continue
+        text = (await el.inner_text()).strip()
+        if len(text) > 50:
+            return text[:5000]
+    return ""
+
+
+async def _fill_descriptions_from_pane(page, jobs_by_jk: dict[str, dict]) -> int:
+    """Fill `description` in place by clicking each card and reading the pane.
+
+    Indeed's /viewjob detail page cannot be used at all. It answers with
+    "Additional Verification Required" and a Cloudflare Ray ID — a hard block, not
+    a challenge that waiting or retrying solves — even under `xvfb-run` with a
+    headed browser and stealth applied. Measured 2026-07-26: the search listing
+    loads fine in 11s and yields 16 cards, while three retries against /viewjob
+    spent 62s and returned 0 characters. That 62s per posting is also where the
+    1021s-per-search figure came from, which is why indeed scraped nothing for 12
+    days without ever reporting an error.
+
+    Clicking a card loads the same description into a pane on the listing page.
+    No navigation happens, so nothing is challenged: measured 12,807-20,406 chars
+    per posting.
+
+    Cards are re-queried on every iteration because the click re-renders the list,
+    and jobs are matched by `jk` rather than by index — a duplicate URL is dropped
+    from `jobs` but still occupies a card, so index alignment would silently pair
+    descriptions with the wrong postings.
+    """
+    filled = 0
+    card_count = len(await page.query_selector_all(_CARD_SELECTOR))
+    for idx in range(card_count):
+        cards = await page.query_selector_all(_CARD_SELECTOR)
+        if idx >= len(cards):
+            break
+        try:
+            link = await cards[idx].query_selector("h2 a, a.jcs-JobTitle")
+            if link is None:
+                continue
+            href = await link.get_attribute("href") or ""
+            jk_match = re.search(r"jk=([a-f0-9]+)", href)
+            if not jk_match:
+                continue
+            job = jobs_by_jk.get(jk_match.group(1))
+            if job is None or job.get("description"):
+                continue
+            await link.click()
+            await page.wait_for_selector(_PANE_SELECTORS[0], timeout=_PANE_TIMEOUT_MS)
+            description = await _pane_description(page)
+        except Exception:
+            continue
+        if description:
+            job["description"] = description
+            filled += 1
+    return filled
+
+
 async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
     """
     Navigate to a job's detail page and extract the full description text.
     Returns up to 5000 chars of cleaned text, or "" on failure.
+
+    DOES NOT WORK on Indeed and cannot be made to. /viewjob is Cloudflare-blocked
+    outright (see _fill_descriptions_from_pane), so every call here burns ~62s over
+    its retries and returns "". It is retained only because `run.py` and
+    `refetch_unscoreable.py` still import it by name for the per-site refetch path,
+    where it fails as an empty result rather than an error — those two call sites
+    are known-broken for indeed and should move to the pane approach.
     """
     for attempt in range(retries + 1):
         try:
@@ -263,13 +346,13 @@ async def scrape_indeed(
 
         for page_num in range(1, max_pages + 1):
             try:
-                await page.wait_for_selector("div.job_seen_beacon", timeout=10000)
+                await page.wait_for_selector(_CARD_SELECTOR, timeout=10000)
             except PwTimeout:
                 print("  ⚠ No job cards found, stopping.")
                 break
 
             # --- Extract job cards ---
-            cards = await page.query_selector_all("div.job_seen_beacon")
+            cards = await page.query_selector_all(_CARD_SELECTOR)
             print(f"  Page {page_num}: found {len(cards)} job cards")
 
             page_jobs_start = len(jobs)
@@ -283,55 +366,40 @@ async def scrape_indeed(
                 except Exception as e:
                     continue
 
-            # --- Fetch full descriptions via /viewjob?jk=... URLs ---
-            # Check cache first
+            # --- Fill descriptions from the listing page's preview pane ---
+            # Not from /viewjob: see _fill_descriptions_from_pane for why that URL
+            # cannot be used at all.
             if cache is None:
                 cache = load_description_cache()
-                
+
             fetched = 0
             skipped = 0
-            for i, job in enumerate(jobs[page_jobs_start:]):
-                # Check cache
-                title_lower = job.get("title", "").strip().lower()
-                company_lower = job.get("company", "").strip().lower()
-                cache_key = (title_lower, company_lower)
-                
-                if cache_key in cache and cache[cache_key].get("description"):
-                    cached_job = cache[cache_key]
+            needing: dict[str, dict] = {}
+            for job in jobs[page_jobs_start:]:
+                cache_key = (job.get("title", "").strip().lower(),
+                             job.get("company", "").strip().lower())
+                cached_job = cache.get(cache_key)
+                if cached_job and cached_job.get("description"):
                     job["description"] = cached_job["description"]
                     job["snippet"] = cached_job.get("snippet", cached_job["description"][:300])
                     if "analysis" in cached_job:
                         job["analysis"] = cached_job["analysis"]
                     skipped += 1
                     continue
+                jk_match = re.search(r"jk=([a-f0-9]+)", job.get("url", ""))
+                if jk_match:
+                    needing[jk_match.group(1)] = job
 
-                if not job.get("description"):
-                    url = job.get("url", "")
-                    jk_match = re.search(r"jk=([a-f0-9]+)", url)
-                    if jk_match:
-                        jk = jk_match.group(1)
-                        viewjob_url = f"{base_url}/viewjob?jk={jk}"
-                        try:
-                            # Use a fresh page for each detail fetch
-                            detail_page = await context.new_page()
-                            desc = await _fetch_job_description(detail_page, viewjob_url)
-                            await detail_page.close()
-                            if desc:
-                                job["description"] = desc
-                                # Update cache
-                                cache[cache_key] = job
-                                fetched += 1
-                                if fetched % 5 == 0:
-                                    print(f"    → Fetched {fetched} descriptions...")
-                            await page.wait_for_timeout(1000)  # Rate limit courtesy
-                        except Exception as e:
-                            try:
-                                await detail_page.close()
-                            except Exception:
-                                pass
-                            print(f"    ⚠ Failed to fetch description for jk={jk}: {e}")
+            if needing:
+                fetched = await _fill_descriptions_from_pane(page, needing)
+                for job in needing.values():
+                    if job.get("description"):
+                        cache[(job.get("title", "").strip().lower(),
+                               job.get("company", "").strip().lower())] = job
+
             if fetched or skipped:
-                print(f"    → Fetched {fetched} descriptions, skipped {skipped} (cache hits) from detail pages")
+                print(f"    → Fetched {fetched} descriptions, skipped {skipped} "
+                      f"(cache hits) from the listing pane")
 
             # --- Go to next page ---
             next_link = await page.query_selector(

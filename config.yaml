@@ -86,11 +86,20 @@ max_pages_per_search: 3
 # needs the description fetch made concurrent (scraper_helper notes an earlier
 # attempt caused EPIPE) or a higher cap — not just a bigger number here, since a
 # site that times out returns less than a shallow run that finishes.
+#
+# indeed sits at 1, not 3, because its description cost is per CARD and unavoidable.
+# /viewjob is Cloudflare-blocked outright, so the description has to be read from
+# the listing's preview pane one click at a time (scraper_indeed.
+# _fill_descriptions_from_pane). Measured 2026-07-26: 52s for one page — 11s of
+# fixed listing/Cloudflare overhead plus ~2.7s per card over 16 cards. At depth 1
+# that is ~1620s across 30 searches, already past the 1500s cap, so indeed gets a
+# longer per-site timeout in job_scout_nightly.sh instead of more depth. Cache hits
+# cost nothing, so only the first night pays full price.
 max_pages_per_site:
   reed: 3
   adzuna: 3
   guardian: 3
-  indeed: 3
+  indeed: 1
   linkedin: 3
 min_salary_gbp: 26000
 sites:
