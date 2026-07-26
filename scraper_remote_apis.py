@@ -119,12 +119,31 @@ def scrape_remoteok(keywords: list[str]) -> list[dict]:
 
 
 # ── Arbeitnow (DE/EU board, paginated, client-side filter) ────────────────
-def scrape_arbeitnow(keywords: list[str], max_pages: int = 3) -> list[dict]:
+# Walks the WHOLE board — 9 pages, ~895 jobs — because there is no server-side
+# search. The documented `tags` parameter is ignored: querying tags=javascript,
+# tags=design and tags=frontend all returned the same first page, so filtering has
+# to happen client-side and every page must be fetched to see everything. At the
+# old default of 3 pages only ~300 jobs were examined and 3 survived the keyword
+# filter; over all 9 pages, 13 do.
+_ARBEITNOW_MAX_PAGES = 12   # 9 pages exist today; the loop stops on an empty page
+_ARBEITNOW_PAGE_PAUSE = 1.5
+_ARBEITNOW_RETRIES = 3
+
+
+def scrape_arbeitnow(keywords: list[str], max_pages: int = _ARBEITNOW_MAX_PAGES) -> list[dict]:
     jobs = []
     for page in range(1, max_pages + 1):
         try:
-            r = requests.get("https://www.arbeitnow.com/api/job-board-api",
-                             params={"page": page}, headers=_UA, timeout=25)
+            # Rate-limited under a fast loop: a 9-page walk immediately after
+            # another returned HTML instead of JSON. Retry with a pause rather than
+            # abandoning the rest of the board on one throttled page.
+            for attempt in range(_ARBEITNOW_RETRIES):
+                r = requests.get("https://www.arbeitnow.com/api/job-board-api",
+                                 params={"page": page}, headers=_UA, timeout=25)
+                if r.status_code == 200:
+                    break
+                if attempt < _ARBEITNOW_RETRIES - 1:
+                    time.sleep(6)
             if r.status_code != 200:
                 print(f"  ⚠ Arbeitnow p{page}: HTTP {r.status_code}")
                 break
@@ -149,7 +168,7 @@ def scrape_arbeitnow(keywords: list[str], max_pages: int = 3) -> list[dict]:
                 "arbeitnow",
                 remote=bool(it.get("remote")),
             ))
-        time.sleep(0.3)
+        time.sleep(_ARBEITNOW_PAGE_PAUSE)
     print(f"  ✓ Arbeitnow: {len(jobs)} keyword-matched jobs")
     return jobs
 
@@ -157,7 +176,6 @@ def scrape_arbeitnow(keywords: list[str], max_pages: int = 3) -> list[dict]:
 def scrape_remote_apis_all(config: dict) -> list[dict]:
     """Run all remote-native APIs, dedup, keyword-filter."""
     keywords = config.get("keywords", [])
-    max_pages = min(config.get("max_pages_per_search", 3), 5)
     all_jobs = []
     seen = set()
 
@@ -172,7 +190,11 @@ def scrape_remote_apis_all(config: dict) -> list[dict]:
         _add(scrape_remotive(kw))
         time.sleep(0.3)
     _add(scrape_remoteok(keywords))
-    _add(scrape_arbeitnow(keywords, max_pages=max_pages))
+    # No page cap from config: Arbeitnow has no server-side search, so a partial
+    # walk is a partial view of the board rather than a shallower one. The old
+    # min(max_pages_per_search, 5) examined ~300 of 895 jobs and found 3 matches
+    # where a full walk finds 13.
+    _add(scrape_arbeitnow(keywords))
 
     # Final keyword gate (title-level) reusing the shared filter.
     from scraper_indeed import filter_jobs_by_keywords
