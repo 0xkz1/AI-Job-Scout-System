@@ -109,6 +109,25 @@ def _dedupe(jobs: list[dict]) -> list[dict]:
     return list(best.values())
 
 
+# Shortest description a 5-requirement rubric can honestly be built from.
+#
+# Was 100, while invariants.check_unscoreable_excluded independently used 400 — so
+# anything between the two passed selection and was then reported as a violation,
+# which is how a 381-char "Motion Graphics Designer" reached both the generation and
+# the review set. The invariant deliberately does not call this function (a check
+# that delegates to the code it verifies passes unconditionally), so the two numbers
+# have to be kept equal on purpose.
+#
+# 400 is the floor, not a claim that 400 is enough. Joined against review outcomes
+# on 217 documents, mean submission_score by description length runs 75.2 for
+# 400-999 chars (n=9), 55.6 for 1000-2999 (n=98) and 57.7 for 3000+ (n=110) — the
+# same inflation the truncated API summaries show, for the same reason: what a short
+# posting omits is its requirements, so there is less to fail. Raising the floor
+# past 999 would drop 9 already-reviewed jobs including the current top-scoring one,
+# so it is left as a separate decision rather than folded in here.
+MIN_REVIEWABLE_DESC = 400
+
+
 def is_unscoreable(job: dict) -> bool:
     """True when nothing was scraped that a score could be based on.
 
@@ -148,7 +167,7 @@ def is_unscoreable(job: dict) -> bool:
     # it as evidence let "Frontend Developer Needed for Business Website" (0-char
     # description, 174-char snippet) reach review 91 off an invented rubric.
     desc = job.get("description") or ""
-    return len(desc.strip()) < 100 or is_junk_description(desc)
+    return len(desc.strip()) < MIN_REVIEWABLE_DESC or is_junk_description(desc)
 
 
 def ranked_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> list[dict]:

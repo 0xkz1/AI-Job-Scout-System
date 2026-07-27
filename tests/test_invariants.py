@@ -417,3 +417,31 @@ def test_a_missing_script_is_not_a_violation(monkeypatch, config, tmp_path):
     config["sites"] = ["reed"]
     monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT", tmp_path / "absent.sh")
     assert invariants.check_configured_sites_are_scheduled(config) == []
+
+
+# --- selection.MIN_REVIEWABLE_DESC ---
+# is_unscoreable used < 100 while check_unscoreable_excluded used < 400, so a
+# 381-char "Motion Graphics Designer" passed selection and was then reported as a
+# violation by the check. The invariant must not call is_unscoreable (a check that
+# delegates to the code it verifies passes unconditionally), so the two constants
+# have to be kept equal deliberately.
+
+def test_the_selection_floor_matches_the_invariant_floor():
+    import selection
+
+    assert selection.MIN_REVIEWABLE_DESC == invariants.MIN_REVIEWABLE_DESC
+
+
+def test_a_description_between_the_two_old_thresholds_is_unscoreable():
+    """381 chars is the real case. Under the old floor of 100 it reached both the
+    generation and the review set, where the reviewer invents a rubric from the
+    title."""
+    import selection
+
+    assert selection.is_unscoreable({"description": "Design motion graphics. " * 16})
+
+
+def test_a_description_above_the_floor_is_scoreable():
+    import selection
+
+    assert not selection.is_unscoreable({"description": "A real posting. " * 60})
