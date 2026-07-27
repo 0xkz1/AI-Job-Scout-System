@@ -142,21 +142,59 @@ def test_thin_check_does_not_delegate_to_the_code_it_tests(monkeypatch, config):
     assert invariants.check_unscoreable_excluded(config)
 
 
-def test_colliding_document_paths_are_reported(monkeypatch, config):
-    """Two selected entries sharing make_safe_name share one CV/CL/review path."""
+def test_colliding_document_paths_in_the_generation_set_are_reported(monkeypatch,
+                                                                    config):
+    """Two selected entries sharing make_safe_name share one CV/CL/review path, so
+    the file on disk comes from whichever was written last."""
     import selection
 
     dupe = _job(title="Geotechnical Design Engineer", company="Penguin")
     monkeypatch.setattr(selection, "ranked_jobs",
                         lambda c=None, jobs=None: [dupe, dict(dupe)])
+    monkeypatch.setattr(selection, "select_top",
+                        lambda stage, c=None, jobs=None: [dupe, dict(dupe)])
     found = invariants.check_one_entry_per_document_path(config)
-    assert found and "more than one selected job" in found[0]
+    assert found and "written twice by the generation set" in found[0]
+
+
+def test_a_collision_below_the_generation_cutoff_is_distinguished(monkeypatch, config):
+    """Truncation collisions are common — make_safe_name cuts the title at 50 chars,
+    so an "- Examiner" and "- Moderator" pair collapse to one name — and 322 of 1895
+    rows truncate at all. Only a collision that reaches generation loses data, so the
+    two cases must not read the same or the fix looks like renaming 145 files."""
+    import selection
+
+    examiner = _job(title="BTEC Tech Awards Sept 22 - Creative Media Production - "
+                          "Examiner", company="Pearson")
+    moderator = dict(examiner, title="BTEC Tech Awards Sept 22 - Creative Media "
+                                     "Production - Moderator")
+    monkeypatch.setattr(selection, "ranked_jobs",
+                        lambda c=None, jobs=None: [examiner, moderator])
+    monkeypatch.setattr(selection, "select_top", lambda stage, c=None, jobs=None: [])
+    found = invariants.check_one_entry_per_document_path(config)
+    assert len(found) == 1
+    assert "below the generation cutoff" in found[0]
+    assert "Nothing is overwritten today" in found[0]
+
+
+def test_the_two_collision_cases_are_not_double_counted(monkeypatch, config):
+    """A generation-set collision is also a ranked collision. Reporting it twice
+    would inflate the count and hide how many are merely latent."""
+    import selection
+
+    dupe = _job(title="Geotechnical Design Engineer", company="Penguin")
+    pair = [dupe, dict(dupe)]
+    monkeypatch.setattr(selection, "ranked_jobs", lambda c=None, jobs=None: pair)
+    monkeypatch.setattr(selection, "select_top", lambda stage, c=None, jobs=None: pair)
+    assert len(invariants.check_one_entry_per_document_path(config)) == 1
 
 
 def test_distinct_document_paths_are_silent(monkeypatch, config):
     import selection
 
     monkeypatch.setattr(selection, "ranked_jobs", lambda c=None, jobs=None: _spread())
+    monkeypatch.setattr(selection, "select_top",
+                       lambda stage, c=None, jobs=None: _spread())
     assert invariants.check_one_entry_per_document_path(config) == []
 
 

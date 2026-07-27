@@ -282,20 +282,50 @@ def check_one_entry_per_document_path(config: dict) -> list[str]:
     entries sharing it collide: the report on disk comes from whichever was
     written last while selection ranks by the other. Penguin Recruitment's
     "Geotechnical Design Engineer" was held at 0.34, 0.38 and 0.66 at once.
+
+    Two causes, reported separately because only one loses data. Genuine duplicates
+    of the same posting mean dedupe let a repeat through. Distinct postings can also
+    collide, because make_safe_name truncates the title at 50 characters and the
+    company at 30: "BTEC Tech Awards Sept 22 - Creative Media Production - Examiner"
+    and the same posting's "- Moderator" differ only past the cut. Truncation
+    collisions are common — 322 of 1895 rows truncate at all — and only matter where
+    a document is actually written, so a collision outside the generation set is
+    reported as a note rather than as data loss.
     """
     from matcher import make_safe_name
-    from selection import ranked_jobs
+    from selection import ranked_jobs, select_top
 
-    names = Counter(
-        make_safe_name(j.get("company", ""), j.get("title", "")) for j in ranked_jobs(config)
-    )
-    dupes = [n for n, c in names.items() if c > 1]
-    if dupes:
-        return [
-            f"{len(dupes)} document paths are claimed by more than one selected job "
-            f"(e.g. {dupes[0]}); dedupe in selection is not holding."
-        ]
-    return []
+    def _name(job: dict) -> str:
+        return make_safe_name(job.get("company", ""), job.get("title", ""))
+
+    def _collisions(jobs: list[dict]) -> dict[str, list[dict]]:
+        grouped: dict[str, list[dict]] = {}
+        for job in jobs:
+            grouped.setdefault(_name(job), []).append(job)
+        return {n: js for n, js in grouped.items() if len(js) > 1}
+
+    out = []
+    generated = _collisions(select_top("generation", config))
+    if generated:
+        name, jobs = next(iter(generated.items()))
+        titles = " / ".join(repr(j.get("title", "")) for j in jobs[:2])
+        out.append(
+            f"{len(generated)} document paths are written twice by the generation set "
+            f"(e.g. {name} from {titles}). Whichever is written last wins while "
+            f"selection ranks by the other."
+        )
+
+    ranked = _collisions(ranked_jobs(config))
+    outside = {n: js for n, js in ranked.items() if n not in generated}
+    if outside:
+        name, jobs = next(iter(outside.items()))
+        titles = " / ".join(repr(j.get("title", "")) for j in jobs[:2])
+        out.append(
+            f"{len(outside)} document paths are shared by ranked jobs below the "
+            f"generation cutoff (e.g. {name} from {titles}). Nothing is overwritten "
+            f"today; it becomes data loss if either job rises into the selection."
+        )
+    return out
 
 
 def check_composite_still_discriminates(config: dict) -> list[str]:
