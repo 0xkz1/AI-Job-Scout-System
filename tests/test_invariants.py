@@ -362,3 +362,58 @@ def test_a_broken_check_is_reported_not_raised(monkeypatch, config):
     monkeypatch.setattr(invariants, "CHECKS", (boom,))
     found = invariants.run_all(config)
     assert found and "could not run" in found[0]
+
+
+# --- check_configured_sites_are_scheduled ---
+# linkedin sat in `sites` for six days without a run_site line in the cron script,
+# so it was never invoked at all. check_every_site_still_yields did fire, but its
+# wording sends you to audit a scraper that is fine — the script lives in a separate
+# dotfiles repo, so nothing here could see the real cause.
+
+def _script(tmp_path, body):
+    path = tmp_path / "job_scout_nightly.sh"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_site_missing_from_the_cron_script_is_reported(monkeypatch, config, tmp_path):
+    config["sites"] = ["reed", "linkedin"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site reed\n"))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("never run by" in v and "linkedin" in v for v in violations)
+
+
+def test_a_fully_scheduled_config_is_silent(monkeypatch, config, tmp_path):
+    config["sites"] = ["reed", "indeed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site indeed --headless\nrun_site reed\n"))
+    assert invariants.check_configured_sites_are_scheduled(config) == []
+
+
+def test_site_scheduled_but_not_configured_is_reported(monkeypatch, config, tmp_path):
+    """The reverse drift: its jobs reach the database while every per-site budget
+    and check here skips it."""
+    config["sites"] = ["reed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site reed\nrun_site adzuna\n"))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("absent from `sites`" in v and "adzuna" in v for v in violations)
+
+
+def test_the_function_definition_is_not_read_as_an_invocation(monkeypatch, config,
+                                                              tmp_path):
+    """`run_site() {` and commented examples must not count as scheduling anything,
+    or the check passes for a script that runs nothing at all."""
+    config["sites"] = ["reed"]
+    body = "run_site() {\n  timeout 1500 python run.py --site \"$1\"\n}\n# run_site reed\n"
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT", _script(tmp_path, body))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("never run by" in v and "reed" in v for v in violations)
+
+
+def test_a_missing_script_is_not_a_violation(monkeypatch, config, tmp_path):
+    """The path is environment-specific; absence is not evidence of drift."""
+    config["sites"] = ["reed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT", tmp_path / "absent.sh")
+    assert invariants.check_configured_sites_are_scheduled(config) == []

@@ -45,6 +45,13 @@ OUTPUT = ROOT / "10_output"
 ANALYZED = OUTPUT / "_analyzed.json"
 REVIEWS = OUTPUT / "15_reviews"
 
+# The cron script that actually runs the scrapers. It lives outside this repo, so
+# `sites` in config.yaml and the `run_site` lines in there can drift apart with
+# nothing to notice — and did: linkedin sat in `sites` for six days without ever
+# being invoked. A missing file is not treated as a violation, since the path is
+# environment-specific.
+NIGHTLY_SCRIPT = Path.home() / "dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh"
+
 # A composite spread this flat means the ranking cannot separate jobs, whatever
 # the mean looks like. Before the 2026-07-25 fixes it sat at 0.088 with every job
 # inside 0.71 +/- 0.09; after, 0.158. Set below the "after" figure, not at it —
@@ -478,6 +485,50 @@ def check_every_site_still_yields(config: dict) -> list[str]:
     return out
 
 
+def check_configured_sites_are_scheduled(config: dict) -> list[str]:
+    """Every site in `sites` must have a `run_site` line in the nightly script.
+
+    check_every_site_still_yields catches the symptom — no jobs for N days — but
+    reports it as a possible stale selector, which sends you to read a scraper that
+    is fine. linkedin was in `sites` and absent from the cron script for six days:
+    it had never once been invoked, and nothing in the repo could tell, because the
+    script is in a separate dotfiles repo.
+
+    The reverse direction matters as much. A site scraped nightly but missing from
+    `sites` still writes to the database while being excluded from every per-site
+    budget and check here.
+    """
+    import re
+
+    if not NIGHTLY_SCRIPT.exists():
+        return []
+    configured = [s for s in (config.get("sites") or []) if s]
+    if not configured:
+        return []
+    script = NIGHTLY_SCRIPT.read_text(encoding="utf-8")
+    # Only invocations count. The word also appears in comments and in the
+    # run_site() definition itself, neither of which runs anything.
+    scheduled = set(re.findall(r"^\s*run_site\s+(\S+)", script, re.MULTILINE))
+
+    out = []
+    unscheduled = [s for s in configured if s not in scheduled]
+    if unscheduled:
+        out.append(
+            f"in `sites` but never run by {NIGHTLY_SCRIPT.name}: "
+            f"{', '.join(unscheduled)}. These scrape nothing at night, so the "
+            f"'no job for N days' warning will blame a stale selector on a scraper "
+            f"that was simply never called. Add a `run_site` line or drop from `sites`."
+        )
+    unconfigured = sorted(scheduled - set(configured))
+    if unconfigured:
+        out.append(
+            f"run nightly but absent from `sites`: {', '.join(unconfigured)}. Their "
+            f"jobs still land in the database while being skipped by every per-site "
+            f"timing budget and check here."
+        )
+    return out
+
+
 def check_truncated_descriptions_get_enriched(config: dict) -> list[str]:
     """Report how much of the enrichment backlog would outrank real postings.
 
@@ -526,6 +577,7 @@ CHECKS = (
     check_submission_threshold_is_reachable,
     check_scrape_fits_its_timeout,
     check_every_site_still_yields,
+    check_configured_sites_are_scheduled,
     check_truncated_descriptions_get_enriched,
     check_floor_below_selection_cutoff,
     check_stored_weights_match_config,
