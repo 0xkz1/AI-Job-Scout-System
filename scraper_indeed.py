@@ -39,6 +39,11 @@ _CARD_SELECTOR = "div.job_seen_beacon"
 # wait needed.
 _PANE_TIMEOUT_MS = 8000
 
+# Pause between searches. Indeed throttles the search listing itself — three
+# back-to-back searches succeeded and the fourth timed out — and the listing is
+# fetched once per search whether it returns 2 cards or 16.
+_SEARCH_PAUSE_SECONDS = 8
+
 # Description containers in the preview pane, best first. The second is the
 # wrapper and carries the "Job details / Pay / Job type" header as well, so it is
 # only a fallback — it inflates every description by the same ~220 chars.
@@ -505,7 +510,16 @@ async def _extract_job_card(card, base_url: str) -> dict | None:
 
 
 async def scrape_indeed_all(config: dict) -> list[dict]:
-    """Run Indeed scraper for all keyword+location combos in config."""
+    """Run Indeed scraper for all keyword+location combos in config.
+
+    One failed search must not discard the rest. Indeed starts refusing the search
+    listing after a few consecutive requests — measured 2026-07-26, three searches
+    succeeded and the fourth raised `Page.goto: Timeout 30000ms exceeded`. That one
+    exception propagated out of this function, so run.py reported "every requested
+    site failed" and threw away the 6 postings already in hand. Failures are counted
+    instead, and only a run where nothing at all succeeded is escalated, which keeps
+    the non-zero exit code meaningful for the cron summary.
+    """
     all_jobs = []
     seen = set()
 
@@ -515,14 +529,32 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     max_pages = max_pages_for("indeed", config)
     cache = load_description_cache()
 
-    for kw in keywords:
-        for loc in locations:
-            jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config, cache=cache)
-            for j in jobs:
-                dedup_key = (j["title"], j["company"], j["location"])
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    all_jobs.append(j)
+    searches = [(kw, loc) for kw in keywords for loc in locations]
+    failures = []
+    for index, (kw, loc) in enumerate(searches):
+        if index:
+            # Pacing between searches. The listing is what gets throttled, and it is
+            # requested once per search regardless of how many cards it returns.
+            await asyncio.sleep(_SEARCH_PAUSE_SECONDS)
+        try:
+            jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config,
+                                       cache=cache)
+        except Exception as e:
+            failures.append(f"{kw}/{loc}: {e}")
+            print(f"  ⚠ Indeed search failed ({kw} in {loc}): {e}")
+            continue
+        for j in jobs:
+            dedup_key = (j["title"], j["company"], j["location"])
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                all_jobs.append(j)
+
+    if failures:
+        print(f"  ⚠ Indeed: {len(failures)} of {len(searches)} searches failed, "
+              f"kept {len(all_jobs)} jobs")
+    if len(failures) == len(searches) and searches:
+        raise RuntimeError(
+            f"all {len(searches)} Indeed searches failed; first: {failures[0]}")
 
     return all_jobs
 

@@ -168,3 +168,63 @@ def test_viewjob_is_not_used_by_the_scraper():
     source = inspect.getsource(scraper_indeed.scrape_indeed)
     assert "_fetch_job_description" not in source
     assert "_fill_descriptions_from_pane" in source
+
+
+def _all_config():
+    return {"keywords": ["A", "B"], "locations": ["X", "Y"], "max_pages_per_site": {"indeed": 1}}
+
+
+def _patch_all(monkeypatch, results):
+    """Drive scrape_indeed_all with a scripted per-search outcome list."""
+    import scraper_indeed
+
+    calls = []
+
+    async def fake_scrape(kw, loc, **kwargs):
+        calls.append((kw, loc))
+        outcome = results[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(scraper_indeed, "scrape_indeed", fake_scrape)
+    monkeypatch.setattr(scraper_indeed, "load_description_cache", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_indeed, "_SEARCH_PAUSE_SECONDS", 0)
+    return calls
+
+
+def _posting(title):
+    return {"title": title, "company": "Acme", "location": "X", "description": "d"}
+
+
+def test_one_failed_search_does_not_discard_the_others(monkeypatch):
+    """The bug this replaces: search 4 of 30 raised `Page.goto: Timeout 30000ms
+    exceeded`, the exception left scrape_indeed_all, and run.py reported "every
+    requested site failed" while binning the 6 postings already scraped."""
+    from scraper_indeed import scrape_indeed_all
+
+    calls = _patch_all(monkeypatch, [
+        [_posting("one")],
+        TimeoutError("Page.goto: Timeout 30000ms exceeded"),
+        [_posting("two")],
+        [_posting("three")],
+    ])
+
+    jobs = run(scrape_indeed_all(_all_config()))
+
+    assert [j["title"] for j in jobs] == ["one", "two", "three"]
+    # The failure must not stop the remaining searches from being attempted.
+    assert len(calls) == 4
+
+
+def test_a_wholly_failed_run_still_raises(monkeypatch):
+    """A site that scraped nothing must keep reporting failure, or the cron exit
+    code stops meaning anything — that silence is how indeed went 12 days unnoticed."""
+    import pytest
+
+    from scraper_indeed import scrape_indeed_all
+
+    _patch_all(monkeypatch, [TimeoutError("blocked")] * 4)
+
+    with pytest.raises(RuntimeError, match="all 4 Indeed searches failed"):
+        run(scrape_indeed_all(_all_config()))
