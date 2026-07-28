@@ -681,9 +681,8 @@ def save_cover_letter(job_title: str, company: str, job_location: str, job_descr
         
     letter, opening_source = generate_cover_letter(job_title, company, job_location, job_description)
     
-    safe_company = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
-    safe_title = re.sub(r"[^\w\s-]", "", job_title).strip().replace(" ", "_")[:50]
-    filename = f"{safe_company}_{safe_title}_CL.md"
+    from matcher import make_safe_name
+    filename = f"{make_safe_name(company, job_title)}_CL.md"
     filepath = Path(output_dir) / filename
     
     frontmatter = f"""---

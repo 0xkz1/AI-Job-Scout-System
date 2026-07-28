@@ -213,9 +213,12 @@ def find_matching_cv_cl(company: str = "", title: str = "") -> list[tuple[Path, 
         return [(cv, _find_cl_for_cv(cv)) for cv in cvs]
 
     # Search by company + title
-    safe_company = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
-    safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:50] if title else ""
-    pattern = f"{safe_company}_{safe_title}_CV.md" if safe_title else f"{safe_company}*CV.md"
+    from matcher import canonical_company, make_safe_name
+    if title:
+        pattern = f"{make_safe_name(company, title)}_CV.md"
+    else:
+        safe_company = re.sub(r"[^\w\s-]", "", canonical_company(company)).strip().replace(" ", "_")[:30]
+        pattern = f"{safe_company}*CV.md"
     cvs = sorted(CV_DIR.glob(pattern))
     return [(cv, _find_cl_for_cv(cv)) for cv in cvs]
 
@@ -259,9 +262,8 @@ def main():
             for job in analyzed:
                 score = job.get("match", {}).get("composite_score", 0)
                 if score >= args.threshold:
-                    safe_c = re.sub(r"[^\w\s-]", "", job.get("company", "")).strip().replace(" ", "_")[:30]
-                    safe_t = re.sub(r"[^\w\s-]", "", job.get("title", "")).strip().replace(" ", "_")[:50]
-                    eligible_prefixes.add(f"{safe_c}_{safe_t}")
+                    from matcher import make_safe_name
+                    eligible_prefixes.add(make_safe_name(job.get("company", ""), job.get("title", "")))
             print(f"📋 Threshold {args.threshold:.0%}: {len(eligible_prefixes)} jobs eligible for PDF")
 
     # Find CV/CL pairs

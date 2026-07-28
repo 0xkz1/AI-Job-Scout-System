@@ -1,7 +1,24 @@
 # Output — contains personal CVs, cover letters, match reports (PII)
 output/
-10_output/
+10_output/*
 static/pdfs/
+
+# …except the company-name casing registry. It is public company names only, no
+# PII, and it is what pins one spelling per company in make_safe_name() — losing
+# it brings back the filename case collisions that broke Syncthing against the
+# case-insensitive Mac volume. Replication is not history: a bad edit propagates.
+# (The rule above is 10_output/* rather than 10_output/ because git cannot
+# re-include a file whose parent directory is itself excluded.)
+!10_output/_company_casing.json
+
+# The same documents by name, wherever they land. A generator run from the
+# wrong cwd (or a --dir left at its default) drops them in the repo root,
+# where the directory rules above do not reach — and they are exactly the
+# PII those rules exist to keep out of history.
+*_CV.md
+*_CL.md
+*_review.md
+*_email.md
 
 # Staging — contains raw scraped job data (large + ephemeral)
 00_saved/
@@ -48,4 +65,4 @@ playwright-report/
 test-results/
 
 # Debug output
-debug_*.pystatic/
+debug_*.py

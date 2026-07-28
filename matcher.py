@@ -1958,9 +1958,63 @@ def classify_job_categories(title: str) -> list[str]:
     return cats
 
 
+_COMPANY_CASING_PATH = Path(
+    _os.environ.get("JIS_COMPANY_CASING_PATH")
+    or Path(__file__).resolve().parent / "10_output" / "_company_casing.json"
+)
+_company_casing: dict[str, str] | None = None
+
+
+def _load_company_casing() -> dict[str, str]:
+    """Registry of the canonical spelling to use for each company.
+
+    Job boards disagree on case for the same employer — Adzuna returns
+    "PONTOON", Reed returns "Pontoon" — and each spelling used to produce its
+    own set of files. Linux keeps both; macOS cannot, so Syncthing stalls on the
+    pair with a "different upper or lowercase characters" error. Pinning one
+    spelling per company makes that collision impossible by construction.
+    """
+    global _company_casing
+    if _company_casing is None:
+        try:
+            import json
+            with open(_COMPANY_CASING_PATH, encoding="utf-8") as fh:
+                _company_casing = {str(k): str(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            _company_casing = {}
+    return _company_casing
+
+
+def canonical_company(company: str) -> str:
+    """Map a company name onto its registered spelling, registering it if new.
+
+    Unknown companies claim their first-seen spelling, so the registry grows on
+    its own and existing filenames never move.
+    """
+    name = (company or "").strip()
+    if not name:
+        return name
+    registry = _load_company_casing()
+    key = name.lower()
+    known = registry.get(key)
+    if known is not None:
+        return known
+    registry[key] = name
+    try:
+        import json
+        _COMPANY_CASING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _COMPANY_CASING_PATH.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(dict(sorted(registry.items())), fh, ensure_ascii=False, indent=2)
+        tmp.replace(_COMPANY_CASING_PATH)
+    except OSError:
+        pass  # in-memory registry still keeps this run internally consistent
+    return name
+
+
 def make_safe_name(company: str, title: str) -> str:
     """Create a unified safe base name for all generated files (match, CV, CL)."""
-    safe_company = re.sub(r'[^\w\s-]', '', company).strip().replace(' ', '_')[:30]
+    safe_company = re.sub(r'[^\w\s-]', '', canonical_company(company)).strip().replace(' ', '_')[:30]
     safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')[:50]
     return f"{safe_company}_{safe_title}"
 
