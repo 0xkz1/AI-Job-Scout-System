@@ -232,7 +232,24 @@ def select_top(
     ranked = ranked_jobs(config, jobs)
     pct = percent if percent is not None else stage_percent(config, stage)
     k = top_percent_count(len(ranked), pct)
+
+    # Take everything scoring at least as much as rank k, not literally ranked[:k].
+    # Composite scores are quantised to 2 decimals, so equal scores come in blocks —
+    # 19 jobs sat on exactly 0.5400 in a 665-job pool, with the top-30% boundary
+    # falling at rank 200, inside that block. A plain slice keeps 10 of the 19 and
+    # drops 9, and since the sort is stable the split is decided by row order in
+    # _analyzed.json rather than by anything about the jobs. That made the set churn
+    # on any reshuffle: excluding 54 off-trade titles moved the boundary and pushed
+    # 16 already-generated jobs — every one of them on 0.54 — out of selection while
+    # jobs on the same score stayed in.
+    #
+    # Cost is a bounded overshoot of the configured percentage (200 -> 209 here,
+    # 31.4% instead of 30%). Paid deliberately: a percentage is an approximation of
+    # "the good ones", and there is no basis for preferring one 0.54 job over another.
     top = ranked[:k]
+    if top:
+        cutoff = top[-1]["match"]["composite_score"]
+        top = [j for j in ranked if j["match"]["composite_score"] >= cutoff]
 
     floor = config.get("match_score_threshold")
     if floor:

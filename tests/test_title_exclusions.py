@@ -66,9 +66,18 @@ def test_no_excluded_keyword_removes_a_job_from_the_generation_set(config, corpu
     if not trade:
         pytest.skip("no trade terms configured")
     unfiltered = dict(config, exclude_title_keywords=list(SENIORITY))
+    generation = select_top("generation", unfiltered)
+    # Jobs on the lowest score in the set are admitted as a block, on the grounds
+    # that there is no basis for preferring one of them over another — not because
+    # they beat the job below. Their membership is a tie-breaking policy, so one of
+    # them matching a trade term says nothing about whether that term is justified;
+    # "Civil Engineer" arrived this way, on exactly the 0.53 boundary. Measure the
+    # jobs that are in the set on score alone.
+    boundary = min((j["match"]["composite_score"] for j in generation), default=None)
     casualties = [
         (j.get("title"), k)
-        for j in select_top("generation", unfiltered)
+        for j in generation
+        if j["match"]["composite_score"] > boundary
         for k in trade
         if _matches(k, j.get("title"))
     ]
