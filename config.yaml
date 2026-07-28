@@ -21,12 +21,38 @@ exclude_description_keywords:
 # thrown away.
 - deutschkenntnisse            # incl. "sehr gute Deutschkenntnisse"
 - gute deutsch                 # "sehr gute Deutsch- und Englischkenntnisse"
+# Seniority, then trade. The seniority terms keep roles above the candidate's level
+# out; the trade terms keep out professions the candidate cannot do at all.
+#
+# The trade list was added 2026-07-28 after measuring where reed's volume goes: of
+# 531 filter-passing reed jobs, 289 scored under 0.35, and the commonest words in
+# those titles were engineer, electrical, mechanical, technician. The composite
+# score does not reject them reliably — "Electrical Design Engineer" reached 0.78,
+# because "design" and "engineer" read as relevant to a product designer — so 54 of
+# them sat in the ranked pool and every one had been paid for: filter-passing jobs
+# go on to LLM enrichment. Excluding them at the title drops 118 jobs before that
+# spend, and costs nothing measurable: NONE of the 118 is in the generation set.
+#
+# Every term below matches at least one real posting (tests/test_title_exclusions.py
+# fails otherwise) — the German keyword list grew two invented phrases that way.
+# "structural", "technician", "sales" and "estimator" were considered and left out:
+# "Art Technician" reached composite 0.67 and "Sales Designer (Kitchens)" 0.50, so
+# those words are not reliable trade markers here. The review score handles them
+# instead — Art Technician reviewed at 30.
 exclude_title_keywords:
 - senior
 - lead
 - head of
 - director
 - manager
+- electrical
+- mechanical
+- civil
+- geotechnical
+- quantity surveyor
+- welder
+- nurse
+- driver
 include_levels:
 - entry_level
 - mid
