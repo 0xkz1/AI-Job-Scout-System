@@ -1042,11 +1042,16 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
     LLM has replied and the user has settled them. Reviews are produced by the
     batch runner (skips unchanged docs), not by per-row buttons."""
     import re
+    import hashlib
     from reviewer import review_is_current, detect_annotations
     display = "CV" if label == "CV" else "Cover Letter"
     if not md_path.exists():
         st.caption(f"{display}: —")
         return
+    # md_path.stem collides when two different jobs (distinct urls) resolve to
+    # the same filename base (see resolve_doc_base) — widget keys need a
+    # per-job suffix on top of the stem to stay unique.
+    key_suffix = hashlib.md5((job or {}).get("url", "").encode()).hexdigest()[:8] if job else ""
     is_cur, rpath = review_is_current(md_path)
     if not rpath or not rpath.exists():
         st.caption(f"{display}: レビュー未実施")
@@ -1090,7 +1095,7 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
         # pending annotations until the next batch re-review.
         if (notes or notes is None) and job is not None:
             btn_label = "💬 追記に回答して修正案を更新" if notes else "💬 追記があれば回答させる (原本未登録の旧レビュー)"
-            if st.button(btn_label, key=f"respond_{md_path.stem}",
+            if st.button(btn_label, key=f"respond_{md_path.stem}_{key_suffix}",
                          help="LLMがあなたの追記(質問・反論・賛成)に回答し、正当な指摘は修正案に反映した改訂版レビューを書きます。旧版は 15_reviews/archive/ に保存"):
                 with st.spinner("LLMが追記を読んで回答中…"):
                     try:
@@ -1123,7 +1128,7 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
                 opts = [DOC_ONLY, f"{TO_SOURCE} (`{src}`)", SKIP] if src else [DOC_ONLY, SKIP]
                 choice_by_orig[orig] = st.radio(
                     "適用先", opts, horizontal=True, index=0,
-                    key=f"dest_{md_path.stem}_{i}", label_visibility="collapsed",
+                    key=f"dest_{md_path.stem}_{key_suffix}_{i}", label_visibility="collapsed",
                 )
                 # Never omit the source option silently — say why it is absent.
                 if why:
@@ -1138,7 +1143,7 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
                     }[kind])
             if st.button(
                 f"✅ 選択した修正を適用",
-                key=f"apply_{md_path.stem}",
+                key=f"apply_{md_path.stem}_{key_suffix}",
                 help="この文書: レビュー引用と完全一致する箇所のみ置換 (バックアップ: 15_reviews/.backups/)。"
                      "元ファイル: profile/projects 等のマスター側も置換 (バックアップ: 15_reviews/.source_backups/)",
             ):
@@ -1186,7 +1191,7 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
             )
             if st.button(
                 f"🔄 {display}を今のマスターから再生成",
-                key=f"regen_{md_path.stem}",
+                key=f"regen_{md_path.stem}_{key_suffix}",
                 help="career/cv/ の profile/projects/toolkit と role_title/role_tagline から作り直します。"
                      "現在のファイルは 15_reviews/.backups/ にバックアップされます。手動編集は失われます",
             ):
@@ -1690,9 +1695,10 @@ with tab_watched:
     st.divider()
     st.subheader("✉️ D: Email Outreach (メール下書き)")
     st.caption(
-        "`00_saved/email-list.md` の表に「メール / 会社名 / URL / ロール / メモ」を記入 → 下のボタンで "
-        "`10_output/30_emails/` にテンプレートから下書きを生成。会社名が空欄の行は企業ドメインから推定 "
-        "(gmail 等は推定不可)。既存の下書きは上書きしません — 作り直すにはファイルを削除。"
+        "`00_saved/email-targets/` に1社1ノート (`00_saved/Email Targets.base` から編集) → 下のボタンで "
+        "`10_output/30_emails_draft/` にテンプレートから下書きを生成。会社名が空欄のノートは企業ドメインから推定 "
+        "(gmail 等は推定不可)。メールアドレスが未記入のターゲット (フォーム応募など) は一覧には出ますが "
+        "下書きは作られません。既存の下書きは上書きしません — 作り直すにはファイルを削除。"
     )
 
     from email_outreach import (
@@ -1711,6 +1717,7 @@ with tab_watched:
                 "" if resolved_profile(r["role"]) == r["role"] else " (フォールバック)"),
             "CV": (outreach_cv_path(r).name if outreach_cv_path(r) and outreach_cv_path(r).exists() else "—"),
             "下書き": (draft_path(r).name if draft_path(r) and draft_path(r).exists() else "—"),
+            "送信": "✅" if r["sent"] else "—",
             "メモ": r["notes"],
         } for r in _email_rows]), hide_index=True, width="stretch")
 
@@ -1727,17 +1734,17 @@ with tab_watched:
                 failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
                 if created:
                     st.success("生成: " + ", ".join(f"`{p.name}`" for _r, p in created)
-                               + " → `10_output/31_outreach_cvs/`")
+                               + " → `10_output/31_emails_cvs/`")
                 if skipped:
                     st.info(f"{len(skipped)}件は最新版のためスキップ "
                             "(CV生成の仕様やデータが変わると次回自動で作り直します)")
                 for r, s in failed:
                     st.warning(f"{r['email']}: {s}")
-                # Write [[wikilinks]] back into email-list.md's CV column so
-                # Obsidian readers can jump straight from the list to the CV.
+                # Write [[wikilinks]] back into each target note's cv: frontmatter
+                # so Obsidian readers can jump straight from the Base to the CV.
                 if created or skipped:
                     if link_outputs_into_list():
-                        st.caption("📎 email-list.md の「CV」列にリンクを記入しました")
+                        st.caption("📎 ターゲットノートの `cv:` にリンクを記入しました")
                 if created:
                     st.rerun()
         with col_mail:
@@ -1748,17 +1755,17 @@ with tab_watched:
                 failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
                 if created:
                     st.success("生成: " + ", ".join(f"`{p.name}`" for _r, p in created)
-                               + " → `10_output/30_emails/` (Obsidianで編集して送信)")
+                               + " → `10_output/30_emails_draft/` (Obsidianで編集して送信)")
                 if skipped:
                     st.info(f"{len(skipped)}件は既存の下書きあり — 変更する場合はファイル側を直接編集、"
                             "またはテンプレート変更後は「🔄 作り直す」で上書き")
                 for r, s in failed:
                     st.warning(f"{r['email']}: {s}")
-                # Write [[wikilinks]] back into email-list.md's 下書き column so
-                # Obsidian readers can jump straight from the list to the draft.
+                # Write [[wikilinks]] back into each target note's draft: frontmatter
+                # so Obsidian readers can jump straight from the Base to the draft.
                 if created or skipped:
                     if link_outputs_into_list():
-                        st.caption("📎 email-list.md の「下書き」列にリンクを記入しました")
+                        st.caption("📎 ターゲットノートの `draft:` にリンクを記入しました")
                     st.rerun()
         with col_regen:
             if st.button("🔄 作り直す (上書き)", key="regen_emails",
@@ -1768,7 +1775,7 @@ with tab_watched:
                 created = [(r, p) for r, p, s in results if s == "created"]
                 failed = [(r, s) for r, p, s in results if s not in ("created", "exists")]
                 if created:
-                    st.success(f"{len(created)}件を最新テンプレートで作り直しました → `10_output/30_emails/`")
+                    st.success(f"{len(created)}件を最新テンプレートで作り直しました → `10_output/30_emails_draft/`")
                 for r, s in failed:
                     st.warning(f"{r['email']}: {s}")
                 if created:
@@ -1795,7 +1802,7 @@ with tab_watched:
                 if ok_count:
                     st.caption(f"Gmail の「下書き」フォルダを開いて内容を確認してから送信してください。")
     else:
-        st.info("email-list.md の表にまだ行がありません。メール列に @ を含む行を追加してください。")
+        st.info("`00_saved/email-targets/` にまだノートがありません。`Email Targets.base` から追加してください。")
 
     _drafts = sorted(EMAIL_OUT_DIR.glob("*.md")) if EMAIL_OUT_DIR.exists() else []
     if _drafts:

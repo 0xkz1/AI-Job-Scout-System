@@ -59,7 +59,7 @@ def main() -> int:
                     help="write changes (default is a read-only dry-run)")
     ap.add_argument("--dir", default=str(CV_DIR),
                     help="directory of *_CV.md to patch (default: 10_output/10_cvs; "
-                         "pass 10_output/31_outreach_cvs for the email-outreach CVs)")
+                         "pass 10_output/31_emails_cvs for the email-outreach CVs)")
     args = ap.parse_args()
     cv_dir = Path(args.dir)
 

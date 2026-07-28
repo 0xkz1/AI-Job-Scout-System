@@ -1,14 +1,14 @@
-"""Cold-email draft generation from 00_saved/email-list.md.
+"""Cold-email draft generation from 00_saved/email-targets/.
 
-The list is a markdown table (email / company / url / role / notes). Company
-name resolution: the table column is authoritative; when empty, it is guessed
-from the email's domain — corporate domains only, freemail providers cannot
+Each target is one note whose frontmatter holds email / company / url / role /
+notes / sent. Company name resolution: the note's field is authoritative; when
+empty, it is guessed from the email's domain — corporate domains only, freemail providers cannot
 name a company. Drafts are template fills (career/email/<role>.md,
 mirroring career/cover-letter/'s per-role files — falls back to general.md),
 no LLM: outreach mail must be short, factual, and entirely the sender's own
 words.
 
-Output: 10_output/30_emails/<Company>_email.md (skipped if it already exists,
+Output: 10_output/30_emails_draft/<Company>_email.md (skipped if it already exists,
 so hand-edited drafts are never clobbered — delete a draft to regenerate it).
 """
 import re
@@ -16,15 +16,16 @@ from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-EMAIL_LIST = ROOT / "00_saved" / "email-list.md"
+EMAIL_LIST = ROOT / "00_saved" / "email-list.md"  # superseded by EMAIL_TARGETS, kept for reference
+EMAIL_TARGETS = ROOT / "00_saved" / "email-targets"
 TEMPLATE_DIR = ROOT.parent / "email"
 SIGNATURE_PATH = TEMPLATE_DIR / "_signature.md"
-OUT_DIR = ROOT / "10_output" / "30_emails"
+OUT_DIR = ROOT / "10_output" / "30_emails_draft"
 PROFILE_DIR = ROOT.parent / "cv" / "profile"
 
 
 def _normalize_role(role: str) -> str:
-    """email-list.md's ロール column is free text ("Product Designer"), but
+    """A target note's role field is free text ("Product Designer"), but
     profile/email-template filenames are snake_case ("product_designer.md") —
     an exact-string lookup on the raw text never matches even when the right
     profile exists, and silently falls back to general.md with no warning.
@@ -67,79 +68,79 @@ def guess_company(email: str) -> str | None:
     return re.sub(r"[-_]+", " ", label).title()
 
 
-# Table header cells → row dict keys. Matched by substring so column order
-# and exact Japanese wording in email-list.md can change freely.
-_HEADER_MAP = [
-    ("メール", "email"), ("email", "email"), ("mail", "email"),
-    ("会社", "company"), ("company", "company"),
-    ("url", "url"),
-    ("ロール", "role"), ("role", "role"),
-    ("下書き", "draft"), ("draft", "draft"),
-    ("cv", "cv"),
-    ("メモ", "notes"), ("notes", "notes"),
-]
+def _read_frontmatter(path: Path) -> dict:
+    """Frontmatter of a target note as a dict, or {} if it has none.
 
-
-def _detect_columns(header_line: str) -> dict[int, str] | None:
-    cells = [c.strip().lower() for c in header_line.strip().strip("|").split("|")]
-    cols = {}
-    for i, cell in enumerate(cells):
-        for needle, key in _HEADER_MAP:
-            if needle in cell:
-                cols[i] = key
-                break
-    return cols if "email" in cols.values() else None
-
-
-def parse_email_list(path: Path = EMAIL_LIST) -> list[dict]:
-    """Rows from the markdown table: [{email, company, url, role, notes,
-    company_guessed}]. Columns are located by header text, not position, so
-    reordering the table (e.g. company before email) does not break parsing.
-    Rows without an @ in the email column are ignored; company falls back to
-    a domain guess when left blank. role is slugified (_normalize_role) so
-    it can be used directly as a profile/email-template lookup key — use
-    resolved_profile(row["role"]) to see whether it actually matched a file
-    or will fall back to general."""
-    rows = []
+    Hand-rolled rather than yaml.safe_load because these notes are edited in
+    Obsidian, where a stray unquoted colon in 会社名 or メモ is easy to
+    introduce and would make a strict YAML parse raise — dropping the whole
+    target silently. Splitting on the first colon degrades to a slightly wrong
+    string instead of losing the row.
+    """
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    except OSError:
+        return {}
+    m = re.match(r"\A---\n(.*?)\n---", text, flags=re.DOTALL)
+    if not m:
+        return {}
+    out: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        out[key.strip()] = val
+    return out
+
+
+def parse_email_list(path: Path = EMAIL_TARGETS) -> list[dict]:
+    """Targets as [{email, company, url, role, notes, company_guessed, sent,
+    sent_at, path}], one per note in 00_saved/email-targets/.
+
+    Each target is its own note so Bases can filter and sort on the fields and
+    the 送信 checkbox writes straight back to `sent` — a tick in the old
+    markdown table was only text and could not be queried.
+
+    Targets with no usable address (a contact form, or one not found yet) are
+    still returned, with email "" — they are real targets the user tracks, and
+    the draft/CV generators skip them on their own. company falls back to a
+    domain guess when left blank. role is slugified (_normalize_role) so it can
+    be used directly as a profile/email-template lookup key — use
+    resolved_profile(row["role"]) to see whether it actually matched a file or
+    will fall back to general.
+    """
+    rows = []
+    if not path.is_dir():
         return rows
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-
-    cols: dict[int, str] | None = None
-    for line in text.splitlines():
-        if "|" not in line:
+    for note in sorted(path.glob("*.md")):
+        fm = _read_frontmatter(note)
+        if not fm or fm.get("type") != "email_target":
             continue
-        if re.fullmatch(r"[|\-:\s]+", line.strip()):
-            continue  # markdown header separator row (---|---|---)
-        if cols is None:
-            cols = _detect_columns(line)
-            continue  # this line IS the header — never a data row
-
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        by_key = {key: (cells[i] if i < len(cells) else "") for i, key in cols.items()}
-        # The email cell may be a markdown/mailto link, e.g.
-        # "[a@b.com](mailto:a@b.com)" — Obsidian renders bare addresses that
-        # way. Extract the bare address so downstream matching and domain
-        # guessing see a clean email, not markup.
-        m = re.search(r"[\w.+-]+@[\w.-]+", by_key.get("email", ""))
-        if not m:
-            continue
-        email = m.group(0)
-        company = by_key.get("company", "")
-        guessed = False
-        if not company:
+        # the address may be written as a markdown/mailto link — Obsidian
+        # renders bare addresses that way — so pull out the bare address
+        m = re.search(r"[\w.+-]+@[\w.-]+", fm.get("email", ""))
+        email = m.group(0) if m else ""
+        company = fm.get("company", "").strip()
+        guessed = fm.get("company_guessed", "").lower() == "true"
+        if not company and email:
             g = guess_company(email)
             if g:
                 company, guessed = g, True
+        if not company:
+            continue  # nothing to name a draft or CV after
         rows.append({
             "email": email,
             "company": company,
-            "url": by_key.get("url", ""),
-            "role": _normalize_role(by_key.get("role", "") or "general"),
-            "notes": by_key.get("notes", ""),
+            "url": fm.get("url", ""),
+            "role": _normalize_role(fm.get("role", "") or "general"),
+            "notes": fm.get("notes", ""),
             "company_guessed": guessed,
+            "sent": fm.get("sent", "").lower() == "true",
+            "sent_at": fm.get("sent_at", ""),
+            "path": note,
         })
     return rows
 
@@ -153,7 +154,7 @@ def draft_path(row: dict) -> Path | None:
     return OUT_DIR / f"{make_safe_name(row['company'], 'email')}.md"
 
 
-CV_OUT_DIR = ROOT / "10_output" / "31_outreach_cvs"
+CV_OUT_DIR = ROOT / "10_output" / "31_emails_cvs"
 
 
 def outreach_cv_path(row: dict) -> Path | None:
@@ -234,7 +235,12 @@ def generate_draft(row: dict, force: bool = False) -> tuple[Path | None, str]:
     (company-specific tweaks made directly in Obsidian) must survive a normal
     re-click, or every template iteration silently destroys that editing."""
     if not row["company"]:
-        return None, "会社名なし (フリーメールで推定不可 — 表に記入してください)"
+        return None, "会社名なし (フリーメールで推定不可 — ノートに記入してください)"
+    if not row["email"]:
+        # targets contacted through a web form, or whose address is not found
+        # yet, are kept in the list on purpose — but a draft with an empty
+        # `to:` is worse than no draft, so leave it for the user to fill in
+        return None, "メールアドレスなし (フォーム応募/未取得 — 送信先が決まったらノートに記入)"
 
     role = row["role"] or "general"
     tpl_path = TEMPLATE_DIR / f"{role}.md"
@@ -308,88 +314,51 @@ _LINK_COLUMN_SPECS = [
 ]
 
 
-def link_outputs_into_list(path: Path = EMAIL_LIST) -> bool:
-    """Add/update 下書き and CV columns in email-list.md with Obsidian
-    wikilinks to each row's generated draft / outreach CV, matched by email
-    address. Only touches the header row (inserts either column if missing)
-    and existing data rows' draft/CV cells — every other cell, and any
-    non-table content (prose, comments, blank lines), is copied through
-    byte-for-byte. Returns False (no write) when the table can't be safely
-    located, so a hand-edited file is never risked.
+def link_outputs_into_list(path: Path = EMAIL_TARGETS) -> bool:
+    """Write [[wikilinks]] to each target's generated draft / outreach CV back
+    into that target note's `draft:` and `cv:` frontmatter, so an Obsidian
+    reader can jump from the Bases table straight to the file.
+
+    Only the two keys are touched: they are inserted just before the closing
+    `---` when absent, and rewritten in place when the link changed. Every
+    other frontmatter line and the whole note body are copied through
+    unchanged, so hand-written notes and ordering survive. Returns False only
+    when the targets directory is missing.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    if not path.is_dir():
         return False
 
-    lines = text.splitlines(keepends=True)
-    header_idx = sep_idx = None
-    cols: dict[int, str] | None = None
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if "|" not in stripped:
+    for row in parse_email_list(path):
+        note = row["path"]
+        try:
+            text = note.read_text(encoding="utf-8")
+        except OSError:
             continue
-        if re.fullmatch(r"[|\-:\s]+", stripped):
-            if header_idx is not None and sep_idx is None:
-                sep_idx = i
-            continue
-        if header_idx is None:
-            detected = _detect_columns(stripped)
-            if detected is not None:
-                header_idx, cols = i, detected
-    if header_idx is None or sep_idx is None or cols is None:
-        return False  # no recognizable table — do nothing rather than guess
-
-    def split_row(line: str) -> list[str]:
-        return [c.strip() for c in line.strip().strip("|").split("|")]
-
-    header_cells = split_row(lines[header_idx])
-    ncols = len(header_cells)
-    positions: dict[str, int] = {}
-    header_added = False
-    for key, label, _fn in _LINK_COLUMN_SPECS:
-        pos = next((i for i, k in cols.items() if k == key), None)
-        if pos is None:
-            header_cells.append(label)
-            pos = ncols
-            ncols += 1
-            header_added = True
-            sep_cells = split_row(lines[sep_idx])
-            sep_cells.append("---")
-            lines[sep_idx] = "| " + " | ".join(sep_cells) + " |\n"
-        positions[key] = pos
-    changed = header_added
-    if header_added:
-        lines[header_idx] = "| " + " | ".join(header_cells) + " |\n"
-
-    email_col = next(i for i, k in cols.items() if k == "email")
-    rows_by_email = {r["email"]: r for r in parse_email_list(path)}
-    for i in range(sep_idx + 1, len(lines)):
-        stripped = lines[i].strip()
-        if "|" not in stripped:
-            break  # table ended
-        cells = split_row(lines[i])
-        while len(cells) < ncols:
-            cells.append("")
-        email = cells[email_col] if email_col < len(cells) else ""
-        m = re.search(r"[\w.+-]+@[\w.-]+", email)
+        m = re.match(r"\A---\n(.*?)\n---", text, flags=re.DOTALL)
         if not m:
-            continue
-        row = rows_by_email.get(m.group(0))
-        if row is None:
-            continue
+            continue  # no frontmatter to update — never guess where to put it
+
+        fm_lines = m.group(1).splitlines()
+        changed = False
         for key, _label, path_fn in _LINK_COLUMN_SPECS:
             p = path_fn(row)
-            if p and p.exists():
-                link = f"[[{p.stem}]]"
-                pos = positions[key]
-                if cells[pos] != link:
-                    cells[pos] = link
-                    changed = True
-        lines[i] = "| " + " | ".join(cells) + " |\n"
+            if not (p and p.exists()):
+                continue
+            want = f'{key}: "[[{p.stem}]]"'
+            idx = next((i for i, ln in enumerate(fm_lines)
+                        if ln.split(":", 1)[0].strip() == key), None)
+            if idx is None:
+                fm_lines.append(want)
+                changed = True
+            elif fm_lines[idx].strip() != want:
+                fm_lines[idx] = want
+                changed = True
 
-    if changed:
-        path.write_text("".join(lines), encoding="utf-8")
+        if changed:
+            note.write_text(
+                "---\n" + "\n".join(fm_lines) + "\n---" + text[m.end():],
+                encoding="utf-8",
+            )
     return True
 
 
@@ -678,7 +647,7 @@ def save_imap_draft(row: dict, cv_pdf: Path | None = None) -> tuple[bool, str]:
 if __name__ == "__main__":
     results = generate_all()
     if not results:
-        print("email-list.md に有効な行がありません (メール列に @ を含む表の行が必要)")
+        print("00_saved/email-targets/ に有効なターゲットがありません (type: email_target のノートが必要)")
     for row, path, status in results:
         print(f"  {row['email']:35s} {row['company']:20s} → {status}"
               + (f"  {path.name}" if path else ""))
