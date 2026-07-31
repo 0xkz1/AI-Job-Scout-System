@@ -162,7 +162,10 @@ def outreach_cv_path(row: dict) -> Path | None:
     if not row["company"]:
         return None
     from matcher import make_safe_name
-    return CV_OUT_DIR / f"{make_safe_name(row['company'], 'cv')}_CV.md"
+    # make_safe_name returns "{company}_{title}", so the title arg already
+    # carries the suffix. Appending "_CV" on top of a 'cv' title produced
+    # "Company_cv_CV.md"; match the email path's single-suffix pattern.
+    return CV_OUT_DIR / f"{make_safe_name(row['company'], 'CV')}.md"
 
 
 def _stamp_fingerprint(text: str, stamp_line: str) -> str:
@@ -262,7 +265,7 @@ def generate_draft(row: dict, force: bool = False) -> tuple[Path | None, str]:
     try:
         signature = SIGNATURE_PATH.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        signature = "Kazuki Yunomé"
+        signature = "Kazuki Yunome"
 
     fills = {
         "company": row["company"],
