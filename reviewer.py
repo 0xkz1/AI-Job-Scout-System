@@ -183,7 +183,7 @@ def _load_review_facts() -> str:
     That starved base produced false fabrication findings: "Product designer
     with a systems-level approach to UX and UI" was flagged as unverified even
     though portfolio_website.md ("Portfolio Website Design & Development" —
-    HTML/CSS/JS/GSAP/Front-End Engineering) and feral-research-living-archive
+    HTML/CSS/JS/GSAP/Front-End Engineering) and taifunome-research-platform
     .md (Web Design, Frontend Engineering, React) evidence exactly that. The
     CV is GENERATED from these project files, so they must be part of what it
     is checked against — otherwise the reviewer calls the CV's own sources

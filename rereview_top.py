@@ -4,7 +4,7 @@ Written after _load_review_facts() replaced a 2500-char persona slice with the
 full persona + every career/cv/projects entry: existing reviews were produced
 against that starved evidence base and wrongly flagged substantiated claims
 (e.g. "systems-level approach to UX and UI", evidenced by portfolio_website.md
-and feral-research-living-archive.md) as fabrication. Those stale verdicts stay
+and taifunome-research-platform.md) as fabrication. Those stale verdicts stay
 on disk until the documents are reviewed again.
 
 Checkpoint-free by nature — run_review() writes each review file as it goes, so
