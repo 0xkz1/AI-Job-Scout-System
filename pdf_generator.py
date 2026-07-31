@@ -47,7 +47,9 @@ PDF_DIR = OUTPUT_DIR / "20_pdfs"
 BASE_CSS = """
 @page {
     size: A4;
-    margin: 18mm 18mm 16mm 18mm;
+    /* Tightened from 18mm: a CV that spills onto a third page loses the
+       reader, and this is the largest margin that still reads as generous. */
+    margin: 13mm 14mm 12mm 14mm;
     @bottom-center {
         content: counter(page);
         font-size: 9pt;
@@ -65,8 +67,8 @@ BASE_CSS = """
 
 body {
     font-family: "Georgia", "Times New Roman", serif;
-    font-size: 10.5pt;
-    line-height: 1.5;
+    font-size: 9.8pt;
+    line-height: 1.32;
     color: var(--body-color);
     margin: 0;
     padding: 0;
@@ -90,6 +92,7 @@ h2 {
     margin: 14pt 0 4pt 0;
     padding-bottom: 2pt;
     border-bottom: 0.5pt solid var(--border-color);
+    page-break-after: avoid;
     text-transform: uppercase;
     letter-spacing: 0.5pt;
 }
@@ -197,6 +200,12 @@ def generate_pdf(md_path: Path, output_pdf_path: Path, is_cover_letter: bool = F
         md_text = md_path.read_text(encoding="utf-8")
         if not md_text.strip():
             return False
+        # Obsidian metadata belongs to the note, never to the printed document:
+        # without this the YAML block renders as the first page of the CV.
+        md_text = re.sub(r"\A---\n.*?\n---\n", "", md_text, flags=re.DOTALL)
+        # Wiki-links would otherwise print as [[career/cv/...]] noise.
+        md_text = re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]",
+                         lambda m: m.group(2) or m.group(1), md_text)
         html = md_to_html(md_text, is_cover_letter=is_cover_letter)
         HTML(string=html).write_pdf(str(output_pdf_path))
         return True

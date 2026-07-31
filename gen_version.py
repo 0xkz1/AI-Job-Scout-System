@@ -38,7 +38,7 @@ TEMPLATE_DIR = PROFILE_DIR / "career" / "cover-letter"
 # job to a different role, that pair's fingerprint changes on its own and only
 # it rebuilds. Bump this only for logic that the data-file hashes cannot see
 # (prompt wording, a gate rule, the digest shape).
-GEN_SPEC_VERSION = "2026-07-24.1"  # salvage over-long but honest openings instead of falling back to template
+GEN_SPEC_VERSION = "2026-07-31.3"  # 4 write-ups, compressed project bodies, merged EDUCATION+LANGUAGES — two A4 pages
 
 # Data files whose CONTENT feeds every pair, regardless of role.
 _GLOBAL_FILES = [

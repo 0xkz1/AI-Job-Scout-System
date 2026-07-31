@@ -825,12 +825,21 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     # and meaningful single line breaks. Preprocess into real markdown.
     lines = text.strip().split("\n")
     out_lines = []
+    # Bold-only lines are entry titles in EXPERIENCE/SELECTED PROJECTS but mere
+    # category labels in the toolkit; only the former need breathing room.
+    titles_want_space = False
     for i, line in enumerate(lines):
         stripped = line.strip()
         if i == 0 and stripped and not stripped.startswith("#"):
             out_lines.append(f"# {stripped}")  # first line = candidate name
         elif re.fullmatch(r"[A-Z][A-Z &/'’\-]{2,40}", stripped):
+            titles_want_space = stripped in ("EXPERIENCE", "SELECTED PROJECTS")
             out_lines.append(f"\n## {stripped}")  # ALL-CAPS section header
+        elif titles_want_space and re.fullmatch(r"\*\*[^*]+\*\*", stripped):
+            # A line that is nothing but bold text is a job/project title.
+            # Left as a paragraph, nl2br glues it to the description beneath
+            # it with no space at all; as a heading it gets its own margin.
+            out_lines.append(f"\n### {stripped.strip('*')}")
         elif stripped.startswith("•"):
             out_lines.append("- " + stripped.lstrip("• "))
         else:
@@ -839,13 +848,15 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
 
     body = _markdown.markdown(text, extensions=["tables", "fenced_code", "nl2br"])
     html = f"""<html><head><meta charset="utf-8"><style>
-        @page {{ size: A4; margin: 18mm 16mm; }}
-        body {{ font-family: "DejaVu Sans", sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1a1a1a; }}
-        h1 {{ font-size: 17pt; margin: 0 0 4pt; }}
-        h2 {{ font-size: 12.5pt; border-bottom: 1px solid #999; padding-bottom: 2pt; margin: 14pt 0 6pt; }}
-        h3 {{ font-size: 11pt; margin: 10pt 0 3pt; }}
-        p, li {{ margin: 3pt 0; }}
-        ul {{ padding-left: 14pt; }}
+        /* Tightened so a CV lands in as few pages as possible without
+           reading as cramped — a third page is rarely reached by a reader. */
+        @page {{ size: A4; margin: 13mm 14mm; }}
+        body {{ font-family: "DejaVu Sans", sans-serif; font-size: 9.5pt; line-height: 1.3; color: #1a1a1a; }}
+        h1 {{ font-size: 16pt; margin: 0 0 3pt; }}
+        h2 {{ font-size: 11.5pt; border-bottom: 1px solid #999; padding-bottom: 2pt; margin: 7pt 0 3pt; page-break-after: avoid; }}
+        h3 {{ font-size: 9.8pt; margin: 6pt 0 1pt; page-break-after: avoid; }}
+        p, li {{ margin: 1.5pt 0; }}
+        ul {{ padding-left: 13pt; }}
         table {{ border-collapse: collapse; width: 100%; }}
         th, td {{ border: 1px solid #ccc; padding: 3pt 6pt; text-align: left; }}
         a {{ color: #1a1a1a; text-decoration: none; }}
@@ -898,9 +909,15 @@ def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
     next sequential version (highest existing number + 1). Returns
     (pdf_path, version_number, is_new).
     """
-    import hashlib
+    import hashlib, inspect
     stem = md_path.stem
-    md_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+    # Key on the renderer too, not just the markdown: CSS and the markdown
+    # preprocessing live in _md_to_pdf_bytes, so a layout change leaves the MD
+    # byte-identical and the old PDF would be reused forever.
+    md_sha = hashlib.sha1(
+        md_path.read_bytes()
+        + inspect.getsource(_md_to_pdf_bytes).encode("utf-8")
+    ).hexdigest()
     versions = _pdf_versions(stem)
     meta = _load_pdf_meta()
 

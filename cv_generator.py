@@ -22,7 +22,7 @@ Obsidian (structured note-taking, workflow organisation, Zettelkasten-style deco
 # thin-employment weakness is countered by structure — a continuous
 # 2017→present work timeline), independent work as a named studio practice,
 # keyword lists (toolkit) after the evidence, no separate strengths list.
-MASTER_CV = """# Kazuki Yunomé
+MASTER_CV = """# Kazuki Yunome
 **{role_title}**
 {role_tagline}
 Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE
@@ -40,14 +40,10 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 ## TECHNICAL TOOLKIT
 {technical_toolkit}
 
-## EDUCATION
-**Hokkai University, Sapporo, Hokkaido | 2013 – 2017**
-Faculty of Humanities, Department of English and American Culture
-**Escuela Falcon, Guanajuato, México | 2016 (3 months)**
-Spanish Language School
-
-## LANGUAGES
-**Japanese:** Native | **English:** Professional working proficiency | **Spanish:** Daily conversation level"""
+## EDUCATION & LANGUAGES
+**Hokkai University, Sapporo, Hokkaido | 2013 – 2017** — Faculty of Humanities, Department of English and American Culture
+**Escuela Falcon, Guanajuato, México | 2016 (3 months)** — Spanish Language School
+**Languages:** Japanese (native) · English (professional working) · Spanish (daily conversation)"""
 
 # Fallback header if a profile is missing role_title/role_tagline in its
 # frontmatter — keeps generation working rather than rendering "{role_title}"
@@ -444,52 +440,55 @@ def get_employment_section(role_type: str = "") -> str:
 # mirror the LLM path's selection size.
 STATIC_EXPERIENCE = {
     "web_developer": [
+        "taifunome-research-platform",
         "portfolio_website",
         "ai-job-scout-system",
         "hermes-ai-agent-orchestration-system",
-        "asset-weaver-obsidian-plugin",
-        "web3-node-ops",
     ],
     "development_support": [
+        "taifunome-research-platform",
         "ai-job-scout-system",
         "hermes-ai-agent-orchestration-system",
         "ai-asset-tagger-system",
-        "personal-priority-orchestrator",
-        "web3-node-ops",
     ],
     "data_analysis": [
+        "taifunome-research-platform",
         "ai-asset-tagger-system",
         "ai-job-scout-system",
         "personal-priority-orchestrator",
-        "hermes-ai-agent-orchestration-system",
     ],
+    # taifunome-research-platform (platform/engineering) and feral-bestiary-plate-001
+    # (the artwork side) are the two halves of the same project — pair them where
+    # the role wants both build and craft evidence.
     "creative_technologist": [
-        "feral-bestiary-tales-of-return",
+        "taifunome-research-platform",
+        "feral-bestiary-plate-001",
         "ai-creative-workflow-automation",
         "hive-floral-pod-3d-conceptual-art",
-        "feral-research-living-archive",
-        "portfolio_website",
     ],
     "technical_artist": [
-        "feral-bestiary-tales-of-return",
+        "feral-bestiary-plate-001",
         "hive-floral-pod-3d-conceptual-art",
         "ai-creative-workflow-automation",
-        "ai-asset-tagger-system",
-        "asset-weaver-obsidian-plugin",
+        "taifunome-research-platform",
     ],
+    # Product/UX roles judge design decisions, not illustration craft — the
+    # Bestiary plate is an art series and drops to the "Other projects" line
+    # here; it stays top-ranked for technical_artist / creative_technologist.
+    # Four, not five: the CV has to land in two A4 pages, and a fifth full
+    # write-up pushes it over. The dropped entries still appear on the
+    # "Other projects" line, so breadth survives — only depth is rationed.
     "product_designer": [
         "portfolio_website",
-        "feral-bestiary-tales-of-return",
-        "hive-floral-pod-3d-conceptual-art",
         "logo-design-for-myself",
-        "ai-creative-workflow-automation",
+        "taifunome-research-platform",
+        "hive-floral-pod-3d-conceptual-art",
     ],
     "general": [
         "ai-job-scout-system",
         "portfolio_website",
-        "feral-bestiary-tales-of-return",
-        "hermes-ai-agent-orchestration-system",
-        "hive-floral-pod-3d-conceptual-art",
+        "taifunome-research-platform",
+        "feral-bestiary-plate-001",
     ],
 }
 
@@ -608,10 +607,11 @@ AVAILABLE PROJECTS:
 {project_summaries}
 
 INSTRUCTIONS:
-1. Select the 5 projects MOST RELEVANT to this specific job — pick the 5 that
-   deserve full write-ups. Do NOT list, summarise, or mention the remaining
-   projects in any form (no "Additional projects" line) — they are appended
-   automatically by the caller.
+1. Select the 4 projects MOST RELEVANT to this specific job — pick the 4 that
+   deserve full write-ups (four, not five: the CV has to fit two A4 pages).
+   Do NOT list, summarise, or mention the remaining projects in any form
+   (no "Additional projects" line) — they are appended automatically by the
+   caller.
 2. Order them by relevance — most relevant first.
 3. Format each entry exactly as:
    [Project Title] | [Role] | [Period]
@@ -620,8 +620,14 @@ INSTRUCTIONS:
 5. DO NOT add any commentary, headers, or explanations.
 6. Separate entries with a single blank line.
 7. If the job involves front-end/web development, consider including the Portfolio Website project.
-8. If the job involves creative/3D work, prioritize Feral, Arch Viz, and Hive Floral Pod.
-9. If the job involves data/automation, prioritize Independent Development.
+8. For product / UX / UI / visual-design roles, prioritise Portfolio Website,
+   the Identity Mark, Hive Floral Pod, and design-tooling work (Asset Weaver,
+   AI Creative Workflow). Rank the illustration series (Feral Bestiary) LOW
+   unless the posting explicitly asks for illustration, concept art, or
+   narrative art direction — it is an art series, not product design work.
+9. For concept-art / illustration / game-art / 3D roles, prioritise Feral
+   Bestiary, Arch Viz, and Hive Floral Pod.
+10. If the job involves data/automation, prioritize Independent Development.
 
 Write ONLY the Experience section content. No "EXPERIENCE" header.
 NEVER open with the job title you are writing for ("{job_title}") or any other
