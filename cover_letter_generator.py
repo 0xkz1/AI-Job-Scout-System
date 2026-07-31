@@ -105,7 +105,7 @@ def load_cover_template(role_type: str = "general") -> dict:
         return {"opening": "", "experience": "", "skills": "", "closing": "", "team_name": ""}
 
 PERSONAL_INFO = {
-    "name": "Kazuki Yunomé",
+    "name": "Kazuki Yunome",
     "location": "Edinburgh, Scotland, UK",
     "email": "CANDIDATE_EMAIL",
     "phone": "CANDIDATE_PHONE",
@@ -343,8 +343,14 @@ def _load_verification_record() -> str:
 _projects_digest_cache: str | None = None
 
 
-def _first_sentence(description: str, limit: int = 200) -> str:
-    """Opening sentence of a project body, stripped of markdown, for the digest."""
+def _first_sentence(description: str, limit: int = 340) -> str:
+    """Opening sentence of a project body, stripped of markdown, for the digest.
+
+    The limit was 200, which cut the longer entries mid-clause — TAIFUNOME's
+    line ended at "structured so that each new research…", hiding that it is a
+    research platform with a pipeline and a dashboard. The model is told to
+    choose on the "what it is:" line, so a truncated line removes the project
+    from consideration. 340 clears the longest current entry."""
     line = next((l for l in description.split("\n") if l.strip()), "")
     line = re.sub(r"^\s*[•\-\*]\s*", "", line)
     line = re.sub(r"\*\*|\*|`", "", line).strip()
@@ -409,8 +415,9 @@ _ROLE_PROJECT_HINTS = {
     "product_designer":
         "FOR THIS ROLE: it is a design role. Prefer the design-forward projects — "
         "My Personal Identity Mark (visual identity), Hive Floral Pod (3D concept "
-        "design), the Portfolio Website (design + build), Feral Research (design of "
-        "a living archive). Reach for an AI pipeline (Asset Tagger, Asset Weaver) "
+        "design), the Portfolio Website (design + build), TAIFUNOME (brand and "
+        "information architecture, design system). Reach for an AI pipeline "
+        "(Asset Tagger, Asset Weaver) "
         "ONLY if the posting is explicitly about automation or AI tooling; a "
         "graphic/brand/packaging/motion/AV design role is better served by the "
         "visual and product work.",
@@ -424,7 +431,27 @@ _ROLE_PROJECT_HINTS = {
         "pipelines.",
     "web_developer":
         "FOR THIS ROLE: prefer the Portfolio Website (front-end build) and the "
-        "engineering projects (AI Job Scout System, Feral Research, node ops).",
+        "engineering projects — TAIFUNOME (React dashboard, Sanity CMS, design "
+        "system, Python ingestion pipeline), AI Job Scout System, node ops.",
+    "creative_technologist":
+        "FOR THIS ROLE: prefer TAIFUNOME — it is the fullest example of the "
+        "practice, taking one project from brand and information architecture "
+        "through CMS, front end and data pipeline. Feral Bestiary Plate 001 fits "
+        "a posting weighted toward image-making and art direction. Reach for a "
+        "narrower AI pipeline (Asset Tagger, Asset Weaver) only when the posting "
+        "is specifically about that kind of tooling.",
+    "development_support":
+        "FOR THIS ROLE: prefer the systems that run and need maintaining — "
+        "TAIFUNOME (ingestion pipeline over public APIs, n8n workflows, sidecar "
+        "service), AI Job Scout System, Hermes orchestration, node ops.",
+    "data_analysis":
+        "FOR THIS ROLE: prefer the data work — TAIFUNOME (API ingestion into "
+        "SQLite, tagging, fact-checking against reference sources), the EC "
+        "arbitrage system, AI Asset Tagger System.",
+    "general":
+        "FOR THIS ROLE: TAIFUNOME is the strongest single example when the "
+        "posting is broad, since it spans design, front end, back end and data. "
+        "Choose a narrower project when the posting has a clear specialism.",
 }
 
 
@@ -541,6 +568,8 @@ Output ONLY the paragraph."""
 
 # How many times to re-draft an opening before falling back to the template.
 _OPENING_ATTEMPTS = 3
+_CLOSING_MIN_DESCRIPTION = 400  # chars; below this the posting says too little to close on
+_CLOSING_ATTEMPTS = 4  # one more than the opening: a tic rejection is cheap to retry
 # The prompt asks for ≤80 words, but the model clusters around 90-110 and a tight
 # cap just burned the retry budget and fell back to a generic template — worse
 # than a slightly-long tailored opening. Cap only the genuinely bloated (130+
@@ -556,6 +585,151 @@ _BANNED_PHRASES = (
     "without demanding attention",
     "reduce friction between idea and execution",
 )
+
+
+# Measured against 15 pre-gate letters rather than guessed. Only three of the ten
+# phrases originally listed ever appeared: "the result would be" closed 9 of 15,
+# "my approach combines" 3, "without friction" 2 — the other seven scored zero, so
+# gating on them only cost re-rolls and pushed good drafts to the template. All
+# three survivors are the same move: a summarising final sentence reached for when
+# the model has nothing specific left to say. Vague-but-harmless words
+# ("scalable", "clarity") are left to the prompt; rejecting on those raised the
+# fallback rate without improving what replaced them.
+_CLOSING_TICS = (
+    "the result would be",
+    "my approach combines",
+    "my approach bridges",
+    "without friction",
+)
+
+
+def _closing_uses_tic(text: str) -> str | None:
+    """Reject closings that fall back on the house tics.
+
+    Naming these in the prompt was not enough — "The result would be …" still
+    closed 9 of 15 letters, because the model reaches for a summarising final
+    sentence whenever it has nothing specific left to say. Rejecting the draft
+    and re-rolling costs one extra call and produces a closing that ends on the
+    posting's own terms instead.
+    """
+    low = text.lower()
+    for tic in _CLOSING_TICS:
+        if tic in low:
+            return f"closing tic: {tic!r}"
+    return None
+
+
+def _generate_closing_hook(job_title: str, company: str, job_description: str = "") -> str | None:
+    """Write the CLOSING paragraph for this specific posting, or None.
+
+    The letter used to end on a role-type template with {company} slotted in, so
+    nothing in it ever said what the candidate would actually DO in this job. The
+    opening establishes fit and the middle sections carry fixed evidence; this
+    fills the remaining gap — a forward-looking paragraph about the work itself.
+
+    Deliberately narrower than the opening: no project may be named and no new
+    capability may be claimed. Evidence lives in the fixed sections and must not
+    be re-invented here, which is what keeps this cheap to gate. It reuses the
+    opening's gates unchanged.
+    """
+    try:
+        from llm_client import call_llm
+        from matcher import _load_persona_summary
+        persona = _load_persona_summary()
+        if not persona:
+            return None
+        # A closing can only say what the candidate would DO here if the posting
+        # actually describes the work. Below this length the postings are agency
+        # stubs — the model fills the gap with abstract benefit language
+        # ("scalable", "intuitive", "without friction") that says nothing. The
+        # generic template is the better outcome there. 400 chars sits in the gap
+        # in the corpus: 2% of postings fall under it, but 33% fall under 600, so
+        # a higher bar would discard genuinely usable descriptions.
+        if len((job_description or "").strip()) < _CLOSING_MIN_DESCRIPTION:
+            return None
+        prompt = f"""Write the CLOSING paragraph of a cover letter (exactly 2 sentences, at most 55 words).
+
+THE JOB:
+Company: {company}
+Title: {job_title}
+Posting (excerpt): {job_description[:2000]}
+
+THE CANDIDATE:
+{persona[:4000]}
+
+WHAT THIS PARAGRAPH IS FOR:
+The letter has already said who the candidate is and what they have built. This
+paragraph answers the question the rest of the letter leaves open: what would
+they actually do in THIS job. Point forward, at the work.
+
+HOW TO WRITE IT:
+1. Identify the concrete thing this role is responsible for — a product to build,
+   a system to keep running, a design problem to solve, an audience to reach.
+   Take it from the posting, not from a guess about the sector.
+2. Say what the candidate would contribute to that specific thing, in terms of
+   their documented way of working.
+3. Close. Do not restate the candidate's background; the letter already did.
+
+RULES:
+- First person, UK English, plain prose. No markdown, no bullets, no sign-off line.
+- Do NOT name a project — the letter has already cited one. This paragraph is about
+  the employer's work, not a fresh piece of evidence.
+- Do NOT claim any skill, tool or experience not already in the candidate profile.
+- NEVER claim the candidate has worked in the employer's industry or sector.
+- Never mention relocation, visas, notice periods, or the job's location.
+- No clichés: "I would welcome the opportunity", "I am confident that", "perfect
+  fit", "hit the ground running", "passionate about", "excited to". Say the actual
+  thing instead.
+- BANNED phrases — these have become a tic across letters, do not use them or any
+  close paraphrase: "amplify intent", "extend intent", "without demanding
+  attention", "disappear into the workflow", "tools that disappear", "invisible
+  infrastructure", "invisible scaffolding", "serve the work rather than",
+  "craft and structure", "reduce friction between idea and execution",
+  "bridge the gap between", "preserve creative intent".
+- WRITE EXACTLY TWO SENTENCES. Measured over five drafts per posting, a third
+  sentence summarised the first two four times out of five — "The result would be
+  systems that…", "My approach combines…". Two sentences that name the work leave
+  nothing to summarise, and the rejection gate treats those summaries as failures.
+- Name the concrete thing from the posting rather than abstracting it. "Prototype
+  the customer journeys the posting describes" beats "build tools that feel
+  intuitive". Vague benefit language ("scalable", "clarity", "efficiently",
+  "seamless", "intuitive") carries no information — cut it.
+- Do not thank the reader or ask for an interview; the template already signs off.
+- Exactly 2 sentences, 55 words maximum. Do not add a third.
+
+Output ONLY the paragraph."""
+        attempts = _CLOSING_ATTEMPTS
+        salvageable = None
+        last_reason = "no clean draft"
+        for _ in range(attempts):
+            text = call_llm(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt="You write concise, specific, honest cover-letter closings. Output only the requested paragraph.",
+                temperature=0.5,
+                max_tokens=220,
+            )
+            text = (text or "").strip().strip('"')
+            ok, result, kind = _vet_opening(text, company, persona)
+            if ok and (tic := _closing_uses_tic(result)):
+                ok, kind = False, "presentation"   # honest but stale; re-roll
+            if ok:
+                return result
+            last_reason = result if isinstance(result, str) else "rejected"
+            if kind == "presentation" and text and not _closing_uses_tic(text):
+                if salvageable is None or len(text.split()) < len(salvageable.split()):
+                    salvageable = text
+        if salvageable:
+            print(f"  \u24d8 CL closing: 語数超過だが内容は健全 "
+                  f"({len(salvageable.split())}語); テンプレより優先して採用")
+            return salvageable
+        # Without this the fallback was silent: three letters dropped to the
+        # template closing and the log said nothing, so there was no way to tell
+        # a gate rejection from a short posting from an API failure.
+        print(f"  ⚠ CL closing: {attempts}回とも不合格 ({last_reason}); using template closing")
+        return None
+    except Exception as e:
+        print(f"  ⚠ CL closing generation failed ({e}); using template")
+        return None
 
 
 def _vet_opening(text: str, company: str, persona: str) -> tuple[bool, str, str]:
@@ -629,7 +803,9 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
     team_name = template["team_name"]
 
     # For general template, use empty team_name
-    closing_para = template["closing"].format(company=company, job_title=job_title, job_location=job_location)
+    closing = _generate_closing_hook(job_title, company, job_description)
+    closing_para = closing or template["closing"].format(
+        company=company, job_title=job_title, job_location=job_location)
 
     opening = _generate_opening_hook(job_title, company, job_description)
     opening_source = "llm" if opening else "template"
