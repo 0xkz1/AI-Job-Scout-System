@@ -2072,10 +2072,20 @@ def _infer_country(job: dict) -> str:
     return ""
 
 
-def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None) -> str:
+def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None,
+                          expired: bool = False, carried: list[str] | None = None) -> str:
     """
     Generate a Markdown match report with YAML frontmatter for Obsidian Dataview.
     Optionally include links to generated CV and cover letter files.
+
+    `expired` is a hand-maintained flag: a boolean renders as a checkbox in
+    Obsidian's property editor, so a posting that has closed can be ticked off
+    and filtered out of a Base. Nothing here ever sets it True — it is passed
+    back in by save_match_report so a tick survives the report being rewritten.
+
+    `carried` is frontmatter written by later steps (PDF and review links) that
+    this function has no way to derive; save_match_report reads it off the
+    previous report and hands it back for the same reason.
     """
     title = job.get("title", "Unknown")
     company = job.get("company", "Unknown")
@@ -2092,9 +2102,14 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     route = job.get("route", "")
     route_yaml = f'\nroute: "{route}"' if route else ""
     scraped_at = job.get("scraped_at", "")
+    # saved_at is when the POSTING was collected; it must not move when the job
+    # is re-scored, or the age of the listing becomes unreadable. analyzed_at is
+    # the other half of that question — when this report was last written.
     saved_at = scraped_at[:10] if scraped_at else datetime.now().strftime("%Y-%m-%d")
+    analyzed_at = datetime.now().strftime("%Y-%m-%d")
     cv_link = f'\ncv: "[[{cv_filename.replace(".md", "")}]]"' if cv_filename else ""
     cl_link = f'\ncover_letter: "[[{cl_filename.replace(".md", "")}]]"' if cl_filename else ""
+    carried_yaml = ("\n" + "\n".join(carried)) if carried else ""
     categories = classify_job_categories(title)
     categories_yaml = "[" + ", ".join(categories) + "]" if categories else "[]"
     country = _infer_country(job)
@@ -2103,6 +2118,7 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
 match_score: {score}
 match_score_pct: {score_pct}
 tier: "{_tier_short(match['tier'])}"
+expired: {"true" if expired else "false"}
 company: "{company}"
 title: "{title}"
 categories: {categories_yaml}
@@ -2111,13 +2127,14 @@ country: "{country}"
 source: "{source}"
 type: "{jtype}"{route_yaml}
 saved_at: {saved_at}
+analyzed_at: {analyzed_at}
 skills_score: {int(match['skills']['score'] * 100)}
 experience_score: {int(match['experience']['score'] * 100)}
 location_score: {int(match['location']['score'] * 100)}
 salary_score: {int(match['salary']['score'] * 100)}
 context_score: {int(match.get('context_score', 0) * 100)}
 scoreable: {"false" if _is_summary_only(job) else "true"}
-url: "{url}"{cv_link}{cl_link}
+url: "{url}"{cv_link}{cl_link}{carried_yaml}
 ---"""
 
     # Warning banner if description was missing
@@ -2306,6 +2323,48 @@ url: "{url}"{cv_link}{cl_link}
     return "\n".join(lines)
 
 
+def read_expired_flag(path: Path) -> bool:
+    """Read the hand-set `expired` checkbox out of an existing report.
+
+    The report is rewritten wholesale on every rescrape, so without this a tick
+    made in Obsidian would be silently reset the next time the job is scored.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    fm = re.match(r"\A---\n(.*?)\n---", text, re.DOTALL)
+    if not fm:
+        return False
+    m = re.search(r"^expired:\s*(\S+)", fm.group(1), re.MULTILINE)
+    return bool(m) and m.group(1).strip().lower() in ("true", "yes", "on")
+
+
+# Properties the report never generates but other steps attach to it later: the
+# app links the rendered PDFs and the reviewer's verdicts back onto the report
+# so they are reachable (and Dataview-queryable) from there. Rewriting the
+# report wholesale used to drop every one of them, so a rescrape silently
+# unlinked the reviews that had just been written.
+_CARRIED_REPORT_KEYS = ("cv_pdf", "cl_pdf", "cv_review", "cl_review")
+
+
+def read_carried_properties(path: Path) -> list[str]:
+    """Frontmatter lines from an existing report that regeneration must keep."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    fm = re.match(r"\A---\n(.*?)\n---", text, re.DOTALL)
+    if not fm:
+        return []
+    kept = []
+    for key in _CARRIED_REPORT_KEYS:
+        m = re.search(rf"^{key}:.*$", fm.group(1), re.MULTILINE)
+        if m:
+            kept.append(m.group(0))
+    return kept
+
+
 def save_match_report(job: dict, match: dict, output_dir: str, cv_filename: str | None = None, cl_filename: str | None = None) -> str:
     """
     Save match report as Markdown file.
@@ -2317,7 +2376,9 @@ def save_match_report(job: dict, match: dict, output_dir: str, cv_filename: str 
     filename = f"{base}.md"
     filepath = Path(output_dir) / filename
 
-    report = generate_match_report(job, match, cv_filename=cv_filename, cl_filename=cl_filename)
+    report = generate_match_report(job, match, cv_filename=cv_filename, cl_filename=cl_filename,
+                                   expired=read_expired_flag(filepath),
+                                   carried=read_carried_properties(filepath))
     filepath.write_text(report, encoding="utf-8")
 
     return str(filepath)
