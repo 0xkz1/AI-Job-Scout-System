@@ -24,7 +24,6 @@ Obsidian (structured note-taking, workflow organisation, Zettelkasten-style deco
 # keyword lists (toolkit) after the evidence, no separate strengths list.
 MASTER_CV = """# Kazuki Yunome
 **{role_title}**
-{role_tagline}
 Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE
 Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
 
@@ -45,16 +44,20 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 **Escuela Falcon, Guanajuato, México | 2016 (3 months)** — Spanish Language School
 **Languages:** Japanese (native) · English (professional working) · Spanish (daily conversation)"""
 
-# Fallback header if a profile is missing role_title/role_tagline in its
-# frontmatter — keeps generation working rather than rendering "{role_title}"
-# literally into the CV.
+# Fallback header if a profile is missing role_title in its frontmatter — keeps
+# generation working rather than rendering "{role_title}" literally into the CV.
+#
+# The header used to carry a second line, role_tagline, under the job title. It
+# restated what the PROFILE paragraph said two lines later ("end-to-end AI
+# creative pipelines" above "building end-to-end creative pipelines"), which
+# read as padding. The header is a signboard: one line, one claim. Whatever the
+# tagline said that the profile did not now lives in the profile text.
 _DEFAULT_ROLE_TITLE = "Full-stack Developer & Designer"
-_DEFAULT_ROLE_TAGLINE = "Building automated systems for business and creative work with AI/LLM"
 
 
-def get_header(role_type: str = "general") -> tuple[str, str]:
-    """Get (role_title, role_tagline) from a profile's frontmatter, falling
-    back to general.md, then to hardcoded defaults."""
+def get_header(role_type: str = "general") -> str:
+    """Get the role_title from a profile's frontmatter, falling back to
+    general.md, then to the hardcoded default."""
     import yaml
     from pathlib import Path
 
@@ -69,22 +72,21 @@ def get_header(role_type: str = "general") -> tuple[str, str]:
     if profile_path is None:
         if role_type != "general":
             return get_header("general")
-        return _DEFAULT_ROLE_TITLE, _DEFAULT_ROLE_TAGLINE
+        return _DEFAULT_ROLE_TITLE
 
     try:
         content = profile_path.read_text(encoding="utf-8")
         parts = content.split("---")
         frontmatter = yaml.safe_load(parts[1]) or {} if len(parts) >= 3 else {}
         title = frontmatter.get("role_title")
-        tagline = frontmatter.get("role_tagline")
-        if title and tagline:
-            return title, tagline
+        if title:
+            return title
     except Exception as e:
         print(f"  ⚠ Error loading header for {role_type}: {e}")
 
     if role_type != "general":
         return get_header("general")
-    return _DEFAULT_ROLE_TITLE, _DEFAULT_ROLE_TAGLINE
+    return _DEFAULT_ROLE_TITLE
 
 
 def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, str]:
@@ -317,27 +319,47 @@ def role_affinity(job_title: str, job_skills: list[str] | None = None,
 # Each project is a structured unit that can be dynamically ordered by the LLM
 # based on relevance to a specific job posting.
 
+def _cv_root() -> "Path | None":
+    """The career/cv directory, wherever this checkout is mounted."""
+    from pathlib import Path
+    for candidate in [
+        Path("/home/kz003/atelier/00_Kazuki/career/cv"),
+        Path("/media/kz003/atelier/00_Kazuki/career/cv"),
+        Path(__file__).resolve().parent.parent / "cv",
+    ]:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# Which directory a record lives in decides what it is. The two kinds render in
+# different CV sections and were only told apart by a `type: employment` line in
+# the frontmatter, so telling them apart meant opening the file — and nothing
+# stopped an employment id being listed in STATIC_EXPERIENCE, where it would
+# never resolve. The folder name matches the CV section it feeds (EXPERIENCE).
+_ENTRY_DIRS = (("projects", "project"), ("experience", "employment"))
+
+
 def load_projects_from_md() -> list[dict]:
     """
-    Load CV projects dynamically from 00_Kazuki/career/cv/projects/*.md
-    Filters out any projects with 'status: draft' or 'draft: true'.
+    Load CV entries from 00_Kazuki/career/cv/{projects,experience}/*.md
+    Filters out any entries with 'status: draft' or 'draft: true'.
     """
     import yaml
     from pathlib import Path
-    
+
     projects = []
-    for candidate in [
-        Path("/home/kz003/atelier/00_Kazuki/career/cv/projects"),
-        Path("/media/kz003/atelier/00_Kazuki/career/cv/projects"),
-        Path(__file__).resolve().parent.parent / "cv" / "projects",
-    ]:
-        if candidate.exists():
-            cv_projects_dir = candidate
-            break
-    else:
+    cv_root = _cv_root()
+    if cv_root is None:
         return projects
-        
-    for fpath in sorted(cv_projects_dir.glob("*.md")):
+
+    files = []
+    for dirname, kind in _ENTRY_DIRS:
+        d = cv_root / dirname
+        if d.exists():
+            files += [(f, kind) for f in sorted(d.glob("*.md"))]
+
+    for fpath, dir_kind in files:
         if fpath.name == "README.md":
             continue
         try:
@@ -364,9 +386,13 @@ def load_projects_from_md() -> list[dict]:
                     "description": description,
                     "tags": frontmatter.get("tags", []),
                     "skills": frontmatter.get("skills", []),
-                    # type: employment entries render in the fixed EXPERIENCE
-                    # section; everything else is a selectable project.
-                    "type": str(frontmatter.get("type", "project")).lower(),
+                    # A live URL is the one claim on a CV a reader can check
+                    # themselves. Stored canonical, rendered compact.
+                    "url": str(frontmatter.get("url", "") or "").strip(),
+                    # employment entries render in the fixed EXPERIENCE section;
+                    # everything else is a selectable project. The directory
+                    # decides; a `type:` line is honoured only as a leftover.
+                    "type": str(frontmatter.get("type", dir_kind)).lower(),
                     # cover_letter: false keeps a project out of cover-letter
                     # openings while leaving it on the CV — for work that is
                     # real but not yet developed enough to lead a pitch with.
@@ -463,13 +489,13 @@ STATIC_EXPERIENCE = {
     "creative_technologist": [
         "taifunome-research-platform",
         "feral-bestiary-plate-001",
-        "ai-creative-workflow-automation",
+        "portfolio_website",
         "hive-floral-pod-3d-conceptual-art",
     ],
     "technical_artist": [
         "feral-bestiary-plate-001",
         "hive-floral-pod-3d-conceptual-art",
-        "ai-creative-workflow-automation",
+        "ai-asset-tagger-system",
         "taifunome-research-platform",
     ],
     # Product/UX roles judge design decisions, not illustration craft — the
@@ -484,11 +510,13 @@ STATIC_EXPERIENCE = {
         "taifunome-research-platform",
         "hive-floral-pod-3d-conceptual-art",
     ],
+    # The general profile also carries the longest PROFILE text, so its four
+    # write-ups have to be the short ones or the CV spills onto a third page.
     "general": [
-        "ai-job-scout-system",
+        "ai-asset-tagger-system",
         "portfolio_website",
         "taifunome-research-platform",
-        "feral-bestiary-plate-001",
+        "hive-floral-pod-3d-conceptual-art",
     ],
 }
 
@@ -515,6 +543,40 @@ def _bold_toolkit_headers(toolkit_text: str) -> str:
     return "\n".join(out)
 
 
+def _display_url(url: str) -> str:
+    """The address as a CV prints it: no scheme, no trailing slash.
+
+    The record keeps the canonical URL so it stays clickable from the vault;
+    the entry line is tight on width, and "taifunome.com" costs a third of
+    "http://taifunome.com/" while a reader types the same thing either way.
+    """
+    return re.sub(r"^https?://", "", url).rstrip("/")
+
+
+def _with_project_url(title_line: str, inner: str) -> str:
+    """Append a project's live URL to its entry title line, if it has one.
+
+    Applied here rather than in _format_project_entry because the LLM path
+    never calls that function — it writes its own entry text — and a URL that
+    only appeared on statically-ordered CVs would be missing from most of them.
+    Both paths pass through this function, so this is the one place that sees
+    every title line.
+    """
+    head = inner.split(" | ")[0].strip()
+    for p in PROJECTS:
+        if not p.get("url") or _title_key(p["title"]) != _title_key(head):
+            continue
+        shown = _display_url(p["url"])
+        # Idempotent: this runs over lines that may already carry the address —
+        # a CV patched in place, or a body re-finished after padding — and an
+        # entry titled "… · taifunome.com · taifunome.com" is the whole cost of
+        # forgetting that.
+        if shown in title_line:
+            return title_line
+        return f"{title_line} · {shown}"
+    return title_line
+
+
 def _bold_experience_titles(experience_text: str) -> str:
     """Normalise Experience formatting: title lines fully bold, body plain.
 
@@ -534,7 +596,7 @@ def _bold_experience_titles(experience_text: str) -> str:
             # the studio name lives in the SELECTED PROJECTS section header —
             # repeating it on every entry line is noise
             inner = inner.replace(" | Taifunomé — Independent Studio", "")
-            out.append(f"**{inner}**")
+            out.append(_with_project_url(f"**{inner}**", inner))
         else:
             out.append(line.replace("**", ""))
     return "\n".join(out)
@@ -619,15 +681,21 @@ INSTRUCTIONS:
 4. DO NOT modify project descriptions. Use them exactly as provided.
 5. DO NOT add any commentary, headers, or explanations.
 6. Separate entries with a single blank line.
-7. If the job involves front-end/web development, consider including the Portfolio Website project.
-8. For product / UX / UI / visual-design roles, prioritise Portfolio Website,
-   the Identity Mark, Hive Floral Pod, and design-tooling work (Asset Weaver,
-   AI Creative Workflow). Rank the illustration series (Feral Bestiary) LOW
+7. TAIFUNOME is the candidate's own platform and the largest body of current
+   work — brand, design system, live site, dashboard and data engine, all built
+   by them. Rank it FIRST unless the posting is squarely about something it does
+   not cover. Every other project is a component next to it; do not drop it to
+   the "other projects" line because a smaller piece of tooling matches a
+   keyword in the posting more literally.
+8. If the job involves front-end/web development, consider including the Portfolio Website project.
+9. For product / UX / UI / visual-design roles, prioritise Portfolio Website,
+   the Identity Mark, Hive Floral Pod, and design-tooling work (Asset Weaver).
+   Rank the illustration series (Feral Bestiary) LOW
    unless the posting explicitly asks for illustration, concept art, or
    narrative art direction — it is an art series, not product design work.
-9. For concept-art / illustration / game-art / 3D roles, prioritise Feral
+10. For concept-art / illustration / game-art / 3D roles, prioritise Feral
    Bestiary, Arch Viz, and Hive Floral Pod.
-10. If the job involves data/automation, prioritize Independent Development.
+11. If the job involves data/automation, prioritize Independent Development.
 
 Write ONLY the Experience section content. No "EXPERIENCE" header.
 NEVER open with the job title you are writing for ("{job_title}") or any other
@@ -794,12 +862,9 @@ def _strip_fabricated_employment(body: str) -> str:
     return "\n".join(kept).strip("\n")
 
 
-def generate_experience(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
-    """
-    Generate the Experience section for a CV: top-5 most relevant projects in
-    full (LLM-ordered when a description is available, static otherwise) plus
-    a compact one-line list of all remaining projects.
-    """
+def _experience_body(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
+    """The write-up entries alone — LLM-ordered when a description is available,
+    static otherwise, with the known bad shapes stripped out."""
     body = None
     if job_description and len(job_description) > 50:
         body = _generate_experience_ollama(job_title, job_description, role_type)
@@ -808,10 +873,141 @@ def generate_experience(job_title: str = "", job_description: str = "", role_typ
 
     body = _strip_llm_other_lines(body)
     body = _strip_echoed_job_title(body, job_title)
-    body = _strip_fabricated_employment(body)
+    return _strip_fabricated_employment(body)
+
+
+def _finish_experience(body: str) -> str:
+    """Bold the entry titles and append the canonical "Other projects" line."""
     section = _bold_experience_titles(body)
     other = _other_projects_line(body)
     return f"{section}\n\n{other}" if other else section
+
+
+# A CV is written to fill two A4 pages: four write-ups is the usual count, but
+# the entries differ in length, so four SHORT ones leave the bottom third of
+# page two blank. Measured at the 10mm page margin, static path, all roles:
+# 1145 words still lands on two pages, 1159 spills onto a third. Words are only
+# a proxy — what actually fills the page is line count, and a heading plus a
+# short entry costs lines a long paragraph does not — so leave headroom rather
+# than aiming at the observed edge.
+_CV_TARGET_WORDS = 1080
+_CV_MAX_WORDS = 1120
+
+# Every promoted entry costs a title line and a blank line on top of its words.
+# At roughly ten words to a rendered line that is ~20 words of page space the
+# word count never sees, which is how a CV of 1143 words spilled one line onto
+# a third page while a 1167-word one fitted: it had more entries, not more text.
+_ENTRY_LINE_COST = 20
+
+
+def _title_key(title: str) -> str:
+    """A project title reduced to what identifies it, for match-anything checks.
+
+    The LLM rewrites entry titles as it orders them, and a leading possessive is
+    the first thing it drops: the project titled "My Personal Identity Mark"
+    comes back as "Personal Identity Mark". A plain substring test misses that,
+    so the padding pass read the project as missing and appended it a second
+    time — three of the last hundred CVs shipped the same project twice.
+    """
+    key = re.sub(r"[^a-z0-9 ]+", " ", title.lower())
+    key = re.sub(r"^(my|the|a|an) ", "", key.strip())
+    return re.sub(r"\s+", " ", key).strip()
+
+
+def _already_written_up(title: str, body: str) -> bool:
+    """Whether an entry for this project is already in the experience body."""
+    key = _title_key(title)
+    if not key:
+        return False
+    if key in _title_key(body):
+        return True
+    # A heavier paraphrase still keeps the distinctive words. Compare against
+    # each entry heading rather than the prose, so an incidental mention in
+    # someone else's write-up does not suppress a real entry.
+    words = {w for w in key.split() if len(w) > 3}
+    if not words:
+        return False
+    for head in re.findall(r"^\*\*(.+?)\*\*", body, re.MULTILINE):
+        head_words = set(_title_key(head).split())
+        if len(words & head_words) >= max(2, len(words) - 1):
+            return True
+    return False
+
+
+def _pad_experience_body(body: str, needed_words: int, role_type: str) -> str:
+    """Promote further projects into full write-ups until the CV fills the page.
+
+    Candidates come from the role's static ordering first (its ranking is the
+    considered one) and then the remaining projects, so padding stays relevant
+    rather than arbitrary. Adds nothing that would overshoot the two-page band.
+    """
+    if needed_words <= 0:
+        return body
+
+    project_map = {p["id"]: p for p in PROJECTS}
+    ordered_ids = list(STATIC_EXPERIENCE.get(role_type, STATIC_EXPERIENCE["general"]))
+    ordered_ids += [p["id"] for p in PROJECTS if p["id"] not in ordered_ids]
+
+    budget = needed_words + (_CV_MAX_WORDS - _CV_TARGET_WORDS)
+    for pid in ordered_ids:
+        if needed_words <= 0:
+            break
+        p = project_map.get(pid)
+        if not p or _already_written_up(p["title"], body):
+            continue  # already written up
+        entry = _format_project_entry(p)
+        cost = len(entry.split()) + _ENTRY_LINE_COST
+        if cost > budget:
+            continue  # would push past the two-page ceiling — try a shorter one
+        body = f"{body}\n\n{entry}"
+        needed_words -= cost
+        budget -= cost
+    return body
+
+
+# Never cut below this many write-ups. A CV showing one project reads as a thin
+# candidate rather than a tight one, whatever the page count says.
+_CV_MIN_ENTRIES = 3
+
+
+def _split_entries(body: str) -> list[str]:
+    """The experience body as a list of whole entries (title line + its text)."""
+    entries: list[str] = []
+    for block in re.split(r"\n\s*\n", body.strip()):
+        s = block.strip()
+        if not s:
+            continue
+        first = s.split("\n", 1)[0].strip()
+        is_title = first.count(" | ") >= 2 and not first.startswith(("•", "-", "#"))
+        if is_title or not entries:
+            entries.append(s)
+        else:
+            entries[-1] = f"{entries[-1]}\n\n{s}"  # continuation of the entry above
+    return entries
+
+
+def _trim_experience_body(body: str, excess_words: int, min_entries: int = _CV_MIN_ENTRIES) -> str:
+    """Drop write-ups from the end until the CV is back inside the page budget.
+
+    The entries are in relevance order, so the last one is the cheapest to lose,
+    and it is not lost — _other_projects_line rebuilds itself from whatever is
+    no longer written up, so the project still appears, just without its
+    paragraph.
+    """
+    entries = _split_entries(body)
+    while excess_words > 0 and len(entries) > min_entries:
+        dropped = entries.pop()
+        excess_words -= len(dropped.split()) + _ENTRY_LINE_COST
+    return "\n\n".join(entries)
+
+
+def generate_experience(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
+    """
+    Generate the Experience section for a CV: the most relevant projects in
+    full (LLM-ordered when a description is available, static otherwise) plus
+    a compact one-line list of all remaining projects.
+    """
+    return _finish_experience(_experience_body(job_title, job_description, role_type))
 
 
 def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "") -> str:
@@ -837,18 +1033,43 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     profile = get_profile(role_type)
     strengths = get_strengths(role_type)
     toolkit = get_toolkit(role_type)
-    experience = generate_experience(job_title, job_description, role_type)
-    role_title, role_tagline = get_header(role_type)
+    exp_body = _experience_body(job_title, job_description, role_type)
+    role_title = get_header(role_type)
 
-    cv_body = MASTER_CV.format(
-        role_title=role_title,
-        role_tagline=role_tagline,
-        profile=profile,
-        employment=_bold_experience_titles(get_employment_section(resolved_role)),
-        technical_toolkit=_bold_toolkit_headers(toolkit),
-        experience=experience
-    )
-    
+    def _assemble(experience_section: str) -> str:
+        return MASTER_CV.format(
+            role_title=role_title,
+            profile=profile,
+            employment=_bold_experience_titles(get_employment_section(resolved_role)),
+            technical_toolkit=_bold_toolkit_headers(toolkit),
+            experience=experience_section
+        )
+
+    experience = _finish_experience(exp_body)
+    cv_body = _assemble(experience)
+    # Only the write-ups are elastic; everything else (profile, employment,
+    # toolkit) is fixed, so the shortfall is measured on the whole CV and paid
+    # for by promoting another project. Re-uses the LLM's own ordering — no
+    # second model call.
+    shortfall = _CV_TARGET_WORDS - len(cv_body.split())
+    if shortfall > 0:
+        padded = _pad_experience_body(exp_body, shortfall, role_type)
+        if padded != exp_body:
+            exp_body = padded
+            experience = _finish_experience(exp_body)
+            cv_body = _assemble(experience)
+    # And the other direction. Padding could only ever add, so when the model
+    # wrote long the CV simply shipped at three pages — six of the last hundred
+    # did. Dropping the least relevant write-up is not a loss of breadth: the
+    # project moves to the "Other projects" line, which is computed from
+    # whatever is not written up.
+    elif len(cv_body.split()) > _CV_MAX_WORDS:
+        trimmed = _trim_experience_body(exp_body, len(cv_body.split()) - _CV_MAX_WORDS)
+        if trimmed != exp_body:
+            exp_body = trimmed
+            experience = _finish_experience(exp_body)
+            cv_body = _assemble(experience)
+
     # Scan experience text to determine which projects were used
     used_projects = []
     for p in PROJECTS:

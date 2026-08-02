@@ -38,7 +38,12 @@ TEMPLATE_DIR = PROFILE_DIR / "career" / "cover-letter"
 # job to a different role, that pair's fingerprint changes on its own and only
 # it rebuilds. Bump this only for logic that the data-file hashes cannot see
 # (prompt wording, a gate rule, the digest shape).
-GEN_SPEC_VERSION = "2026-07-31.3"  # 4 write-ups, compressed project bodies, merged EDUCATION+LANGUAGES — two A4 pages
+# NOTE: page count is a RENDERING property, not a generation one. It is fixed in
+# app.py's PDF CSS (the page margin), and _convert_pdf_versioned already hashes
+# that function's source — so a layout fix needs no bump here. Measured
+# 2026-08-01: at the old 13mm margin 9 of 15 CVs ran to three pages; at 10mm
+# none do.
+GEN_SPEC_VERSION = "2026-08-02.1"  # letter head: no company in the salutation, no county in the address, date moved to render time
 
 # Data files whose CONTENT feeds every pair, regardless of role.
 _GLOBAL_FILES = [
@@ -48,7 +53,11 @@ _GLOBAL_FILES = [
     PROFILE_DIR / "interests.md",
     PROFILE_DIR / "skills.md",
 ]
-_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "skill-toolkit"]
+# "experience" holds the employment records, which used to sit in "projects".
+# It must be listed: an employment entry edited outside this list changes every
+# CV while leaving every fingerprint identical, so nothing rebuilds and the
+# stale documents keep reporting themselves as current.
+_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "experience", CV_ROOT / "skill-toolkit"]
 
 
 def _hash_file(h, path: Path) -> None:

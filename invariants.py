@@ -603,7 +603,174 @@ def check_truncated_descriptions_get_enriched(config: dict) -> list[str]:
     ]
 
 
+def check_one_document_renderer(config: dict) -> list[str]:
+    """Exactly one module may turn a CV/CL markdown into a PDF.
+
+    Generation is already single-source — one generate_cv, one
+    save_cover_letter, one MASTER_COVER_LETTER — which is why a fix to the
+    letter template reaches every route for free. Rendering is not. app.py
+    holds the live renderer (_md_to_pdf_bytes) and pdf_generator.py holds a
+    second, orphaned copy that nothing imports but that still runs as a CLI.
+    It never received the two-A4-page CV tightening or any of the cover-letter
+    layout rules, so running it produces documents that look a year old, and
+    nothing says so.
+
+    A second copy cannot be kept in sync by discipline; this check exists so
+    that adding one is loud instead of silent.
+    """
+    import re
+
+    allowed = {"app.py"}
+    offenders = []
+    for path in sorted(ROOT.glob("*.py")):
+        if path.name in allowed:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"^\s*(from weasyprint import|import weasyprint)", text, re.MULTILINE):
+            offenders.append(path.name)
+    if not offenders:
+        return []
+    return [
+        f"a second PDF renderer lives in {', '.join(offenders)}. The live one is "
+        f"app.py:_md_to_pdf_bytes; a copy silently misses every layout fix applied "
+        f"there. Delete it, or have it call _convert_pdf_versioned instead of "
+        f"rendering its own HTML."
+    ]
+
+
+def check_cv_inputs_are_fingerprinted(config: dict) -> list[str]:
+    """Every directory the CV generator reads must feed the staleness hash.
+
+    gen_version decides whether a generated document still matches its inputs.
+    A directory the generator loads but the fingerprint ignores is the worst
+    shape available: editing a record there changes every CV while leaving each
+    fingerprint identical, so --stale-only rebuilds nothing and the stale
+    documents keep reporting themselves as current. Splitting the employment
+    records into career/cv/experience/ created exactly that gap for as long as
+    it took to add one line here.
+    """
+    try:
+        import cv_generator
+        import gen_version
+    except Exception as e:  # noqa: BLE001
+        return [f"could not import the CV generator to check fingerprints: {type(e).__name__}: {e}"]
+
+    cv_root = cv_generator._cv_root()
+    if cv_root is None:
+        return []
+    hashed = {p.resolve() for p in gen_version._GLOBAL_DIRS}
+    missing = [
+        name for name, _kind in cv_generator._ENTRY_DIRS
+        if (cv_root / name).exists() and (cv_root / name).resolve() not in hashed
+    ]
+    if not missing:
+        return []
+    return [
+        f"cv/{', cv/'.join(missing)} is loaded into every CV but absent from "
+        f"gen_version._GLOBAL_DIRS. Edits there change the documents without "
+        f"changing their fingerprint, so nothing rebuilds and stale CVs report "
+        f"themselves as current. Add it to _GLOBAL_DIRS."
+    ]
+
+
+def check_configured_sites_are_dispatched(config: dict) -> list[str]:
+    """Every site in `sites` must have a branch in run.py that scrapes it.
+
+    check_configured_sites_are_scheduled covers the other end of the same
+    wire — whether the nightly cron invokes the site — and linkedin proved
+    that end can rot for six days unnoticed. This is the hop after it. run.py
+    dispatches with six hand-written `if "<site>" in sites:` blocks, each
+    repeating the same try/except/scraper_failures shape, so adding a site
+    means remembering to copy that block. Forget, and the site sits in
+    `sites`, passes every config check, is counted in the per-site budgets,
+    and scrapes nothing — with no error, because nothing ran.
+    """
+    import re
+
+    run_py = ROOT / "run.py"
+    if not run_py.exists():
+        return []
+    configured = [s for s in (config.get("sites") or []) if s]
+    if not configured:
+        return []
+    text = run_py.read_text(encoding="utf-8")
+    dispatched = set(re.findall(r'^\s*if\s+"([^"]+)"\s+in\s+sites\s*:', text, re.MULTILINE))
+
+    missing = [s for s in configured if s not in dispatched]
+    if not missing:
+        return []
+    return [
+        f"in `sites` but never dispatched by run.py: {', '.join(missing)}. The "
+        f"site is configured and budgeted for, and no branch scrapes it, so it "
+        f"reports neither jobs nor a failure. Add an `if \"<site>\" in sites:` "
+        f"block or drop it from `sites`."
+    ]
+
+
+def check_pdf_identity_ignores_stamped_properties(config: dict) -> list[str]:
+    """Converting an unchanged document twice must reuse its PDF, not mint one.
+
+    _convert_pdf_versioned keys a version on a hash of its source, and it writes
+    a `pdf:` property back into the note when it is done; the reviewer writes a
+    `review:` one. While that hash covered the whole file, each conversion
+    rewrote the very bytes it had just hashed, so the next run saw a change that
+    had not happened and minted another visually identical version — 20 of them
+    for one outreach CV, 7 distinct. Nothing raised. Every PDF was correct;
+    there were simply dozens, and the newest was always labelled "(outdated)"
+    because the freshness badge hashed the file a third, different way.
+
+    The renderer strips frontmatter before it renders, so nothing in it can
+    reach the page and nothing in it belongs in the hash. That is the property
+    tested here directly — cheaper and more honest than trying to infer churn
+    from the PDFs afterwards, since WeasyPrint stamps a timestamp and no two
+    renders are ever byte-identical anyway.
+    """
+    import importlib
+
+    try:
+        app = importlib.import_module("app")
+    except Exception as e:  # noqa: BLE001 - Streamlit may refuse to import headless
+        return [f"could not import app to verify PDF identity: {type(e).__name__}: {e}"]
+
+    sha = getattr(app, "_pdf_source_sha", None)
+    if sha is None:
+        return [
+            "app._pdf_source_sha is gone. Conversion and the freshness badge must "
+            "derive a PDF's identity from one place; when they each computed it "
+            "separately they drifted, and every fresh PDF was shown as outdated."
+        ]
+
+    sample = next((OUTPUT / "10_cvs").glob("*_CV.md"), None)
+    if sample is None:
+        return []
+
+    import tempfile
+
+    original = sample.read_text(encoding="utf-8")
+    if not original.startswith("---"):
+        return []
+    stamped = original.replace("---\n", '---\npdf: "[[probe_v99.pdf]]"\n', 1)
+
+    with tempfile.TemporaryDirectory() as td:
+        a, b = Path(td) / "a.md", Path(td) / "b.md"
+        a.write_text(original, encoding="utf-8")
+        b.write_text(stamped, encoding="utf-8")
+        if sha(a) != sha(b):
+            return [
+                "a PDF's identity still changes when a property is stamped into its "
+                "frontmatter. Since the converter stamps `pdf:` (and the reviewer "
+                "`review:`), every conversion will invalidate itself and mint an "
+                "endless run of identical versions. app.py:_pdf_source_sha must hash "
+                "the body only — the renderer strips frontmatter before rendering."
+            ]
+    return []
+
+
 CHECKS = (
+    check_one_document_renderer,
+    check_pdf_identity_ignores_stamped_properties,
+    check_configured_sites_are_dispatched,
+    check_cv_inputs_are_fingerprinted,
     check_submission_threshold_is_reachable,
     check_scrape_fits_its_timeout,
     check_every_site_still_yields,

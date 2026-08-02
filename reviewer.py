@@ -147,6 +147,7 @@ DECISIONS_FILE = ROOT.parent / "cv" / "review-decisions.md"
 _SOURCE_GLOBS = [
     ("profile", ROOT.parent / "cv" / "profile", "*.md"),
     ("project", ROOT.parent / "cv" / "projects", "*.md"),
+    ("employment", ROOT.parent / "cv" / "experience", "*.md"),
     ("toolkit", ROOT.parent / "cv" / "skill-toolkit", "*.md"),
     ("CL template", ROOT.parent / "cover-letter", "*.md"),
 ]
