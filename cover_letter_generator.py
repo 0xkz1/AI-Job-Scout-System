@@ -4,15 +4,16 @@
 
 from cv_generator import detect_role_type
 
+# No date line: app.py stamps one at PDF-render time, so a letter drafted
+# weeks ago still goes out dated the day it is actually sent.
 MASTER_COVER_LETTER = """{name}
 {location} | {email} | {phone}
-{date}
 
 Hiring Team
 {company}
 {job_location}
 
-Dear Hiring Team at {company},
+Dear Hiring Team,
 
 {opening_paragraph}
 
@@ -114,7 +115,6 @@ PERSONAL_INFO = {
     "linkedin": "https://www.linkedin.com/in/kazukiyunome/"
 }
 
-from datetime import date
 import re
 
 
@@ -521,6 +521,7 @@ RULES:
 - Ground the connection in the candidate's actual process or outcomes (systems thinking, automation, design rigor) — not literal tools or hardware (tablets, specific input devices, software names) unless the posting explicitly calls for them. Backstage implementation details do not belong in an opening paragraph.
 - Avoid recycling the ethos headings verbatim as filler ("reduce friction between idea and execution", "craft and structure", "tools that amplify human creativity"). Express the chosen principle through the specific project and this posting, in your own words.
 - BANNED phrases — do not use any of these or close paraphrases; they have become a tic across letters: "disappear into the workflow", "tools that disappear", "invisible infrastructure", "invisible scaffolding", "amplify intent without demanding attention", "extend intent without demanding attention", "serve the work rather than". Say what the project concretely did instead.
+- Do NOT end on an abstract flourish. The "X is not just A, but B" antithesis ("the result isn't just a product, but a process…", "not just visuals, but systems") reads as filler to a hiring reader, who is asking "so what can you actually build?". Close on a concrete capability or outcome instead — what gets designed, what the team or the customer can then do.
 - Keep it TIGHT: 3-4 sentences, 80 words maximum. A tight opening reads sharper than a long one; do not pad to fill space.
 - No clichés ("I was excited to see", "I am writing to apply", "passionate about"), no flattery filler.
 - Do not include the greeting line; the letter template already has "Dear Hiring Team".
@@ -799,8 +800,12 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
     role_type = detect_role_type(job_title, job_description)
     template = load_cover_template(role_type)
 
-    today = date.today().strftime("%d %B %Y")
     team_name = template["team_name"]
+
+    # The scraper's location carries the county ("Edinburgh, Midlothian"), which
+    # reads as a half-finished postal address in the recipient block. A letter
+    # addresses the city; the full string still goes to the body templates.
+    recipient_location = job_location.split(",")[0].strip() or job_location
 
     # For general template, use empty team_name
     closing = _generate_closing_hook(job_title, company, job_description)
@@ -817,9 +822,8 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
         location=PERSONAL_INFO["location"],
         email=PERSONAL_INFO["email"],
         phone=PERSONAL_INFO["phone"],
-        date=today,
         company=company,
-        job_location=job_location,
+        job_location=recipient_location,
         job_title=job_title,
         opening_paragraph=opening,
         experience_paragraph=template["experience"],

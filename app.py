@@ -809,17 +809,53 @@ CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
 
 
+def _letter_date(on: "date | None" = None) -> str:
+    """A letter's date, UK style: "2 August 2026", never zero-padded (%-d is
+    glibc-only, so the day is built separately)."""
+    from datetime import date as _date
+    d = on or _date.today()
+    return f"{d.day} {d.strftime('%B %Y')}"
+
+
+_DATE_LINE_RE = re.compile(r"^\s*\d{1,2} [A-Z][a-z]+ \d{4}\s*$", re.MULTILINE)
+
+
+def _dated_today(text: str) -> str:
+    """Put today's date in the letter's sender block.
+
+    The date belongs to the day the letter is SENT, not the day the pipeline
+    happened to draft it. Held in the markdown it went stale silently: letters
+    drafted three weeks earlier were still dated three weeks earlier, and a
+    reader sees that before they read a word of the letter. So the markdown
+    carries no date and the renderer stamps one. Existing letters do carry one
+    — those are rewritten rather than doubled.
+    """
+    if _DATE_LINE_RE.search(text):
+        return _DATE_LINE_RE.sub(_letter_date(), text, count=1)
+    # No date line: add one under the name/contact block, which the sender
+    # block ends with, i.e. before the first blank line.
+    head, sep, rest = text.partition("\n\n")
+    return f"{head.rstrip()}\n{_letter_date()}{sep}{rest}" if sep else text
+
+
 def _md_to_pdf_bytes(md_path: Path) -> bytes:
     """Render a generated CV/CL markdown file to a clean A4 PDF."""
     # Lazy imports: weasyprint is slow to load and only needed on demand
     import markdown as _markdown
     from weasyprint import HTML
 
+    # Cover letters are short prose, not page-count-constrained like a CV —
+    # the tightened paragraph margin below exists to fit a CV in two pages
+    # and otherwise just crushes CL paragraph breaks flat.
+    is_cl = md_path.stem.endswith("_CL")
+
     text = md_path.read_text(encoding="utf-8")
     # Strip YAML frontmatter (Obsidian metadata, not for the PDF)
     text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
     # Obsidian wiki-links → plain text ([[target|label]] → label)
     text = re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]", lambda m: m.group(2) or m.group(1), text)
+    if is_cl:
+        text = _dated_today(text)
 
     # Generated CVs/CLs are near-plain text: ALL-CAPS section lines, "•" bullets,
     # and meaningful single line breaks. Preprocess into real markdown.
@@ -835,11 +871,25 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
         elif re.fullmatch(r"[A-Z][A-Z &/'’\-]{2,40}", stripped):
             titles_want_space = stripped in ("EXPERIENCE", "SELECTED PROJECTS")
             out_lines.append(f"\n## {stripped}")  # ALL-CAPS section header
-        elif titles_want_space and re.fullmatch(r"\*\*[^*]+\*\*", stripped):
-            # A line that is nothing but bold text is a job/project title.
-            # Left as a paragraph, nl2br glues it to the description beneath
-            # it with no space at all; as a heading it gets its own margin.
-            out_lines.append(f"\n### {stripped.strip('*')}")
+        elif re.fullmatch(r"\*\*[^*]+\*\*", stripped):
+            # A line that is nothing but bold text is an entry title (job,
+            # project) or a toolkit category. Left as a paragraph, nl2br glues
+            # it to the text beneath with no space at all; as a heading it gets
+            # its own margin — a wider one for entries than for categories.
+            level = "###" if titles_want_space else "####"
+            out_lines.append(f"\n{level} {stripped.strip('*')}")
+        elif stripped.startswith("**Other projects:"):
+            # Trails the last project's bullet list, so without a break of its
+            # own markdown reads it as more of that list and it ends up flush
+            # against the bullets. Its own paragraph, with room above.
+            # Raw HTML, so the bold marker is expanded here — markdown does not
+            # reach inside an HTML block without the md_in_html extension.
+            inner = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", stripped)
+            out_lines.append(f'\n<p class="trailing">{inner}</p>\n')
+        elif stripped.startswith("**") and titles_want_space is False and ":" not in stripped[:3]:
+            # Bold-led lines that continue in plain text (education entries):
+            # give each its own paragraph so they do not run together.
+            out_lines.append(f"\n{stripped}")
         elif stripped.startswith("•"):
             out_lines.append("- " + stripped.lstrip("• "))
         else:
@@ -847,16 +897,42 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     text = "\n".join(out_lines)
 
     body = _markdown.markdown(text, extensions=["tables", "fenced_code", "nl2br"])
+    # A CL is a greeting to someone else, not a CV — the candidate's name
+    # shouldn't read as the headline. It also runs short of a page; a
+    # couple of the natural letter breaks (recipient block, salutation,
+    # the gap before the signature) get extra air instead of leaving
+    # everything crammed at the top with dead space below.
+    cl_spacing_css = (
+        """p:nth-of-type(2), p:nth-of-type(3) { margin-top: 10pt; }
+        p:last-of-type { margin-top: 20pt; }"""
+        if is_cl else ""
+    )
     html = f"""<html><head><meta charset="utf-8"><style>
         /* Tightened so a CV lands in as few pages as possible without
-           reading as cramped — a third page is rarely reached by a reader. */
-        @page {{ size: A4; margin: 13mm 14mm; }}
+           reading as cramped — a third page is rarely reached by a reader.
+           The page margin is what buys the second page: at 13mm the longest
+           CVs spill onto a third, at 10mm none do. Font size and line height
+           were left alone deliberately — shrinking them is what makes a CV
+           read as cramped, and edge whitespace is the cheaper thing to give
+           up. Heading margins barely move the page count; don't trade the
+           space above entry titles for it. */
+        @page {{ size: A4; margin: 10mm 11mm; }}
         body {{ font-family: "DejaVu Sans", sans-serif; font-size: 9.5pt; line-height: 1.3; color: #1a1a1a; }}
-        h1 {{ font-size: 16pt; margin: 0 0 3pt; }}
+        h1 {{ font-size: {"12pt" if is_cl else "16pt"}; margin: 0 0 3pt; }}
         h2 {{ font-size: 11.5pt; border-bottom: 1px solid #999; padding-bottom: 2pt; margin: 7pt 0 3pt; page-break-after: avoid; }}
-        h3 {{ font-size: 9.8pt; margin: 6pt 0 1pt; page-break-after: avoid; }}
-        p, li {{ margin: 1.5pt 0; }}
-        ul {{ padding-left: 13pt; }}
+        h3 {{ font-size: 9.8pt; margin: 14pt 0 1pt; page-break-after: avoid; }}
+        h4 {{ font-size: 9.5pt; margin: 4pt 0 0; page-break-after: avoid; }}
+        p, li {{ margin: {"6pt" if is_cl else "1.5pt"} 0; }}
+        {cl_spacing_css}
+        /* Without an explicit margin the default 1em lands under every entry
+           title, so the title floats between its heading space and its own
+           text. Space belongs above a title, not below it. */
+        ul {{ margin: 0 0 0; padding-left: 13pt; }}
+        p.trailing {{ margin: 10pt 0 0; }}
+        /* Short-entry CVs separate projects with "---", which is a readable
+           divider in Obsidian but renders as a heavy default <hr> in print.
+           The space above each entry title already separates them. */
+        hr {{ display: none; }}
         table {{ border-collapse: collapse; width: 100%; }}
         th, td {{ border: 1px solid #ccc; padding: 3pt 6pt; text-align: left; }}
         a {{ color: #1a1a1a; text-decoration: none; }}
@@ -901,29 +977,62 @@ def _save_pdf_meta(meta: dict):
     _PDF_VERSIONS_META.write_text(json.dumps(meta, indent=2))
 
 
+def _pdf_source_sha(md_path: Path) -> str:
+    """The identity of a PDF's source: what would actually reach the page.
+
+    Two things are deliberately outside it and one deliberately inside:
+
+    * The frontmatter is EXCLUDED. _md_to_pdf_bytes strips it, so no property
+      there can change the PDF — and hashing it made conversion invalidate
+      itself once the converter began writing `pdf:` back into the note: each
+      run rewrote the file it had just hashed and minted another identical
+      version, forever. Stamping a review did the same.
+    * The renderer source is INCLUDED. The CSS and markdown preprocessing live
+      in _md_to_pdf_bytes, so a layout change leaves the MD byte-identical and
+      the stale PDF would be reused forever.
+
+    Both the converter and the freshness badge must ask the same question, so
+    they ask it here. They used to compute it separately and drifted: the badge
+    hashed raw file bytes with no renderer, so it never matched what the
+    converter stored and every freshly built PDF was labelled "(outdated)".
+    """
+    import hashlib, inspect
+    body = re.sub(r"\A---\n.*?\n---\n", "", md_path.read_text(encoding="utf-8"), flags=re.DOTALL)
+    # A letter is dated at render time, so the date is part of what it renders
+    # to even though it appears nowhere in the source. Leave it out and the
+    # reuse branch hands back yesterday's PDF, dated yesterday — the exact
+    # staleness moving the date here was meant to end.
+    stamped = _letter_date() if md_path.stem.endswith("_CL") else ""
+    return hashlib.sha1(
+        body.encode("utf-8")
+        + stamped.encode("utf-8")
+        + inspect.getsource(_md_to_pdf_bytes).encode("utf-8")
+    ).hexdigest()
+
+
 def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
-    """Render md_path to a PDF, versioning by source-MD content.
+    """Render md_path to a PDF, versioning by source-MD content, and link it.
 
     If the current markdown is identical to the newest existing version's
     source, reuse that PDF (no pointless duplicate). Otherwise mint the
     next sequential version (highest existing number + 1). Returns
     (pdf_path, version_number, is_new).
+
+    Stamping the `pdf:` property is done HERE rather than left to the caller.
+    It used to be a separate follow-up call, and the Gmail-draft path simply
+    never made it — minting versions no note ever linked to. A PDF that
+    nothing points at is not a finished conversion, so the two steps are one
+    function with no seam for a caller to miss.
     """
-    import hashlib, inspect
     stem = md_path.stem
-    # Key on the renderer too, not just the markdown: CSS and the markdown
-    # preprocessing live in _md_to_pdf_bytes, so a layout change leaves the MD
-    # byte-identical and the old PDF would be reused forever.
-    md_sha = hashlib.sha1(
-        md_path.read_bytes()
-        + inspect.getsource(_md_to_pdf_bytes).encode("utf-8")
-    ).hexdigest()
+    md_sha = _pdf_source_sha(md_path)
     versions = _pdf_versions(stem)
     meta = _load_pdf_meta()
 
     if versions:
         latest_n, latest_path = versions[-1]
         if meta.get(latest_path.name) == md_sha and latest_path.exists():
+            _set_report_pdf_property(md_path, latest_path.name)
             return latest_path, latest_n, False  # unchanged — reuse
         n = latest_n + 1
     else:
@@ -934,6 +1043,7 @@ def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
     target.write_bytes(_md_to_pdf_bytes(md_path))
     meta[target.name] = md_sha
     _save_pdf_meta(meta)
+    _set_report_pdf_property(md_path, target.name)
     return target, n, True
 
 
@@ -952,6 +1062,23 @@ def _static_pdf_link(pdf_path: Path, label: str) -> str:
     )
 
 
+def _set_frontmatter_property(path: Path, key: str, value: str):
+    """Set/replace a single frontmatter property in an existing markdown file."""
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    m = re.match(r"\A---\n(.*?)\n---\n", text, flags=re.DOTALL)
+    if not m:
+        return
+    line = f'{key}: "{value}"'
+    fm = m.group(1)
+    if re.search(rf"^{key}:.*$", fm, flags=re.MULTILINE):
+        fm = re.sub(rf"^{key}:.*$", line, fm, flags=re.MULTILINE)
+    else:
+        fm = fm + "\n" + line
+    path.write_text(f"---\n{fm}\n---\n" + text[m.end():], encoding="utf-8")
+
+
 def _set_report_doc_property(md_path: Path, key_suffix: str, target_name: str):
     """Set a cv_*/cl_* wikilink property on the match report's frontmatter.
 
@@ -959,7 +1086,6 @@ def _set_report_doc_property(md_path: Path, key_suffix: str, target_name: str):
     base name. key_suffix "pdf" → cv_pdf/cl_pdf, "review" → cv_review/cl_review.
     Frontmatter properties keep these Dataview-queryable from the report.
     """
-    import re
     stem = md_path.stem
     if stem.endswith("_CV"):
         key, base = f"cv_{key_suffix}", stem[:-3]
@@ -968,23 +1094,14 @@ def _set_report_doc_property(md_path: Path, key_suffix: str, target_name: str):
     else:
         return
     report = MATCH_DIR / f"{base}.md"
-    if not report.exists():
-        return
-    text = report.read_text(encoding="utf-8")
-    m = re.match(r"\A---\n(.*?)\n---\n", text, flags=re.DOTALL)
-    if not m:
-        return
-    line = f'{key}: "[[{target_name}]]"'
-    fm = m.group(1)
-    if re.search(rf"^{key}:.*$", fm, flags=re.MULTILINE):
-        fm = re.sub(rf"^{key}:.*$", line, fm, flags=re.MULTILINE)
-    else:
-        fm = fm + "\n" + line
-    report.write_text(f"---\n{fm}\n---\n" + text[m.end():], encoding="utf-8")
+    _set_frontmatter_property(report, key, f"[[{target_name}]]")
 
 
 def _set_report_pdf_property(md_path: Path, pdf_name: str):
     _set_report_doc_property(md_path, "pdf", pdf_name)
+    # Same property on the CV/CL's own frontmatter, not just the report's —
+    # the PDF should be reachable from either direction.
+    _set_frontmatter_property(md_path, "pdf", f"[[{pdf_name}]]")
 
 
 def resolve_doc_base(company: str, title: str, url: str = "") -> str:
@@ -1265,7 +1382,6 @@ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
     if st.button(f"{label} → PDF", key=f"conv_{key_prefix}_{label}"):
         try:
             _pdf_path, ver, is_new = _convert_pdf_versioned(md_path)
-            _set_report_pdf_property(md_path, _pdf_path.name)
             if is_new:
                 st.success(f"{label} → v{ver} created")
             else:
@@ -1282,7 +1398,7 @@ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
     versions = _pdf_versions(md_path.stem)
     if versions:
         latest_n, latest_path = versions[-1]
-        current_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+        current_sha = _pdf_source_sha(md_path)
         meta = _load_pdf_meta()
         is_current = meta.get(latest_path.name) == current_sha
         if not is_current:
