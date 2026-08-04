@@ -417,8 +417,8 @@ def _has_digital_design_context(job_skills: list[str]) -> bool:
 # Roles whose "design" vocabulary is digital/creative by definition — a bare
 # "Design" skill inside one of these disciplines is the candidate's actual
 # strength, not a physical-design (gas/automotive/CAD) false friend.
-_DIGITAL_ROLE_SET = {"product_designer", "creative_technologist", "technical_artist",
-                     "web_developer", "camera_assistant"}
+_DIGITAL_ROLE_SET = {"product_designer", "graphic_designer", "creative_technologist",
+                     "technical_artist", "web_developer", "camera_assistant"}
 # One title keyword hit (2.0) or two skill/description hits (1.0 each) suffice.
 _DIGITAL_ROLE_MIN_AFFINITY = 2.0
 
@@ -2110,6 +2110,10 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     cv_link = f'\ncv: "[[{cv_filename.replace(".md", "")}]]"' if cv_filename else ""
     cl_link = f'\ncover_letter: "[[{cl_filename.replace(".md", "")}]]"' if cl_filename else ""
     carried_yaml = ("\n" + "\n".join(carried)) if carried else ""
+    scores = read_review_scores(make_safe_name(company, title))
+    review_yaml = "".join(
+        f"\n{k}: {str(v).lower() if isinstance(v, bool) else v}" for k, v in scores.items()
+    )
     categories = classify_job_categories(title)
     categories_yaml = "[" + ", ".join(categories) + "]" if categories else "[]"
     country = _infer_country(job)
@@ -2134,7 +2138,7 @@ location_score: {int(match['location']['score'] * 100)}
 salary_score: {int(match['salary']['score'] * 100)}
 context_score: {int(match.get('context_score', 0) * 100)}
 scoreable: {"false" if _is_summary_only(job) else "true"}
-url: "{url}"{cv_link}{cl_link}{carried_yaml}
+url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
 ---"""
 
     # Warning banner if description was missing
@@ -2346,6 +2350,41 @@ def read_expired_flag(path: Path) -> bool:
 # report wholesale used to drop every one of them, so a rescrape silently
 # unlinked the reviews that had just been written.
 _CARRIED_REPORT_KEYS = ("cv_pdf", "cl_pdf", "cv_review", "cl_review")
+
+
+def read_review_scores(base: str) -> dict[str, object]:
+    """The CV and CL review verdicts for a job, as report frontmatter values.
+
+    Put on the match report so one Obsidian table can show the match score
+    beside the review score — a Base queries one folder, and the reports and
+    the reviews live in different ones, so the number has to be carried rather
+    than joined. The pair is the point: the top of the match ranking is not the
+    top of the review ranking (match rank 1 came 66th of 100 by CV review), and
+    that only becomes visible when both are in the same row.
+
+    Deliberately NOT in _CARRIED_REPORT_KEYS. A link stays true when the
+    document changes; a score does not. These are re-read from the review files
+    on every write, and `*_review_current` says whether the review still
+    describes the document as it stands — the nightly run regenerates CVs, and
+    a stale 86 presented as current is worse than no number at all.
+    """
+    # Imported here, not at module scope: reviewer imports cv_generator, which
+    # imports this module.
+    from reviewer import REVIEWS_DIR, review_is_current
+
+    out_root = REVIEWS_DIR.parent
+    out: dict[str, object] = {}
+    for kind, doc_dir in (("cv", out_root / "10_cvs"), ("cl", out_root / "10_cover-letters")):
+        doc = doc_dir / f"{base}_{kind.upper()}.md"
+        review = REVIEWS_DIR / f"{base}_{kind.upper()}_review.md"
+        if not review.exists():
+            continue
+        m = re.search(r"^submission_score:\s*(\d+)", review.read_text(encoding="utf-8"), re.MULTILINE)
+        if not m:
+            continue
+        out[f"{kind}_review_score"] = int(m.group(1))
+        out[f"{kind}_review_current"] = review_is_current(doc)[0] if doc.exists() else False
+    return out
 
 
 def read_carried_properties(path: Path) -> list[str]:

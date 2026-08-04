@@ -204,6 +204,50 @@ def _has_inverted_person(text: str) -> str | None:
     return None
 
 
+# "work at <employer>" appears in two opposite sentences, and the verifier model
+# cannot reliably tell them apart:
+#
+#   "YOUR work at Lloyds Banking Group to prototype…"   ← addressing the reader
+#   "during MY work at Lloyds Banking Group…"           ← claiming to have worked there
+#
+# The writing prompt explicitly invites the first when the posting describes the
+# employer's work; the verifier reported it as fabrication on every one of three
+# runs, and adding a paragraph to the verifier prompt explaining the possessive
+# did not move it — it still rejected the honest sentence and the dishonest one
+# identically. Whose work it is, is decided by the word in front of it, so decide
+# it here instead of asking.
+_EMPLOYER_ADDRESS = re.compile(
+    r"\b(?:your|the)\s+(?:\w+\s+){0,3}?work\s+(?:at|with|for)\b"
+    r"|\bwork\s+(?:you|your team)\b",
+    re.IGNORECASE,
+)
+_CANDIDATE_EMPLOYMENT_CLAIM = re.compile(
+    r"\b(?:my|our)\s+(?:\w+\s+){0,3}?(?:work|time|role|experience)\s+(?:at|with)\b"
+    r"|\bI\s+(?:\w+\s+){0,2}?work(?:ed|ing)?\s+(?:at|for|with)\b"
+    r"|\b(?:during|while|when)\s+(?:I|my)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_employer_address_false_positive(reason: str, text: str) -> bool:
+    """True when the verifier flagged 'work at <employer>' that is the READER's.
+
+    Deliberately narrow: it only forgives a verdict that is ABOUT working at some
+    employer, and only when the paragraph addresses that work to the reader and
+    never claims it in the first person. A paragraph containing both forms keeps
+    the rejection — the dishonest half is the one that matters.
+    """
+    # The verdict wording varies run to run for the same input — "work at X",
+    # "employment claim", "worked for X" — so match on the subject it is about
+    # rather than one phrasing of it.
+    if not re.search(r"\bwork(?:ed|ing)?\s+(?:at|for|with)\b|\bemploy(?:ment|er|ed)\b",
+                     reason, re.IGNORECASE):
+        return False
+    if _CANDIDATE_EMPLOYMENT_CLAIM.search(text):
+        return False
+    return bool(_EMPLOYER_ADDRESS.search(text))
+
+
 def _verify_opening_claims(text: str) -> str | None:
     """Second-pass fact check of an LLM-written opening. Returns a short reason
     when a claim is unsupported, else None.
@@ -247,7 +291,7 @@ REPORT these:
 - A named project/system that is not in the record, or that the record shows doing
   something different from what the paragraph claims.
 - Work attributed to a CLIENT, EMPLOYER, or PLATFORM the record does not show. Both
-  "I designed brand identities for <employer>" and "during my work at <employer>" are
+  "I designed brand identities for <employer>" and "during MY work at <employer>" are
   fabrication unless the record lists that employer. Reframing the candidate's own
   machine, vault, or plugin as something delivered for someone else is fabrication too.
 - Named clients, employers, industries, or scale figures absent from the record.
@@ -281,8 +325,17 @@ PROBLEM: <the specific fabricated claim, under 15 words>"""
             temperature=0.0,
             max_tokens=80,
         ) or "").strip()
+        # The model sometimes bolds its own verdict ("**PROBLEM: …**") despite
+        # being asked for one plain line, and a startswith("PROBLEM") test then
+        # read it as OK — so the fabrications it caught were the ones that got
+        # through, silently, which is the worst direction for this check to fail
+        # in. Strip the emphasis before deciding.
+        verdict = verdict.strip("*_ ").strip()
         if verdict.upper().startswith("PROBLEM"):
-            return verdict.split(":", 1)[-1].strip()[:120] or "unsupported claim"
+            reason = verdict.split(":", 1)[-1].strip().strip("*_ ")[:120] or "unsupported claim"
+            if _is_employer_address_false_positive(reason, text):
+                return None
+            return reason
         return None
     except Exception as e:
         print(f"  ⚠ CL opening verification skipped ({e})")
@@ -413,14 +466,28 @@ def _load_projects_digest() -> str:
 # project and every fabrication gate still applies.
 _ROLE_PROJECT_HINTS = {
     "product_designer":
-        "FOR THIS ROLE: it is a design role. Prefer the design-forward projects — "
-        "My Personal Identity Mark (visual identity), Hive Floral Pod (3D concept "
-        "design), the Portfolio Website (design + build), TAIFUNOME (brand and "
-        "information architecture, design system). Reach for an AI pipeline "
+        "FOR THIS ROLE: it is a design role. Prefer the projects that show product/UX "
+        "thinking end to end — TAIFUNOME (brand + information architecture + design "
+        "system + CMS + front end), the Portfolio Website (design + build), Hive "
+        "Floral Pod (3D concept design). My Personal Identity Mark is a single logo "
+        "mark: it may be mentioned briefly as visual craft, but it is NOT evidence "
+        "of a design system — never call it one. Reach for an AI pipeline "
         "(Asset Tagger, Asset Weaver) "
         "ONLY if the posting is explicitly about automation or AI tooling; a "
         "graphic/brand/packaging/motion/AV design role is better served by the "
         "visual and product work.",
+    "graphic_designer":
+        "FOR THIS ROLE: it is a brand/graphic role, judged on identity and "
+        "image-making, not on interface architecture. Prefer TAIFUNOME — the "
+        "studio's own identity, taken from story and positioning through the "
+        "logo mark and design tokens to the live site and its scroll-driven "
+        "\"TAIFU mode\" sequence — My Personal Identity Mark (pure mark-making), "
+        "and Feral Bestiary Plate 001 (illustration and art direction). The "
+        "Portfolio Website fits a posting weighted toward digital and web "
+        "artwork. My Personal Identity Mark is a single logo mark: it is "
+        "evidence of typographic and mark-making craft, never of a design "
+        "system. Do NOT lead with an AI pipeline (Asset Tagger, Asset Weaver) "
+        "unless the posting is explicitly about automation or AI tooling.",
     "technical_artist":
         "FOR THIS ROLE: prefer work showing craft plus pipeline — Hive Floral Pod "
         "(3D), Feral Bestiary work, the Portfolio Website, or a tooling project "
@@ -517,6 +584,7 @@ RULES:
 - NEVER claim the candidate has worked in the employer's industry or sector (finance, healthcare, retail, legal, government, gaming, …) unless the candidate profile explicitly says so. Constructions like "I've built similar systems for financial platforms", "my experience with healthcare clients", or "having worked in retail" are FORBIDDEN unless verbatim supported by the profile above.
 - You may describe what the EMPLOYER does in their sector; you may not assert that the candidate has done it too. Connect via the candidate's documented approach and process, not via invented domain experience.
 - Do NOT invent a project, client, or deliverable. If you describe a specific piece of past work, it must be one named in the projects list above, described as it is described there. Never reframe the candidate's personal tooling or hardware (their own compute machine, their own vault, their own plugins) as work delivered for someone else.
+- A shared WORD is not a shared subject. Do not bridge to a project because the posting happens to use a word that also appears near it — "storytelling" in a customer-experience role does not connect to an illustration series about animals abandoned in war zones, and "visual narrative" is not evidence of customer-centred design. Before naming a project, state to yourself what the posting actually needs done and what the project actually produced; if those two are not the same kind of work, pick a different project. A reader who knows both will notice the stretch, and it costs more credibility than a plainer opening would.
 - Never mention relocation or moving, and never claim the candidate lives in, is near, or is moving to the employer's city. The candidate is based in Edinburgh; the job's location is irrelevant to the opening.
 - Ground the connection in the candidate's actual process or outcomes (systems thinking, automation, design rigor) — not literal tools or hardware (tablets, specific input devices, software names) unless the posting explicitly calls for them. Backstage implementation details do not belong in an opening paragraph.
 - Avoid recycling the ethos headings verbatim as filler ("reduce friction between idea and execution", "craft and structure", "tools that amplify human creativity"). Express the chosen principle through the specific project and this posting, in your own words.
@@ -537,14 +605,32 @@ Output ONLY the paragraph."""
         last_reason = "no clean draft"
         salvageable = None  # best draft rejected only on presentation, not honesty
         for attempt in range(1, attempts + 1):
+            # Tell the model why the last draft was rejected. Re-sending the
+            # identical prompt just re-rolls the same judgement: asked three
+            # times for a Lloyds opening, it reached for the illustration series
+            # all three times and the letter fell back to the generic template.
+            # A rejection reason is the one piece of information the next draft
+            # does not already have.
+            retry_note = ""
+            if attempt > 1:
+                retry_note = (
+                    f"\n\nYOUR PREVIOUS DRAFT WAS REJECTED: {last_reason}\n"
+                    "Fix exactly that. Keep everything else that was working — "
+                    "in particular, if the problem was the project you chose, "
+                    "choose a different real project rather than rewording the "
+                    f"same one. Stay under {_OPENING_MAX_WORDS} words: switching "
+                    "project is not a licence to explain it at greater length, "
+                    "and a draft that solves the first objection by running long "
+                    "is rejected again."
+                )
             text = call_llm(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": prompt + retry_note}],
                 system_prompt="You write concise, specific, honest cover-letter openings. Output only the requested paragraph.",
                 temperature=0.5,
                 max_tokens=300,
             )
             text = (text or "").strip().strip('"')
-            ok, result, kind = _vet_opening(text, company, persona)
+            ok, result, kind = _vet_opening(text, company, persona, job_description, job_title)
             if ok:
                 return result
             last_reason = result  # a short why-rejected string
@@ -553,7 +639,7 @@ Output ONLY the paragraph."""
             # the generic template throws away a truthful, tailored paragraph to
             # avoid a paragraph that is merely long, which is the worse trade.
             # Keep the shortest such draft and use it if no clean one arrives.
-            if kind == "presentation" and text:
+            if kind == "presentation" and text and len(text.split()) <= _SALVAGE_MAX_WORDS:
                 if salvageable is None or len(text.split()) < len(salvageable.split()):
                     salvageable = text
         if salvageable:
@@ -571,11 +657,11 @@ Output ONLY the paragraph."""
 _OPENING_ATTEMPTS = 3
 _CLOSING_MIN_DESCRIPTION = 400  # chars; below this the posting says too little to close on
 _CLOSING_ATTEMPTS = 4  # one more than the opening: a tic rejection is cheap to retry
-# The prompt asks for ≤80 words, but the model clusters around 90-110 and a tight
-# cap just burned the retry budget and fell back to a generic template — worse
-# than a slightly-long tailored opening. Cap only the genuinely bloated (130+
-# originally seen); the prompt still pushes for brevity within that.
-_OPENING_MAX_WORDS = 110
+# The prompt asks for ≤80 words, but the model clusters around 90-110; a 99-word
+# opening made the whole letter read bloated. Cap at 90 and allow a truthful
+# salvage draft only up to 105 — longer than that falls back to the template.
+_OPENING_MAX_WORDS = 90
+_SALVAGE_MAX_WORDS = 105
 # Ethos lines the model overuses verbatim across letters — each becomes a tic
 # once the previous one is banned, so they are rejected at the gate too.
 _BANNED_PHRASES = (
@@ -710,13 +796,14 @@ Output ONLY the paragraph."""
                 max_tokens=220,
             )
             text = (text or "").strip().strip('"')
-            ok, result, kind = _vet_opening(text, company, persona)
+            ok, result, kind = _vet_opening(text, company, persona, job_description, job_title)
             if ok and (tic := _closing_uses_tic(result)):
                 ok, kind = False, "presentation"   # honest but stale; re-roll
             if ok:
                 return result
             last_reason = result if isinstance(result, str) else "rejected"
-            if kind == "presentation" and text and not _closing_uses_tic(text):
+            if kind == "presentation" and text and not _closing_uses_tic(text) \
+                    and len(text.split()) <= _SALVAGE_MAX_WORDS:
                 if salvageable is None or len(text.split()) < len(salvageable.split()):
                     salvageable = text
         if salvageable:
@@ -733,7 +820,75 @@ Output ONLY the paragraph."""
         return None
 
 
-def _vet_opening(text: str, company: str, persona: str) -> tuple[bool, str, str]:
+# An illustration series is only evidence for a posting that wants pictures made.
+# _ROLE_PROJECT_HINTS already says so in prose ("Feral Bestiary Plate 001 fits a
+# posting weighted toward image-making and art direction"), and the model ignored
+# it: asked to open a Lloyds Banking Group creative-technologist letter, it bridged
+# the posting's word "storytelling" to a series about animals abandoned in war
+# zones and offered it as evidence of customer-centred design. Three re-drafts of
+# a strengthened prompt still produced it twice. A prompt line is a request; this
+# is the check.
+# Some projects are evidence only for postings that ask for that craft. Each
+# entry pairs the words that name the project with the words a posting uses when
+# it actually wants it; naming the project to a posting that does neither is the
+# letter stretching to fill a paragraph.
+#
+# Kept as a table rather than one check per project, because the second one
+# arrived within a day of the first and the third will too — an illustration
+# series pitched at a banking prototyper, then a logo pitched at the same kind of
+# role. Both were pitched despite _ROLE_PROJECT_HINTS saying in prose which
+# projects suit which posting: a prompt line is a request, this is the check.
+_NARROW_CRAFT_PROJECTS = (
+    (
+        "illustration series",
+        ("feral bestiary", "bestiary"),
+        ("illustration", "illustrator", "concept art", "concept artist",
+         "art direction", "art director", "visual development", "character design",
+         "storyboard", "drawing", "painting", "sketch", "comic", "animation",
+         "editorial art",
+         # Job titles that are art jobs without using any of the words above:
+         # an "Art Technician" advert for a school describes preparing materials
+         # and supporting lessons, and named none of them.
+         "art technician", "art teacher", "art department", "fine art",
+         "artist", "atelier", "studio art"),
+    ),
+    (
+        "identity/logo work",
+        ("identity mark", "logo design", "personal identity"),
+        ("brand identity", "logo", "identity design", "visual identity", "branding",
+         "brand designer", "brand design", "graphic design", "graphic designer",
+         "typography", "rebrand", "brand guidelines", "marketing materials",
+         "art direction", "packaging"),
+    ),
+)
+
+
+def _cites_narrow_craft_without_cause(text: str, job_description: str,
+                                      job_title: str = "") -> str | None:
+    """A craft credit offered to a posting that never asks for that craft.
+
+    Returns a short reason, or None. Judged on the posting's own words rather
+    than the detected role type: a creative-technologist posting CAN be
+    image-making or brand work, and when it is, the project is the right thing
+    to cite.
+
+    The TITLE counts as part of the posting. An "Art Technician" advert whose
+    body talks only about supporting lessons and preparing materials contains
+    none of the signal words, and judging the body alone rejected an
+    illustration credit offered to a school art department — the one posting in
+    the batch where it was plainly the right credit to offer.
+    """
+    low = text.lower()
+    posting = f"{job_title} {job_description or ''}".lower()
+    for label, mentions, signals in _NARROW_CRAFT_PROJECTS:
+        mention = next((m for m in mentions if m in low), None)
+        if mention and not any(s in posting for s in signals):
+            return f"{label} ({mention})"
+    return None
+
+
+def _vet_opening(text: str, company: str, persona: str,
+                 job_description: str = "", job_title: str = "") -> tuple[bool, str, str]:
     """Run every opening gate.
 
     Returns (True, clean_text, "") or (False, reason, kind), where kind marks
@@ -779,6 +934,9 @@ def _vet_opening(text: str, company: str, persona: str) -> tuple[bool, str, str]
     unsupported = _verify_opening_claims(text)
     if unsupported:
         return False, f"unsupported claim ({unsupported})", "honesty"
+    stretched = _cites_narrow_craft_without_cause(text, job_description, job_title)
+    if stretched:
+        return False, f"{stretched} cited for a posting that does not ask for it", "honesty"
 
     # --- Presentation gate, checked last ---
     # The prompt asks for ≤80 words and the model tends to run long. Reject so a

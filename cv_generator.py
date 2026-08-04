@@ -40,7 +40,7 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 {technical_toolkit}
 
 ## EDUCATION & LANGUAGES
-**Hokkai University, Sapporo, Hokkaido | 2013 – 2017** — Faculty of Humanities, Department of English and American Culture
+**Hokkai Gakuen University, Sapporo, Hokkaido | 2013 – 2017** — Faculty of Humanities, Department of English and American Culture
 **Escuela Falcon, Guanajuato, México | 2016 (3 months)** — Spanish Language School
 **Languages:** Japanese (native) · English (professional working) · Spanish (daily conversation)"""
 
@@ -198,6 +198,10 @@ _TOOLKIT_CATEGORY_ORDER = {
     "general":               [],  # master-file order as-is
     "web_developer":         ["Programming & Automation", "Frontend & Product Engineering", "Systems & Infrastructure", "AI Systems & Agents"],
     "product_designer":      ["Design & Visual Production", "Frontend & Product Engineering", "3D & Generative Media", "AI Systems & Agents"],
+    # Brand/print roles read the image-making tools as craft evidence, so 3D &
+    # Generative Media sits above the front-end block — the reverse of
+    # product_designer, where the shipped interface matters more.
+    "graphic_designer":      ["Design & Visual Production", "3D & Generative Media", "Frontend & Product Engineering", "AI Systems & Agents"],
     "creative_technologist": ["3D & Generative Media", "AI Systems & Agents", "Design & Visual Production", "Programming & Automation"],
     "technical_artist":      ["3D & Generative Media", "Design & Visual Production", "Programming & Automation", "AI Systems & Agents"],
     "data_analysis":         ["Programming & Automation", "AI Systems & Agents", "Systems & Infrastructure"],
@@ -249,8 +253,19 @@ ROLE_KEYWORDS = {
     "data_analysis": ["data entry", "data analyst", "data input", "data quality", "data validation", "data cleaning", "data processing", "spreadsheet", "excel specialist"],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
-    "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
-    "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma", "digital designer", "graphic designer", "brand designer", "creative designer", "web designer", "motion designer"],
+    "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "product engineer", "python developer", "django", "react"],
+    # "ux &" / "ux and" / "ux design" rather than a bare "ux": the graphic_designer
+    # split gave "digital designer" away, so a hybrid title like "UX & Digital
+    # Designer" scored zero here and routed to the brand CV. A bare "ux" would
+    # match inside unrelated words, so the co-occurrence forms are the safe ones.
+    "product_designer": ["product designer", "ux designer", "ui designer", "ui/ux", "ux/ui", "ux &", "ux and", "ux design", "user experience designer", "interaction designer", "visual designer", "product design", "design systems", "figma", "web designer"],
+    # Split out of product_designer: a print/brand/artwork post and a UX post
+    # both said "designer", so both got the product_designer CV — which leads
+    # on interface and information architecture and buries the identity and
+    # illustration work an agency or in-house brand team is actually reading
+    # for. Keywords here are the brand/print/artwork vocabulary; the UX/UI
+    # vocabulary stays with product_designer.
+    "graphic_designer": ["graphic designer", "graphic design", "digital designer", "brand designer", "brand design", "brand visuals", "visual identity", "brand identity", "creative designer", "artworker", "print design", "packaging designer", "motion designer", "motion graphics", "marketing designer", "studio designer", "midweight designer", "adobe creative suite", "indesign", "illustrator"],
     "camera_assistant": ["camera assistant", "photography assistant", "photo assistant", "camera operator", "studio photographer", "photographer", "photography"],
 }
 
@@ -510,6 +525,17 @@ STATIC_EXPERIENCE = {
         "taifunome-research-platform",
         "hive-floral-pod-3d-conceptual-art",
     ],
+    # Brand-first order, the reverse of product_designer's build-first one:
+    # TAIFUNOME as the studio identity (story, logo, tokens, TAIFU mode),
+    # the personal identity mark as the pure mark-making evidence, then the
+    # Bestiary plate for illustration and art direction. The Portfolio Website
+    # closes it as proof the design reaches a live page.
+    "graphic_designer": [
+        "taifunome-research-platform",
+        "logo-design-for-myself",
+        "feral-bestiary-plate-001",
+        "portfolio_website",
+    ],
     # The general profile also carries the longest PROFILE text, so its four
     # write-ups have to be the short ones or the CV spills onto a third page.
     "general": [
@@ -543,33 +569,34 @@ def _bold_toolkit_headers(toolkit_text: str) -> str:
     return "\n".join(out)
 
 
-def _display_url(url: str) -> str:
-    """The address as a CV prints it: no scheme, no trailing slash.
-
-    The record keeps the canonical URL so it stays clickable from the vault;
-    the entry line is tight on width, and "taifunome.com" costs a third of
-    "http://taifunome.com/" while a reader types the same thing either way.
-    """
-    return re.sub(r"^https?://", "", url).rstrip("/")
-
-
 def _with_project_url(title_line: str, inner: str) -> str:
-    """Append a project's live URL to its entry title line, if it has one.
+    """Append an entry's live URL to its title line, as a clickable link.
+
+    Searches _ALL_ENTRIES rather than PROJECTS: the URL a title line carries
+    can belong to either an employment record (EXPERIENCE section) or a
+    project record (SELECTED PROJECTS) — TAIFUNOME's own site is on the
+    employment line, since that is the one place on the CV that is always
+    shown regardless of role type, while the project entry naming the site is
+    LLM-selected and not guaranteed to appear at all.
 
     Applied here rather than in _format_project_entry because the LLM path
     never calls that function — it writes its own entry text — and a URL that
     only appeared on statically-ordered CVs would be missing from most of them.
     Both paths pass through this function, so this is the one place that sees
-    every title line.
+    every title line, project and employment alike.
+
+    The full address is shown, not a shortened host — a reader opening the
+    PDF on a computer can click it, and the text should say what it points
+    to rather than make them trust a bare domain.
     """
     head = inner.split(" | ")[0].strip()
-    for p in PROJECTS:
+    for p in _ALL_ENTRIES:
         if not p.get("url") or _title_key(p["title"]) != _title_key(head):
             continue
-        shown = _display_url(p["url"])
+        shown = f"[{p['url']}]({p['url']})"
         # Idempotent: this runs over lines that may already carry the address —
         # a CV patched in place, or a body re-finished after padding — and an
-        # entry titled "… · taifunome.com · taifunome.com" is the whole cost of
+        # entry titled "… · [url](url) · [url](url)" is the whole cost of
         # forgetting that.
         if shown in title_line:
             return title_line
@@ -590,9 +617,16 @@ def _bold_experience_titles(experience_text: str) -> str:
         s = line.strip()
         is_title = s.count(" | ") >= 2 and not s.startswith(("•", "-", "#"))
         if is_title:
+            # A URL suffix already appended (" · [url](url)") must not reach
+            # the bracket-stripping below — that strips LLM template-placeholder
+            # brackets like "[Project Title]" and would eat the link's brackets
+            # just as happily, corrupting it into bare unlinked text on every
+            # second pass. Nothing else in a title line uses " · ", so split it
+            # off first; _with_project_url recomputes it fresh below.
+            core = s.split(" · ", 1)[0]
             # drop partial bold + literal [ ] the LLM copies from the prompt's
             # "[Project Title] | [Role] | [Period]" template, then bold the line
-            inner = s.replace("**", "").replace("[", "").replace("]", "").strip()
+            inner = core.replace("**", "").replace("[", "").replace("]", "").strip()
             # the studio name lives in the SELECTED PROJECTS section header —
             # repeating it on every entry line is noise
             inner = inner.replace(" | Taifunomé — Independent Studio", "")
@@ -688,11 +722,20 @@ INSTRUCTIONS:
    the "other projects" line because a smaller piece of tooling matches a
    keyword in the posting more literally.
 8. If the job involves front-end/web development, consider including the Portfolio Website project.
-9. For product / UX / UI / visual-design roles, prioritise Portfolio Website,
-   the Identity Mark, Hive Floral Pod, and design-tooling work (Asset Weaver).
-   Rank the illustration series (Feral Bestiary) LOW
+9. For product / UX / UI roles (role type product_designer), prioritise
+   Portfolio Website, the Identity Mark, Hive Floral Pod, and design-tooling
+   work (Asset Weaver). Rank the illustration series (Feral Bestiary) LOW
    unless the posting explicitly asks for illustration, concept art, or
    narrative art direction — it is an art series, not product design work.
+9b. For graphic / brand / print / artwork roles (role type graphic_designer)
+   the reading is the opposite: these teams judge identity and image-making,
+   not interface architecture. Rank TAIFUNOME first (story, logo mark, brand
+   architecture, design tokens, the live site and its "TAIFU mode" sequence),
+   then the Identity Mark, then Feral Bestiary — the illustration series IS
+   the relevant craft evidence here, so it must be written up, not dropped to
+   the "other projects" line. Portfolio Website follows as proof the design
+   reaches a live page. Do not promote an AI pipeline (Asset Tagger, Asset
+   Weaver) over any of those unless the posting is explicitly about automation.
 10. For concept-art / illustration / game-art / 3D roles, prioritise Feral
    Bestiary, Arch Viz, and Hive Floral Pod.
 11. If the job involves data/automation, prioritize Independent Development.
