@@ -194,7 +194,13 @@ def _patch_all(monkeypatch, results):
 
 
 def _posting(title):
-    return {"title": title, "company": "Acme", "location": "X", "description": "d"}
+    # The description has to contain a configured keyword ("A", per _all_config).
+    # scrape_indeed_all now runs its results through filter_jobs_by_keywords like
+    # every other scraper, so a posting matching nothing is dropped — correct
+    # behaviour, but it would empty these fixtures and make the tests below look
+    # like failures of the resilience they actually check.
+    return {"title": title, "company": "Acme", "location": "X",
+            "description": "keyword A appears in the body"}
 
 
 def test_one_failed_search_does_not_discard_the_others(monkeypatch):

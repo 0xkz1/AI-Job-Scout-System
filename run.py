@@ -25,7 +25,12 @@ from datetime import datetime
 import yaml
 
 from scraper_indeed import scrape_indeed_all, save_jobs as save_indeed
-from scraper_linkedin import scrape_linkedin_all
+# Guest endpoints, not the authenticated UI: the logged-in scraper cannot run
+# unattended (no valid session on the cron box, and auto-login lands on a
+# checkpoint), which is why LinkedIn contributed nothing to the nightly run.
+# scraper_linkedin.py is still used by scraper_saved.py for the user's own
+# saved jobs, which genuinely need the account.
+from scraper_linkedin_guest import scrape_linkedin_all
 from scraper_reed import scrape_reed_all
 from scraper_guardian import scrape_guardian_all
 from scraper_adzuna import scrape_adzuna_all
@@ -120,6 +125,29 @@ def save_raw_to_saved(jobs: list[dict], source: str):
     with open(path, "w") as f:
         json.dump(valid, f, indent=2, ensure_ascii=False, default=str)
     print(f"  📦 Staged {len(valid)} {source} jobs → 00_saved/")
+
+
+def record_site_yield(site: str, count: int) -> None:
+    """Append 'site<TAB>count' to the file named by JIS_YIELD_FILE, if set.
+
+    Exit status alone cannot tell a healthy quiet night from a scraper that
+    silently returns nothing: a site whose selectors stopped matching exits 0
+    with an empty list, which is exactly how Indeed contributed nothing for 11
+    nights while the cron recorded success. The nightly summary records the exit
+    code; this records what the run actually produced, so nightly_scout.py can
+    say "linkedin scraped 0 jobs two nights running" instead of staying silent.
+
+    Written only when the environment names a file, so ad-hoc runs from the
+    Streamlit UI do not overwrite the nightly's record of its own run.
+    """
+    path = os.environ.get("JIS_YIELD_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{site}\t{count}\n")
+    except OSError as e:  # never let bookkeeping take the scrape down
+        print(f"  ⚠ could not record site yield: {e}")
 
 
 def load_saved_from_index() -> list[dict]:
@@ -945,7 +973,7 @@ async def main():
             print(f"\n{'='*60}")
             print("🔗 LINKEDIN SCRAPER")
             print(f"{'='*60}")
-            print("  (LinkedIn requires login on first run — use non-headless)")
+            print("  (guest endpoints — no login, no browser)")
             try:
                 linkedin_jobs = await scrape_linkedin_all(config)
                 print(f"  → {len(linkedin_jobs)} jobs from LinkedIn")
@@ -1009,6 +1037,12 @@ async def main():
             except Exception as e:
                 print(f"  ❌ Reed scraper failed: {e}")
                 scraper_failures.append("reed")
+
+        # Recorded here, before the saved-jobs merge below adds to all_jobs, so
+        # the number is what this site actually scraped. Only meaningful for a
+        # single-site invocation, which is how the nightly calls this.
+        if len(sites) == 1 and sites[0] not in scraper_failures:
+            record_site_yield(sites[0], len(all_jobs))
 
     if not _from_saved_mode:
         # Always ingest staged jobs (url-list.md extracts, raw staging, manual
@@ -1166,7 +1200,17 @@ async def main():
         user_exp = load_user_experience()
         total_skills = sum(len(s) for s in user_skills.values())
         print(f"  📋 Loaded profile: {total_skills} skills, {user_exp.get('years_python', 0)}y Python, {user_exp.get('years_linux', 0)}y Linux")
-        match_all(new_analyzed, config)
+        # Scored separately, because the two groups are not worth the same spend.
+        # analyze_match calls the LLM once per job for context scoring, and it was
+        # doing so for the filter's rejects too: on 2026-08-05 that was 181 of 677
+        # jobs — 27% of the pass — spent on postings already excluded by title,
+        # level or salary. They still get a TF-IDF context score, so every job in
+        # the DB keeps a composite and nothing downstream sees a hole; `run.py
+        # --reanalyze` upgrades them for real if a filter is ever loosened.
+        match_all(_enriched, config)
+        if _drop:
+            match_all(_drop, config, label="scored (filtered out, TF-IDF only)",
+                      skip_llm_context=True)
     else:
         new_analyzed = []
         print("  ✅ No new jobs — using existing DB")

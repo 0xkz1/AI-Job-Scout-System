@@ -40,12 +40,15 @@ for k, v in dotenv_values(ROOT / ".env").items():
     if v:
         os.environ.setdefault(k, v)
 
+import yaml  # noqa: E402
 from matcher import (  # noqa: E402
     _ollama_context_score, _ollama_job_summary, _load_persona_summary,
     translate_to_ja,
 )
+from filter import passes_filter  # noqa: E402
 
 ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
+CONFIG_PATH = ROOT / "config.yaml"
 CHECKPOINT_EVERY = 5
 # Only jobs at/above this composite get a Japanese translation of their
 # reasoning — matches the notify threshold, so exactly the jobs that surface
@@ -105,6 +108,9 @@ def main():
                      help="score only the top N jobs by current composite")
     ap.add_argument("--force", action="store_true",
                      help="re-score even jobs already tagged context_source=llm")
+    ap.add_argument("--include-filtered", action="store_true",
+                     help="also score jobs the config filter rejects (normally skipped: "
+                          "they can never reach a CV or the notification)")
     args = ap.parse_args()
 
     try:
@@ -118,7 +124,25 @@ def main():
         print("❌ persona summary が空 — 中断")
         return 1
 
+    # Rank only what could actually be acted on. Ranking by composite alone put
+    # the config's rejects at the front of the queue, because a rejected posting
+    # is usually rejected on its TITLE while scoring well on everything else:
+    # measured 2026-08-05, 85 of the top 250 (34%) fail passes_filter — "Senior
+    # Product Designer" at 0.85, "Lead Software Engineer" at 0.86, "Head of
+    # Marketing" at 0.84. None of them can reach a CV or the Telegram summary,
+    # which calls passes_filter itself, so a semantic re-read of them buys
+    # nothing. They matter more now than they used to: run.py deliberately
+    # leaves the rejects on a cheap TF-IDF context score, which is exactly the
+    # signature this pass looks for, so without this gate every night would
+    # re-buy the calls run.py just avoided.
     ranked = sorted(jobs, key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
+    if not args.include_filtered:
+        config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        before = len(ranked)
+        ranked = [j for j in ranked if passes_filter(j, config)[0]]
+        if before != len(ranked):
+            print(f"  🚫 除外設定で {before - len(ranked)} 件をスキップ "
+                  f"(CVにも通知にも到達しないため)", flush=True)
     if args.limit:
         ranked = ranked[:args.limit]
 

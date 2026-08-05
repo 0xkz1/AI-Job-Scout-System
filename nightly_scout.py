@@ -27,8 +27,20 @@ REVIEW_MIN = float(os.environ.get("SCOUT_REVIEW_MIN", "0.80"))
 OUTPUT_DIR = ROOT / "10_output"
 STATE_FILE = OUTPUT_DIR / "_nightly_state.json"
 RUN_SUMMARY = OUTPUT_DIR / "_nightly_run_summary.tsv"
+SITE_YIELD = OUTPUT_DIR / "_nightly_site_yield.tsv"
+YIELD_HISTORY = OUTPUT_DIR / "_nightly_site_yield_history.json"
+
+# Nights of zero jobs, from a site that exited cleanly, before it is reported.
+# One is normal — a narrow keyword set on a quiet night genuinely returns
+# nothing new. Two in a row is not: it means the scrape is broken in the way
+# that leaves no trace, which is how Indeed went 11 nights unnoticed. LinkedIn
+# is the standing risk here, since the guest scraper parses class names that
+# LinkedIn can rename without warning.
+DRY_NIGHTS_BEFORE_WARNING = 2
+YIELD_HISTORY_KEEP = 10
 CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
+MATCH_DIR = OUTPUT_DIR / "00_matches"
 
 
 def load_run_summary() -> list[dict]:
@@ -62,6 +74,64 @@ def summarize_sites(summary: list[dict]) -> tuple[str, bool]:
     if ok:
         parts.append(f"✓{'・'.join(s['site'] for s in ok)}")
     return "  ".join(parts), bool(bad)
+
+
+def load_site_yield() -> dict[str, int]:
+    """Per-site job counts written by run.py via JIS_YIELD_FILE, as {site: count}.
+    Empty when the file is absent — an older nightly script, or a run that never
+    reached the scrape phase."""
+    out: dict[str, int] = {}
+    try:
+        for line in SITE_YIELD.read_text().splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2:
+                continue
+            try:
+                out[parts[0]] = int(parts[1])
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def update_yield_history(yields: dict[str, int]) -> dict[str, list[int]]:
+    """Append tonight's counts to the rolling per-site history and save it.
+
+    Only sites that ran tonight are appended, so a site removed from the nightly
+    keeps its last known run rather than accumulating phantom zeroes that would
+    eventually fire a warning about a scraper nobody is running.
+    """
+    try:
+        history = json.loads(YIELD_HISTORY.read_text())
+        if not isinstance(history, dict):
+            history = {}
+    except Exception:
+        history = {}
+
+    for site, count in yields.items():
+        past = history.get(site) or []
+        if not isinstance(past, list):
+            past = []
+        history[site] = (past + [count])[-YIELD_HISTORY_KEEP:]
+
+    try:
+        YIELD_HISTORY.write_text(json.dumps(history, indent=0))
+    except OSError:
+        pass
+    return history
+
+
+def dry_sites(history: dict[str, list[int]], yields: dict[str, int]) -> list[str]:
+    """Sites that ran tonight and have returned nothing for enough consecutive
+    nights to be reported. Judged on the recorded history, so a site is only
+    flagged once there is evidence rather than on its first quiet night."""
+    flagged = []
+    for site in yields:
+        recent = (history.get(site) or [])[-DRY_NIGHTS_BEFORE_WARNING:]
+        if len(recent) >= DRY_NIGHTS_BEFORE_WARNING and not any(recent):
+            flagged.append(f"{site}({len(recent)}晩連続0件)")
+    return flagged
 
 
 def load_jobs() -> list[dict]:
@@ -139,6 +209,12 @@ def main():
             doc = d / f"{base}_{kind}.md"
             if not doc.exists():
                 continue
+            # Locked (hand-edited / applied / expired): run_review writes a
+            # backlink into the document, and a verdict on a submitted or
+            # closed application is advice that can no longer be taken.
+            import gen_version
+            if gen_version.is_locked(base, doc.read_text(encoding="utf-8"), MATCH_DIR):
+                continue
             try:
                 from reviewer import run_review, review_is_current, get_score_threshold, _extract_score
                 if not review_is_current(doc)[0]:
@@ -160,17 +236,26 @@ def main():
     summary = load_run_summary()
     health_line, any_failure = summarize_sites(summary)
 
-    if not new_high and not any_failure:
+    # A clean exit with an empty result set is the failure the exit code cannot
+    # express, so it breaks the silence on the same terms as an outright error.
+    yields = load_site_yield()
+    dry = dry_sites(update_yield_history(yields), yields)
+    dry_line = f"🕳 収穫ゼロ: {'・'.join(dry)} — セレクタ切れの疑い" if dry else ""
+
+    if not new_high and not any_failure and not dry:
         return  # every site ok, nothing new — the only truly silent case
 
     if not new_high:
-        # No new matches but a site failed — tell the user why it was quiet.
-        print(f"⚠️ AI Job Scout — 新着なし。スクレイプに問題:\n{health_line}")
+        # No new matches but a site failed or came back empty — say which.
+        detail = "\n".join(x for x in (health_line, dry_line) if x)
+        print(f"⚠️ AI Job Scout — 新着なし。スクレイプに問題:\n{detail}")
         return
 
     lines = [f"🎯 AI Job Scout — 新着の高マッチ {len(new_high)}件 (新規求人{len(new_jobs)}件中)"]
     if health_line:
         lines.append(f"📡 {health_line}")
+    if dry_line:
+        lines.append(dry_line)
     for j in new_high[:10]:
         s = j["match"]["composite_score"]
         flag = "🔥" if s >= REVIEW_MIN else "✨"

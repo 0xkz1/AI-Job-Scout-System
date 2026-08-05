@@ -1750,11 +1750,17 @@ def calculate_title_relevance(
 
     return 1.0
 
-def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_summary: bool = False) -> dict:
+def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_summary: bool = False,
+                  skip_llm_context: bool = False) -> dict:
     """
     Run all match analyses and return combined result.
     Pass custom weights via config['weights'] or weights parameter.
     If skip_summary=True, skip LLM job summary generation (faster batch mode).
+    If skip_llm_context=True, score context with TF-IDF instead of calling the
+    LLM. For jobs the config filter already rejected: they are kept in the DB so
+    that loosening a keyword later needs no re-scrape, but a rejected posting
+    does not need a model's opinion to sit there — and a stored LLM context is
+    still reused when one exists, so nothing already paid for is thrown away.
     """
     user_skills = load_user_skills()
     user_exp = load_user_experience()
@@ -1830,7 +1836,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         # Use LLM for context scoring (or TF-IDF fallback)
         persona = _load_persona_summary()
         llm_ctx = None
-        if persona and job_description:
+        if persona and job_description and not skip_llm_context:
             llm_ctx = _ollama_context_score(job_description, persona)
         if llm_ctx:
             ctx_match = llm_ctx

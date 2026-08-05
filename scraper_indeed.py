@@ -44,6 +44,46 @@ _PANE_TIMEOUT_MS = 8000
 # fetched once per search whether it returns 2 cards or 16.
 _SEARCH_PAUSE_SECONDS = 8
 
+# Cloudflare's decision is not deterministic — on 2026-08-04, 11 of 36 searches
+# were let through and 25 were challenged; on 2026-08-05, all 36 were challenged.
+# A challenge is therefore worth re-attempting from a fresh browser context
+# rather than writing the search off, as long as the retries are paced enough to
+# not read as a burst themselves.
+_CLOUDFLARE_RETRIES = 2
+_CLOUDFLARE_RETRY_PAUSE_SECONDS = 45
+
+
+class CloudflareBlocked(RuntimeError):
+    """The search listing served a challenge page that this run cannot solve.
+
+    Distinct from a generic failure so the caller can retry it specifically: a
+    timeout means Indeed is throttling and more requests make it worse, whereas
+    a challenge is a coin flip that is worth flipping again.
+    """
+
+
+def _headed_display_available() -> bool:
+    """Whether a headed chromium could actually start.
+
+    Testing `DISPLAY` for presence alone is not enough and was the specific
+    reason Indeed produced nothing for weeks: the cron job inherits DISPLAY from
+    the desktop session that spawned the scheduler, so the variable is set while
+    no X server is reachable from the job. The headed relaunch then died with
+    "Missing X server or $DISPLAY" on every one of the 36 searches. Check that
+    the socket the display names is actually there.
+    """
+    display = os.environ.get("DISPLAY", "").strip()
+    if not display:
+        return False
+    # "host:0.0" — a remote/TCP display; no local socket to inspect, so trust it.
+    host, _, rest = display.rpartition(":")
+    if host:
+        return True
+    number = rest.split(".")[0]
+    if not number.isdigit():
+        return False
+    return os.path.exists(f"/tmp/.X11-unix/X{number}")
+
 # Description containers in the preview pane, best first. The second is the
 # wrapper and carries the "Job details / Pay / Job type" header as well, so it is
 # only a fallback — it inflates every description by the same ~220 chars.
@@ -230,16 +270,16 @@ async def scrape_indeed(
         force_bypass = False
         import os as _os
         if cookie_path and not _os.path.exists(cookie_path):
-            if _os.environ.get("DISPLAY"):
+            if _headed_display_available():
                 print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
                 is_headless = False
                 force_bypass = True
             else:
                 # Same trap as the Cloudflare relaunch below: headed chromium cannot
-                # start without an X server, so forcing it here would crash instead
-                # of falling back. Stay headless and let the Cloudflare check report
-                # the real problem.
-                print("  🔑 No cookies found and DISPLAY is unset — staying headless; "
+                # start without a reachable X server, so forcing it here would crash
+                # instead of falling back. Stay headless and let the Cloudflare check
+                # report the real problem.
+                print("  🔑 No cookies found and no usable X display — staying headless; "
                       "Cloudflare will likely block. Use `xvfb-run`, or run "
                       "interactively once to create cookies/indeed_cookies.json.")
 
@@ -275,19 +315,19 @@ async def scrape_indeed(
             print("  ⚠️ Cloudflare verification detected!")
             
             # If we are headless, we must restart in non-headless mode to let user bypass it
-            if is_headless and not _os.environ.get("DISPLAY"):
-                # No X server: chromium cannot start headed, so the relaunch below
-                # would die with "Target page, context or browser has been closed"
-                # and the caller's except would print a failure and exit 0. That is
-                # how Indeed went 11 days contributing nothing while the cron
-                # recorded success every night. Say what to do instead of retrying
-                # into a guaranteed crash.
-                print("  ⛔ Cloudflare requires a headed browser, but DISPLAY is unset "
-                      "(no X server). Indeed cannot be scraped unattended — wrap the "
-                      "command in `xvfb-run`, or run it interactively once to refresh "
-                      "cookies/<cookies/indeed_cookies.json>.")
+            if is_headless and not _headed_display_available():
+                # No reachable X server: chromium cannot start headed, so the
+                # relaunch below would die with "Target page, context or browser has
+                # been closed" and the caller's except would print a failure and exit
+                # 0. That is how Indeed went 11 days contributing nothing while the
+                # cron recorded success every night. Raise instead of returning [] so
+                # the caller can retry the coin flip rather than treating a challenge
+                # as "this search has no results".
+                print("  ⛔ Cloudflare challenge, and no usable X display for a headed "
+                      "retry. Wrap the command in `xvfb-run`, or run it interactively "
+                      "once to refresh cookies/indeed_cookies.json.")
                 await browser.close()
-                return []
+                raise CloudflareBlocked(f"{keyword}/{location}: Cloudflare challenge, no headed fallback")
             if is_headless:
                 print("  🔄 Headless mode blocked by Cloudflare. Relaunching in non-headless mode...")
                 await browser.close()
@@ -531,18 +571,50 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
 
     searches = [(kw, loc) for kw in keywords for loc in locations]
     failures = []
+    # Circuit breaker on the retries. Retrying every search costs up to
+    # 36 x 2 x 45s = 54 minutes of sleeping, which on a night where Cloudflare
+    # blocks everything would blow the 2400s per-site cron budget and turn a
+    # clean "indeed blocked" into a scheduler timeout. Once several searches in
+    # a row are blocked it is the IP being refused, not a coin flip, so the
+    # retries stop earning their keep and are switched off for the rest of the
+    # run — the first searches still get their chances.
+    consecutive_blocked = 0
+    _RETRY_GIVE_UP_AFTER = 3
+
     for index, (kw, loc) in enumerate(searches):
         if index:
             # Pacing between searches. The listing is what gets throttled, and it is
             # requested once per search regardless of how many cards it returns.
             await asyncio.sleep(_SEARCH_PAUSE_SECONDS)
-        try:
-            jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config,
-                                       cache=cache)
-        except Exception as e:
-            failures.append(f"{kw}/{loc}: {e}")
-            print(f"  ⚠ Indeed search failed ({kw} in {loc}): {e}")
+
+        retries = 0 if consecutive_blocked >= _RETRY_GIVE_UP_AFTER else _CLOUDFLARE_RETRIES
+        jobs = None
+        for attempt in range(retries + 1):
+            try:
+                jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config,
+                                           cache=cache)
+                break
+            except CloudflareBlocked as e:
+                if attempt == retries:
+                    failures.append(f"{kw}/{loc}: {e}")
+                    consecutive_blocked += 1
+                    print(f"  ⚠ Indeed search blocked after {attempt + 1} attempt(s) "
+                          f"({kw} in {loc})")
+                    if consecutive_blocked == _RETRY_GIVE_UP_AFTER:
+                        print(f"  ⛔ {consecutive_blocked} searches blocked in a row — "
+                              f"retries disabled for the rest of this run")
+                    break
+                print(f"  ↻ Cloudflare challenge — retrying in "
+                      f"{_CLOUDFLARE_RETRY_PAUSE_SECONDS}s "
+                      f"({attempt + 1}/{retries})")
+                await asyncio.sleep(_CLOUDFLARE_RETRY_PAUSE_SECONDS)
+            except Exception as e:
+                failures.append(f"{kw}/{loc}: {e}")
+                print(f"  ⚠ Indeed search failed ({kw} in {loc}): {e}")
+                break
+        if jobs is None:
             continue
+        consecutive_blocked = 0
         for j in jobs:
             dedup_key = (j["title"], j["company"], j["location"])
             if dedup_key not in seen:
@@ -555,6 +627,23 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     if len(failures) == len(searches) and searches:
         raise RuntimeError(
             f"all {len(searches)} Indeed searches failed; first: {failures[0]}")
+
+    # Indeed was the only site that skipped this, trusting its own search
+    # relevance. It should not be trusted: measured 2026-08-05, 133 of the 296
+    # postings a full run returned contained none of the configured keywords
+    # anywhere — not in the title, not in the description. Searching "Technical
+    # Artist" brought back "Technologist - Analog Design" and "Non-Apparel
+    # Technologist"; semiconductor and garment roles, priced at an LLM
+    # enrichment call each because the drop happened after that spend, if at all.
+    #
+    # The filter reads title + description + snippet, so it keeps the postings
+    # whose relevance only shows in the body — of the jobs currently scoring
+    # 0.80+, six match on the body alone and would be lost to a title-only test.
+    from_search = len(all_jobs)
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
+    if from_search:
+        print(f"  ✓ Indeed: {len(all_jobs)} of {from_search} postings match a "
+              f"configured keyword")
 
     return all_jobs
 
