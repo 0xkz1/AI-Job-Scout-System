@@ -20,14 +20,54 @@ BLOCKED_DOMAINS = [
     "optimizely", "intercom", "amplitude", "segment", "crazyegg", "mouseflow", "hubspot"
 ]
 
-def load_description_cache() -> Dict[Tuple[str, str], dict]:
+# Adzuna's API caps its description at 500 characters — measured 2026-08-05,
+# 706 of 2214 postings in _analyzed.json have a description of exactly that
+# length, 714 of the <=500-char entries are source=adzuna. This cache mixes
+# every source under the same (title, company) key, and used to keep
+# whichever record was read last regardless of length: a full 5000+ character
+# posting from reed or LinkedIn could be silently replaced by a 500-char
+# Adzuna stub, and every scraper sharing this cache (indeed, reed, adzuna,
+# guardian) would then hand that stub out as if it were the complete
+# description. A confirmed case: LinkedIn's "Web Developer @ Heriot-Watt
+# University" is 7294 chars fetched directly, 500 chars via this cache.
+#
+# Same threshold as scraper_linkedin_guest.py's _CACHE_MIN_CHARS, and for the
+# same reason: a length-based guard is a proxy, not a certain signal, but the
+# cost of a false negative (one extra fetch) is far cheaper than the cost of a
+# false positive (a job scored on a fifth of its actual description).
+_MIN_USABLE_CHARS = 600
+
+
+def _offer(cache: Dict[Tuple[str, str], dict], job: dict) -> None:
+    """Add job to cache under (title, company), keeping the longest usable
+    description seen for that key across every source file."""
+    title = job.get("title", "").strip().lower()
+    company = job.get("company", "").strip().lower()
+    if not (title and company):
+        return
+    desc = job.get("description") or ""
+    if len(desc) < _MIN_USABLE_CHARS:
+        return
+    key = (title, company)
+    existing = cache.get(key)
+    if existing is None or len(existing.get("description") or "") < len(desc):
+        cache[key] = job
+
+
+def load_description_cache(base_dir: str | None = None) -> Dict[Tuple[str, str], dict]:
     """
     Scans 10_output/_analyzed.json and 00_saved/*.json files to build a mapping of
-    (title, company) -> job_dict where the description is already fetched.
+    (title, company) -> job_dict where a usable (non-truncated) description is
+    already fetched.
+
+    base_dir overrides the repo root — a real parameter rather than a
+    hardcoded path, so this can be pointed at a temp directory in tests
+    instead of the live 10_output/_analyzed.json.
     """
-    cache = {}
-    base_dir = "/media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System"
-    
+    cache: Dict[Tuple[str, str], dict] = {}
+    if base_dir is None:
+        base_dir = "/media/kz003/atelier/00_Kazuki/career/Job-Intelligence-System"
+
     # 1. Load from _analyzed.json (final analyzed database)
     analyzed_path = os.path.join(base_dir, "10_output", "_analyzed.json")
     if os.path.exists(analyzed_path):
@@ -35,13 +75,10 @@ def load_description_cache() -> Dict[Tuple[str, str], dict]:
             with open(analyzed_path, "r", encoding="utf-8") as f:
                 jobs = json.load(f)
                 for job in jobs:
-                    title = job.get("title", "").strip().lower()
-                    company = job.get("company", "").strip().lower()
-                    if title and company and job.get("description"):
-                        cache[(title, company)] = job
+                    _offer(cache, job)
         except Exception as e:
             print(f"  ⚠ Helper Cache: Error loading _analyzed.json: {e}")
-            
+
     # 2. Load from 00_saved/*.json (staging/raw files)
     saved_dir = os.path.join(base_dir, "00_saved")
     if os.path.exists(saved_dir):
@@ -51,13 +88,10 @@ def load_description_cache() -> Dict[Tuple[str, str], dict]:
                     with open(os.path.join(saved_dir, f), "r", encoding="utf-8") as fh:
                         jobs = json.load(fh)
                         for job in jobs:
-                            title = job.get("title", "").strip().lower()
-                            company = job.get("company", "").strip().lower()
-                            if title and company and job.get("description"):
-                                cache[(title, company)] = job
+                            _offer(cache, job)
                 except Exception:
                     pass
-                    
+
     if cache:
         print(f"  🧠 Helper Cache: Loaded {len(cache)} historical job descriptions into memory.")
     return cache
@@ -150,9 +184,11 @@ async def fetch_descriptions_sequential(
                     job["snippet"] = desc[:300]
                     if loc and not job.get("location"):
                         job["location"] = loc
-                    title = job.get("title", "").strip().lower()
-                    company = job.get("company", "").strip().lower()
-                    cache[(title, company)] = job
+                    # Same guard as load_description_cache: a short live fetch
+                    # (the source's own truncation, or a partial page load)
+                    # must not become the cache entry other jobs in this same
+                    # run then treat as a confirmed-complete description.
+                    _offer(cache, job)
                     fetched_count += 1
                     if fetched_count % 5 == 0:
                         print(f"    → Fetched {fetched_count} descriptions...")

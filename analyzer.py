@@ -633,12 +633,22 @@ Return JSON: {{"experience_level": "internship|entry_level|mid|senior|director",
     if isinstance(result, dict):
         exp_level = result.get("experience_level", "unknown")
         work_style = result.get("work_style", "unknown")
+        # The model occasionally answers with a list instead of a string (e.g.
+        # ["mid"] or ["mid", "senior"]) — a plausible formatting slip, not junk,
+        # so the first element is worth keeping rather than discarding the
+        # whole answer. `x in a_set` raises TypeError for any other unhashable
+        # value (a nested dict, for instance), which crashed this job's
+        # enrichment outright rather than falling back to "unknown".
+        if isinstance(exp_level, list) and exp_level:
+            exp_level = exp_level[0]
+        if isinstance(work_style, list) and work_style:
+            work_style = work_style[0]
         # Validate values
         valid_exp = {"internship", "entry_level", "mid", "senior", "director", "unknown"}
         valid_style = {"remote", "hybrid", "onsite", "unknown"}
         return {
-            "experience_level": exp_level if exp_level in valid_exp else "unknown",
-            "work_style": work_style if work_style in valid_style else "unknown",
+            "experience_level": exp_level if isinstance(exp_level, str) and exp_level in valid_exp else "unknown",
+            "work_style": work_style if isinstance(work_style, str) and work_style in valid_style else "unknown",
         }
 
     return {"experience_level": "unknown", "work_style": "unknown"}
