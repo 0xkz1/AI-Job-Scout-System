@@ -102,6 +102,93 @@ def is_current(text: str, role_type: str = "general") -> bool:
     return read_fingerprint(text) == fingerprint(role_type)
 
 
+def role_of(text: str) -> str:
+    """The role a generated doc was built for, read from its own frontmatter.
+
+    A CV names its profile (`source_profile`), a cover letter its template
+    (`source_template`); both end in the role name. Falls back to "general",
+    which is what generation itself falls back to.
+    """
+    import re
+    m = re.search(r'^source_(?:profile|template):\s*"?\[\[[^\]]*?([\w-]+)\]\]',
+                  text, re.MULTILINE)
+    return m.group(1) if m else "general"
+
+
+# ---------------------------------------------------------------------------
+# Staleness: is this document's BODY built to the current shape?
+#
+# The fingerprint answers this exactly, but only for documents that carry one —
+# and 489 of 554 CVs predate stamping. Most of them are fine: patch scripts
+# (patch_toolkit_lines, patch_add_project_urls) rewrite bodies in place without
+# stamping, so "unstamped" says nothing either way. Silently treating them as
+# current is what let a three-page, pre-taifunome CV render as a finished PDF on
+# 2026-08-06; refusing all 489 would block half the corpus over a missing line.
+#
+# So an unstamped CV falls back to reading its own structure. Each marker below
+# is one shape change, named with the commit that made it, and the check is
+# deliberately shallow: it looks only at things generation ALWAYS produces, so a
+# per-job difference (which projects were picked, how many write-ups fit the two
+# pages) never reads as staleness. Add a marker here when the CV shape changes.
+# ---------------------------------------------------------------------------
+
+_HEADER_RE = r'^# .+\n\*\*.+\*\*\n(.+)$'
+_PROJECTS_RE = r'^## SELECTED PROJECTS\n(.*?)(?=^## |\Z)'
+
+
+def _cv_shape_faults(text: str) -> list[str]:
+    """Shape changes this CV body predates, newest spec first. Empty when current."""
+    import re
+    faults = []
+
+    # 029cd13: the header lost its second line (role_tagline), so the line under
+    # the job title is the contact line and nothing else.
+    m = re.search(_HEADER_RE, text, re.MULTILINE)
+    if m and not m.group(1).lstrip().startswith(("Edinburgh", "[")):
+        faults.append("header still carries the retired role_tagline line")
+
+    body = re.search(_PROJECTS_RE, text, re.MULTILINE | re.DOTALL)
+    if not body:
+        # No "## SELECTED PROJECTS" at all: the pre-heading generation, which
+        # wrote plain-text section names and the filename as the H1.
+        faults.append("no '## SELECTED PROJECTS' section (pre-heading generation)")
+    else:
+        writeups = [l for l in body.group(1).splitlines()
+                    if l.startswith("**") and not l.startswith("**Other projects")]
+        # e99bac4: TAIFUNOME leads the section on every CV — it is the studio the
+        # candidate runs, and it was being demoted to the "other projects" line.
+        if writeups and "TAIFUNOME" not in writeups[0]:
+            faults.append("TAIFUNOME is not the first project write-up")
+
+    # cfa29ad: EDUCATION and LANGUAGES merged into one section to win back the
+    # space that was pushing CVs onto a third page.
+    if "## EDUCATION & LANGUAGES" not in text:
+        faults.append("EDUCATION and LANGUAGES are still separate sections")
+    return faults
+
+
+def staleness_reason(text: str, is_cv: bool = True) -> str | None:
+    """Why this document's body is not built to the current spec, or None.
+
+    Checked in the order the evidence is trustworthy: a fingerprint that
+    disagrees is conclusive, an absent one sends a CV to its own structure, and
+    an unstamped cover letter has no structure worth reading — its shape is one
+    template, so there is nothing to compare against.
+    """
+    role = role_of(text)
+    stamped = read_fingerprint(text)
+    if stamped is not None:
+        current = fingerprint(role)
+        if stamped != current:
+            return f"gen_fingerprint {stamped} != current {current} (role: {role})"
+        return None
+    if not is_cv:
+        return None
+    faults = _cv_shape_faults(text)
+    if faults:
+        return "no gen_fingerprint, and the body predates: " + "; ".join(faults)
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Locks: when a CV/CL must be left exactly as it is.
