@@ -179,6 +179,62 @@ def _parse_job_html(html: str) -> dict:
     return out
 
 
+def job_id_from_url(url: str) -> str:
+    """The posting id out of any LinkedIn job URL, or "".
+
+    Handles the two shapes the user pastes: the bare /jobs/view/<id>/ and the
+    slugged /jobs/view/some-title-at-company-<id>?refId=... form.
+    """
+    if "linkedin.com" not in (url or "").lower():
+        return ""
+    m = re.search(r"/jobs/view/(?:[^/?#]*?-)?(\d{6,})", url)
+    return m.group(1) if m else ""
+
+
+def fetch_one(url: str) -> dict | None:
+    """One pasted LinkedIn URL -> a full job dict, with no LLM involved.
+
+    scraper_url_list.py reads whatever the page renders and asks a local 26B
+    reasoning model to pull the fields back out of the prose — measured at ~107s
+    per URL on 2026-08-03, with the slowest exceeding its own 120s timeout and
+    being discarded. LinkedIn already publishes the same fields as markup on its
+    logged-out endpoint, so for these URLs the model buys nothing: this is the
+    same request the search scraper makes, at ~2s.
+    """
+    job_id = job_id_from_url(url)
+    if not job_id:
+        return None
+    html = _get(JOB_URL.format(job_id=job_id))
+    if not html:
+        return None
+    detail = _parse_job_html(html)
+    if not detail:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    title = _text(soup.select_one("h2.topcard__title, h1.topcard__title, .top-card-layout__title"))
+    company = _text(soup.select_one("a.topcard__org-name-link, span.topcard__flavor"))
+    location = _text(soup.select_one("span.topcard__flavor.topcard__flavor--bullet"))
+    if not title:
+        return None
+
+    job = {
+        "title": title,
+        "company": company,
+        "location": location,
+        "salary": "",
+        "snippet": detail["description"][:500],
+        "url": f"https://www.linkedin.com/jobs/view/{job_id}",
+        "job_id": job_id,
+        "source": "linkedin",
+        "source_site": "LinkedIn",
+        "type": "manual",
+        "scraped_at": datetime.now().isoformat(),
+    }
+    job.update(detail)
+    return job
+
+
 def _location_params(location: str) -> dict:
     """Config locations are bare city names plus the pseudo-location 'Remote'.
     Remote is not a place LinkedIn understands, it is the f_WT=2 workplace-type

@@ -3,18 +3,61 @@ import re
 import sys
 import json
 import asyncio
-import requests
 import fcntl
 from datetime import datetime
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
+from llm_client import call_llm
+from scraper_linkedin_guest import fetch_one, job_id_from_url
+
 SAVED_DIR = os.path.join(os.path.dirname(__file__), "00_saved")
 URL_LIST_FILE = os.path.join(SAVED_DIR, "url-list.md")
 OUTPUT_FILE = os.path.join(SAVED_DIR, "url_list_jobs.json")
 
-OLLAMA_ENDPOINT = os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")
+# Anti-bot interstitials are short, but not short enough to trip the
+# too-short guard: Indeed's Cloudflare page renders 250 characters of "Additional
+# Verification Required / Your Ray ID is ...", which passed the len < 100 test
+# and was then handed to the model as if it were a job posting. Every one of
+# those cost a full extraction call and produced nothing. Detect them by what
+# they say instead of how long they are.
+BLOCK_MARKERS = (
+    "additional verification required",          # Indeed
+    "performing security verification",          # jobleads, learn4good
+    "protect against malicious bots",            # same family, different wording
+    "just a moment",
+    "checking your browser",
+    "enable javascript and cookies to continue",
+    "verify you are human",
+    "attention required! | cloudflare",
+    "access to this page has been denied",
+    "performance and security by cloudflare",
+)
+
+# A last-resort check for interstitials whose wording is not in the list above.
+# Every anti-bot page seen so far is under 400 characters AND cites a Cloudflare
+# Ray ID; a real job posting is thousands of characters and cites none. Both
+# conditions together, so a genuinely terse posting is not thrown away.
+BLOCK_MAX_CHARS = 400
+RAY_ID_RE = re.compile(r"\bray id\b", re.IGNORECASE)
+
+
+def looks_blocked(text: str) -> str | None:
+    """Why this page is an anti-bot interstitial rather than a posting, or None.
+
+    Needed because the model does not refuse these pages — asked to extract a
+    job from "Performing security verification", it returns a well-formed JSON
+    object with every field empty, which the caller then rejects for missing a
+    title. The URL is recorded as a failed extraction and the real cause, that
+    the fetch never got through, is never stated.
+    """
+    low = text.lower()
+    for marker in BLOCK_MARKERS:
+        if marker in low:
+            return marker
+    if len(text) < BLOCK_MAX_CHARS and RAY_ID_RE.search(text):
+        return "cloudflare ray id on a near-empty page"
+    return None
 
 
 def _try_acquire_lock(name="url_list_jobs"):
@@ -59,26 +102,24 @@ Text:
 {text[:15000]}
 """
     # Note: increased text limit to 15000 chars because we use raw innerText now
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant that outputs only valid JSON."},
-            {"role": "user", "content": prompt}
-        ],
-        "stream": False
-    }
-    
+    #
+    # Through call_llm rather than a hardcoded POST to localhost:11434. This was
+    # the one module in the project talking to Ollama directly, which meant it
+    # ignored FALLBACK_PROVIDERS and, more importantly, key_quarantine — so it
+    # could neither use a cloud key when one was healthy nor stand down from one
+    # that had started returning 401. It also pinned every extraction to a local
+    # 26B reasoning model: measured 2026-08-03, a median 107s per URL against a
+    # 120s timeout, so the slowest pages timed out and were discarded outright.
+    # The chain ends at ollama, so a local-only setup behaves as before.
     try:
-        resp = requests.post(OLLAMA_ENDPOINT, json=payload, timeout=120)
-        resp.raise_for_status()
-        # The Ollama API might return either 'message.content' or just 'response' depending on the endpoint used.
-        # Since we use /api/generate, it returns 'response' field.
-        data = resp.json()
-        content = data.get("response", "")
-        if not content:
-            # Fallback for /api/chat format just in case
-            content = data.get("message", {}).get("content", "")
-            
+        content = call_llm(
+            [{"role": "user", "content": prompt}],
+            system_prompt="You are a helpful assistant that outputs only valid JSON.",
+            temperature=0.1,
+            # The description is the whole point of this call and job postings
+            # run long; the default 512 truncates them mid-sentence.
+            max_tokens=4096,
+        )
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
@@ -86,8 +127,9 @@ Text:
                 return extracted
             except json.JSONDecodeError:
                 continue
+        print("    ⚠ LLM returned no parseable JSON")
     except Exception as e:
-        print(f"    Error calling Ollama: {e}")
+        print(f"    Error calling LLM: {type(e).__name__}: {e}")
     return None
 
 def get_source_site(url: str) -> str:
@@ -122,10 +164,19 @@ def normalize_url(url: str) -> str:
 
     # Strip tracking params — keep only the core job-identifying param
     TRACKING_PARAMS = {
-        # Indeed
-        "from", "SP", "pos", "sid", "tk", "rq", "rl", "vjs", "iaai", "ad",
-        # LinkedIn
+        # Indeed. `hl` is the display language, not part of the job's identity —
+        # observed 2026-08-06, jk=041cc148b17a1ece appeared twice in one run as
+        # "?jk=...&hl=en" and "?jk=...&from=serp&vjs=3", because only the second
+        # form's params were being stripped.
+        "from", "SP", "pos", "sid", "tk", "rq", "rl", "vjs", "iaai", "ad", "hl",
+        "advn", "adid", "sjdu", "acatk", "pub", "xkcb", "xpse", "xfps",
+        # LinkedIn. `lipi` is the one the "Saved jobs" page appends, so a URL
+        # copied from there and the same job copied from search read as two
+        # different postings — observed 2026-08-06, Bettervits Product
+        # Specialist fetched twice in one run and stored twice.
         "refId", "trk", "trkInfo", "utm_source", "utm_medium", "utm_campaign",
+        "lipi", "licu", "midToken", "midSig", "eBP", "trackingId", "position",
+        "pageNum", "originalSubdomain",
         # Generic
         "utm_content", "utm_term", "gclid", "fbclid", "msclkid",
     }
@@ -188,6 +239,29 @@ async def scrape_urls(urls):
         for i, url in enumerate(urls_to_scrape, 1):
             print(f"\n[{i}/{len(urls_to_scrape)}] Fetching: {url}")
             try:
+                # LinkedIn publishes these fields as markup on its logged-out
+                # endpoint, so asking a local 26B reasoning model to read them
+                # back out of rendered prose buys nothing. Measured 2026-08-03:
+                # the model path took a median 107s per URL and the slowest
+                # exceeded its own 120s timeout and was discarded — 34 minutes
+                # produced 16 jobs, and the run stopped with 50 URLs unread.
+                # The guest endpoint answers the same question in ~0.3s.
+                if job_id_from_url(url):
+                    job_data = fetch_one(url)
+                    if job_data:
+                        job_data["url"] = url
+                        job_data["source"] = get_source_key(url)
+                        job_data["source_site"] = get_source_site(url)
+                        jobs.append(job_data)
+                        print(f"    ✓ Extracted (LinkedIn guest, no LLM): "
+                              f"{job_data.get('title')} at {job_data.get('company')}")
+                        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+                            json.dump(jobs, f, indent=2, ensure_ascii=False)
+                        continue
+                    # Withdrawn, or LinkedIn changed its markup. Fall through to
+                    # the model rather than dropping the URL outright.
+                    print("    ⚠ Guest endpoint gave nothing — falling back to the LLM path")
+
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(5000) # Give it 5s to render JS/SPA content
                 
@@ -211,7 +285,20 @@ async def scrape_urls(urls):
                     print("    ⚠ Page content seems too short or blocked.")
                     continue
 
-                print("    Processing text with Ollama...")
+                # Checked before spending an extraction call. Indeed's
+                # Cloudflare interstitial is 250 characters — over the guard
+                # above — so every blocked /viewjob URL used to be sent to the
+                # model and come back empty, at ~107s each. Say what actually
+                # happened instead, and say what would fix it.
+                blocked = looks_blocked(text)
+                if blocked:
+                    print(f"    🚫 Blocked by an anti-bot check ({blocked!r}) — no job data on "
+                          f"this page. This fetcher runs a plain headless browser with no "
+                          f"cookies; the nightly Indeed scraper gets past the same wall by "
+                          f"running under xvfb-run with a headed relaunch.")
+                    continue
+
+                print("    Processing text with the LLM...")
                 job_data = extract_job_from_text(text)
                 
                 if job_data and job_data.get("title") and job_data.get("description"):
@@ -227,7 +314,20 @@ async def scrape_urls(urls):
                     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
                         json.dump(jobs, f, indent=2, ensure_ascii=False)
                 else:
-                    print("    ✗ Failed to extract structured job data.")
+                    # Distinguish "the model gave us nothing" from "the model
+                    # gave us a well-formed but empty object", which is what it
+                    # returns for an interstitial that slipped past
+                    # looks_blocked — the difference decides whether to widen
+                    # BLOCK_MARKERS or to look at the prompt.
+                    if isinstance(job_data, dict) and not any(
+                        (job_data.get(k) or "").strip()
+                        for k in ("title", "company", "description")
+                    ):
+                        print(f"    ✗ Model returned an empty object — the page "
+                              f"({len(text)} chars) probably had no posting on it. "
+                              f"First 80 chars: {text[:80]!r}")
+                    else:
+                        print("    ✗ Failed to extract structured job data.")
 
             except Exception as e:
                 print(f"    ✗ Error scraping {url}: {e}")
