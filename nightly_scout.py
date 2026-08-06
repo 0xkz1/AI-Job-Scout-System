@@ -8,7 +8,13 @@
 First run (no state file) records a baseline silently so the existing
 backlog doesn't spam the channel.
 
-Env overrides: SCOUT_NOTIFY_MIN (default 0.70), SCOUT_REVIEW_MIN (0.80).
+Env overrides: SCOUT_NOTIFY_MIN (default 0.70), SCOUT_REVIEW_MIN (0.70).
+
+REVIEW_MIN was 0.80 until 2026-08-06. A job scoring 0.70-0.79 still got a CV/CL
+(match_score_threshold is 0.50) and a Telegram ping (NOTIFY_MIN is 0.70), but
+sat with no review until someone checked by hand — 54 such documents were found
+generated and never reviewed. REVIEW_MIN now matches NOTIFY_MIN: anything worth
+telling the user about is worth reviewing.
 """
 import sys, os, json, hashlib
 from pathlib import Path
@@ -22,7 +28,7 @@ for k, v in dotenv_values(ROOT / ".env").items():
         os.environ.setdefault(k, v)
 
 NOTIFY_MIN = float(os.environ.get("SCOUT_NOTIFY_MIN", "0.70"))
-REVIEW_MIN = float(os.environ.get("SCOUT_REVIEW_MIN", "0.80"))
+REVIEW_MIN = float(os.environ.get("SCOUT_REVIEW_MIN", "0.70"))
 
 OUTPUT_DIR = ROOT / "10_output"
 STATE_FILE = OUTPUT_DIR / "_nightly_state.json"
@@ -258,6 +264,11 @@ def main():
         lines.append(dry_line)
     for j in new_high[:10]:
         s = j["match"]["composite_score"]
+        # Always 🔥 now that REVIEW_MIN == NOTIFY_MIN — every job in new_high
+        # gets reviewed, so the ✨/🔥 split no longer distinguishes anything.
+        # Left as a live branch rather than deleted: raising REVIEW_MIN back
+        # above NOTIFY_MIN (to cut review spend) restores the distinction for
+        # free, with no line to un-delete.
         flag = "🔥" if s >= REVIEW_MIN else "✨"
         lines.append(f"{flag} {s*100:.0f}%  {j.get('company','?')} — {j.get('title','?')}")
         if j.get("location"):
