@@ -253,7 +253,8 @@ ROLE_KEYWORDS = {
     "data_analysis": ["data entry", "data analyst", "data input", "data quality", "data validation", "data cleaning", "data processing", "spreadsheet", "excel specialist"],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
-    "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "product engineer", "python developer", "django", "react"],
+    "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
+    "product_engineer": ["product engineer", "product engineering", "product-led", "product ownership", "full-stack product", "fullstack product", "product builder"],
     # "ux &" / "ux and" / "ux design" rather than a bare "ux": the graphic_designer
     # split gave "digital designer" away, so a hybrid title like "UX & Digital
     # Designer" scored zero here and routed to the brand CV. A bare "ux" would
