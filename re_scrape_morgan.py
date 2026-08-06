@@ -2,7 +2,7 @@ import json
 import os
 import asyncio
 from scraper_reed import _fetch_reed_description_sync
-from matcher import analyze_match, generate_match_report
+from matcher import analyze_match, save_match_report
 from analyzer import analyze_job
 from run import load_config, make_safe_name
 from cv_generator import generate_cv, detect_role_type
@@ -73,11 +73,14 @@ def fix_morgan():
                 )
                 print("Updated Cover Letter!")
                 
-                # Generate Match Report
-                report = generate_match_report(job, match, cv_filename=cv_filename_md, cl_filename=cl_filename_md)
-                report_path = os.path.join(match_dir, f"{match_filename}.md")
-                with open(report_path, "w", encoding="utf-8") as rf:
-                    rf.write(report)
+                # Generate Match Report. Via save_match_report, not
+                # generate_match_report directly: the renderer defaults
+                # expired/applied to False and carried to None, so writing its
+                # output raw clears hand-ticked checkboxes and drops the
+                # cv_pdf/cl_pdf/cv_review/cl_review links.
+                report_path = save_match_report(
+                    job, match, match_dir,
+                    cv_filename=cv_filename_md, cl_filename=cl_filename_md)
                 print(f"Updated Match Report: {report_path}")
                 break
             else:

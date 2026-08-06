@@ -44,6 +44,9 @@ from matcher import (
     make_safe_name,
     load_user_skills,
     load_user_experience,
+    read_expired_flag,
+    read_applied_flag,
+    read_carried_properties,
 )
 
 # --- Config loading ---
@@ -341,8 +344,18 @@ def main():
         match_filename = f"watched_{safe_name}.md"
         match_path = MATCH_DIR / match_filename
 
-        # Generate and save match report
-        report = generate_match_report(job, match)
+        # Generate and save match report. The flags have to be passed
+        # explicitly rather than going through save_match_report, because that
+        # derives its own filename and these reports carry a `watched_` prefix.
+        # Omitting them is not harmless: the renderer defaults expired/applied
+        # to False and carried to None, so a re-run clears hand-ticked
+        # checkboxes and drops the cv_pdf/cl_pdf/cv_review/cl_review links.
+        report = generate_match_report(
+            job, match,
+            expired=read_expired_flag(match_path),
+            applied=read_applied_flag(match_path),
+            carried=read_carried_properties(match_path),
+        )
         match_path.write_text(report, encoding="utf-8")
 
         # Append link back to watched MD
