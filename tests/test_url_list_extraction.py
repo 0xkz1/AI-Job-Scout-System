@@ -19,6 +19,7 @@ Three faults, all measured on the 2026-08-03/06 runs:
     was fetched and stored twice.
 """
 import ast
+import json
 import pathlib
 
 import scraper_url_list as s
@@ -146,3 +147,62 @@ def test_linkedin_urls_route_away_from_the_llm():
     from scraper_linkedin_guest import job_id_from_url
     assert job_id_from_url("https://www.linkedin.com/jobs/view/4427214460/") == "4427214460"
     assert job_id_from_url("https://uk.indeed.com/viewjob?jk=abc123") == ""
+
+
+# --- adopting what the nightly already fetched ----------------------------
+
+def test_indeed_jk_is_read_regardless_of_tracking_params():
+    assert s._indeed_jk("https://uk.indeed.com/viewjob?jk=041cc148b17a1ece&hl=en") == "041cc148b17a1ece"
+    assert s._indeed_jk("https://uk.indeed.com/viewjob?from=serp&jk=041cc148b17a1ece&vjs=3") == "041cc148b17a1ece"
+    assert s._indeed_jk("https://www.linkedin.com/jobs/view/4427214460/") == ""
+
+
+def test_a_posting_already_in_the_database_is_adopted(tmp_path, monkeypatch):
+    """/viewjob is a hard block — verified 2026-08-06 under xvfb-run with a
+    headed browser, cached cookies and stealth, it still answered "Additional
+    Verification Required". The nightly reaches the same postings from the
+    search listing, so 12 of the 21 pasted Indeed URLs were already scraped.
+    Failing on those would discard work already done."""
+    db = tmp_path / "_analyzed.json"
+    db.write_text(json.dumps([{
+        "title": "Product Designer (Platform)", "company": "Revolut",
+        "url": "https://uk.indeed.com/viewjob?jk=041cc148b17a1ece&from=serp",
+        "description": "x" * 5000, "source": "indeed",
+        "match": {"composite_score": 0.81},
+    }]))
+    monkeypatch.setattr(s, "ANALYZED_PATH", str(db))
+
+    pasted = "https://uk.indeed.com/viewjob?jk=041cc148b17a1ece&hl=en"
+    got = s.adopt_from_database([pasted])
+    assert len(got) == 1
+    assert got[0]["company"] == "Revolut"
+    # The pasted URL is kept so a re-run recognises it as already handled.
+    assert got[0]["url"] == pasted
+    # Scoring is re-derived by run.py on merge; carrying a stale one would
+    # make this staging file look authoritative.
+    assert "match" not in got[0]
+
+
+def test_a_posting_not_in_the_database_is_not_invented(tmp_path, monkeypatch):
+    db = tmp_path / "_analyzed.json"
+    db.write_text(json.dumps([]))
+    monkeypatch.setattr(s, "ANALYZED_PATH", str(db))
+    assert s.adopt_from_database(["https://uk.indeed.com/viewjob?jk=deadbeef"]) == []
+
+
+def test_a_database_entry_without_a_description_is_not_adopted(tmp_path, monkeypatch):
+    # An empty description is the unscoreable state the pipeline already guards
+    # against elsewhere; adopting one would launder it into the staging file.
+    db = tmp_path / "_analyzed.json"
+    db.write_text(json.dumps([{
+        "title": "Ghost", "company": "Nowhere",
+        "url": "https://uk.indeed.com/viewjob?jk=041cc148b17a1ece",
+        "description": "", "source": "indeed",
+    }]))
+    monkeypatch.setattr(s, "ANALYZED_PATH", str(db))
+    assert s.adopt_from_database(["https://uk.indeed.com/viewjob?jk=041cc148b17a1ece"]) == []
+
+
+def test_a_missing_database_does_not_raise(tmp_path, monkeypatch):
+    monkeypatch.setattr(s, "ANALYZED_PATH", str(tmp_path / "nope.json"))
+    assert s.adopt_from_database(["https://uk.indeed.com/viewjob?jk=abc123"]) == []

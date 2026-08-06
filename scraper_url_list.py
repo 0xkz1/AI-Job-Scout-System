@@ -42,6 +42,53 @@ BLOCK_MAX_CHARS = 400
 RAY_ID_RE = re.compile(r"\bray id\b", re.IGNORECASE)
 
 
+ANALYZED_PATH = os.path.join(os.path.dirname(__file__), "10_output", "_analyzed.json")
+
+
+def _indeed_jk(url: str) -> str:
+    m = re.search(r"[?&]jk=([a-f0-9]+)", url or "")
+    return m.group(1) if m else ""
+
+
+def adopt_from_database(urls: list[str]) -> list[dict]:
+    """Postings among `urls` the nightly scraper has already fetched.
+
+    Matched on Indeed's `jk`, which identifies the posting regardless of how
+    many tracking parameters the copied URL carries — the reason the two are
+    compared by id rather than by URL equality.
+    """
+    wanted = {_indeed_jk(u): u for u in urls if _indeed_jk(u)}
+    if not wanted:
+        return []
+    try:
+        with open(ANALYZED_PATH, encoding="utf-8") as f:
+            db = json.load(f)
+    except Exception as e:
+        print(f"  ⚠ could not read the analysed DB ({e}) — nothing to adopt")
+        return []
+
+    out = []
+    for job in db:
+        jk = _indeed_jk(job.get("url") or "")
+        if jk not in wanted or not (job.get("description") or "").strip():
+            continue
+        adopted = dict(job)
+        # Keep the URL the user actually pasted so re-runs recognise it, and
+        # drop the scoring — url_list_jobs.json is a staging file, and run.py
+        # re-analyses from scratch on merge.
+        adopted["url"] = wanted.pop(jk)
+        adopted.pop("match", None)
+        adopted["type"] = "manual"
+        out.append(adopted)
+
+    if out:
+        print(f"  ♻ Adopted {len(out)} Indeed posting(s) already scraped by the "
+              f"nightly run — /viewjob cannot be fetched directly")
+        for j in out:
+            print(f"      {(j.get('title') or '?')[:44]:46} | {(j.get('company') or '?')[:24]}")
+    return out
+
+
 def looks_blocked(text: str) -> str | None:
     """Why this page is an anti-bot interstitial rather than a posting, or None.
 
@@ -222,12 +269,31 @@ async def scrape_urls(urls):
             pass
 
     urls_to_scrape = [u for u in urls if u not in existing_urls]
+    # Indeed's /viewjob is a hard block, not a challenge — measured 2026-08-06
+    # under xvfb-run with a headed browser, cached cookies, stealth applied and
+    # 30s of waiting, it still answered "Additional Verification Required" with
+    # a Cloudflare Ray ID. No fetcher this module can build will read one.
+    #
+    # The nightly scraper reaches the same postings another way: it reads the
+    # search listing and clicks each card to load the description into a pane,
+    # never navigating to /viewjob at all. So a pasted Indeed URL is very often
+    # already in the database — 12 of the 21 in url-list.md were, including a
+    # Revolut Product Designer scoring 0.81. Adopt those instead of failing on
+    # them; only the ones no search happened to surface are genuinely lost.
+    adopted = adopt_from_database(urls_to_scrape)
+    if adopted:
+        jobs.extend(adopted)
+        adopted_urls = {j["url"] for j in adopted}
+        urls_to_scrape = [u for u in urls_to_scrape if u not in adopted_urls]
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(jobs, f, indent=2, ensure_ascii=False)
+
     if not urls_to_scrape:
         print("No new URLs to scrape.")
         return jobs
 
     print(f"Found {len(urls_to_scrape)} new URLs to scrape.")
-    
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -292,10 +358,19 @@ async def scrape_urls(urls):
                 # happened instead, and say what would fix it.
                 blocked = looks_blocked(text)
                 if blocked:
-                    print(f"    🚫 Blocked by an anti-bot check ({blocked!r}) — no job data on "
-                          f"this page. This fetcher runs a plain headless browser with no "
-                          f"cookies; the nightly Indeed scraper gets past the same wall by "
-                          f"running under xvfb-run with a headed relaunch.")
+                    hint = ""
+                    if _indeed_jk(url):
+                        # Not a fetcher problem, and not fixable by one: verified
+                        # 2026-08-06 that /viewjob stays blocked under xvfb-run
+                        # with a headed browser, cached cookies and stealth. The
+                        # nightly reaches these postings from the search listing
+                        # instead, which is why adopt_from_database exists.
+                        hint = (" Indeed's /viewjob is a hard block that no fetcher here "
+                                "can pass; the nightly reads these from the search listing "
+                                "instead, so this one will be adopted automatically once a "
+                                "search happens to surface it.")
+                    print(f"    🚫 Blocked by an anti-bot check ({blocked!r}) — no job "
+                          f"data on this page.{hint}")
                     continue
 
                 print("    Processing text with the LLM...")
