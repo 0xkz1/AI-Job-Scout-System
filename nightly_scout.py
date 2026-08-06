@@ -13,13 +13,15 @@ backlog doesn't spam the channel.
 Env overrides: SCOUT_NOTIFY_MIN (default 0.70).
 
 Review used to be gated on an absolute composite_score floor (REVIEW_MIN, env
-SCOUT_REVIEW_MIN) instead of a percentile, while generation
-(config.yaml:generation_top_percent) already used select_top(). The floor
-missed real cases: composite_score and review quality correlate only weakly
-(r=0.33 across 743 reviewed documents) — 38 of those scored match<0.70 but
-review>=80, including a review=100 CV at match=0.31. Switched 2026-08-06 to
-select_top("review", ...) so review tracks the same ranked-pool percentile
-generation does, governed by config.yaml:review_top_percent.
+SCOUT_REVIEW_MIN = 0.80) while generation already went through
+selection.select_top() on config.yaml:generation_top_percent — two mechanisms
+answering one question. Switched 2026-08-06 to select_top("review", ...), so
+both stages rank the same pool the same way and the cut is set in one place.
+
+Selection is by composite_score rank, nothing else: the review score cannot
+inform it, because a document has no review score until it has been reviewed.
+On the current pool the top 40% cuts at composite 0.53 and covers 488 of 1178
+ranked jobs, against 23 under the old 0.80 floor.
 """
 import sys, os, json, hashlib
 from pathlib import Path

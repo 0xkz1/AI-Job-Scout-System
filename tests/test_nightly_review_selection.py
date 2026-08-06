@@ -1,11 +1,14 @@
 """Nightly review must select by rank in the pool, not by an absolute score.
 
-Review used to fire on composite_score >= REVIEW_MIN, an absolute floor. That
-missed real cases: composite_score and review quality correlate only weakly
-(r=0.33 across 743 reviewed documents) — 38 scored match<0.70 but review>=80,
-including a review=100 CV at match=0.31. Switched 2026-08-06 to
-selection.select_top("review", ...), the same percentile mechanism CV/CL
-generation already used, governed by config.yaml:review_top_percent.
+Review used to fire on composite_score >= REVIEW_MIN (0.80), a hand-rolled
+floor, while generation already went through selection.select_top() on a
+configured percentile. Switched 2026-08-06 to select_top("review", ...) so both
+stages rank the same pool the same way, governed by
+config.yaml:review_top_percent.
+
+The cut is on composite_score rank alone. Review scores cannot feed back into
+it — a document has no review score until it has been reviewed — so these tests
+check ordering behaviour, never a relationship between the two scores.
 """
 import nightly_scout
 import selection

@@ -199,14 +199,17 @@ review_score_threshold: 85
 # Each stage acts on the top N% of the ranked, filter-passed pool. One number
 # per stage, read through selection.py so generation and review stay in step.
 generation_top_percent: 30   # top N% get a CV + cover letter (paired)
-# Was 30, unused — nightly_scout.py reviewed by an absolute composite_score
-# floor instead (REVIEW_MIN) and never called select_top("review", ...), so this
-# value governed nothing. Raised to 40 and wired in 2026-08-06: composite_score
-# and review quality correlate only weakly (r=0.33 measured across 743 reviewed
-# documents), so a percentage of the ranked pool catches jobs a fixed match-score
-# floor misses — 38 of those 743 scored match<0.70 but review>=80, including a
-# review=100 CV at match=0.31.
-review_top_percent: 40       # top N% get reviewed
+# Was 30 and unused: nightly_scout.py gated review on an absolute
+# composite_score floor (REVIEW_MIN=0.80) and never called
+# select_top("review", ...), so this value governed nothing. Wired in and set to
+# 40 on 2026-08-06 — review now follows the same ranked-pool percentile that
+# generation does, instead of a second, hand-rolled mechanism.
+#
+# Effect on the current pool: 488 of 1178 ranked jobs, cutting at composite 0.53,
+# against 23 under the old 0.80 floor. A percentage rather than a floor so the
+# nightly review count tracks the pool instead of spiking on a night that
+# happens to scrape many strong matches.
+review_top_percent: 40       # top N% by composite_score get reviewed
 
 # Quality floor (secondary): a job below this composite score never gets a CV
 # even if it lands inside the top N% of a small pool. It only trims — it never
