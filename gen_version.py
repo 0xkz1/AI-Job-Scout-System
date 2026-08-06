@@ -100,3 +100,93 @@ def read_fingerprint(text: str) -> str | None:
 def is_current(text: str, role_type: str = "general") -> bool:
     """True when the document was generated under the current inputs."""
     return read_fingerprint(text) == fingerprint(role_type)
+
+
+
+# ---------------------------------------------------------------------------
+# Locks: when a CV/CL must be left exactly as it is.
+#
+# Three reasons, in two scopes. The scope matters, because it decides whether a
+# lock can fire before the document exists:
+#
+#   document-scoped  updated_by_hand  a human edited THIS file; a script must
+#                                     not roll over their words.
+#   job-scoped       applied          the job was applied to, so the files on
+#                                     disk ARE the record of what was actually
+#                                     submitted. They must stop moving even as
+#                                     the profile / projects / templates do.
+#   job-scoped       expired          the posting has closed. Regenerating or
+#                                     reviewing it spends LLM budget on a job
+#                                     that can no longer be applied to.
+#
+# The job-scoped ones hold whether or not a CV/CL is on disk yet — that is the
+# point for `expired`: a closed posting must not receive a FIRST CV either.
+# ---------------------------------------------------------------------------
+
+# Spellings a human or Obsidian's Properties UI writes for a ticked checkbox.
+# Matches matcher.read_expired_flag, which has read the `expired` tick this way
+# since before these locks existed.
+_TRUTHY = ("true", "yes", "on")
+
+
+def _frontmatter_bool(text: str, key: str) -> bool:
+    """True when frontmatter `key:` holds a ticked-checkbox value."""
+    import re
+    m = re.search(rf'^{key}:\s*(\S+)', text, re.MULTILINE)
+    return bool(m) and m.group(1).strip().strip('"').lower() in _TRUTHY
+
+
+def doc_lock_reason(doc_text: str | None) -> str | None:
+    """Why this specific document is frozen, or None. Document-scoped only."""
+    if doc_text and _frontmatter_bool(doc_text, "updated_by_hand"):
+        return "hand-edited"
+    return None
+
+
+def job_lock_reason(base: str, match_dir: Path) -> str | None:
+    """Why this JOB is frozen, or None — read from its match report.
+
+    Independent of whether a CV/CL exists yet, so an expired posting is refused
+    a first document as firmly as it is refused a rewrite.
+    """
+    report = match_dir / f"{base}.md"
+    if not report.exists():
+        return None
+    try:
+        fm = report.read_text(encoding="utf-8")
+    except OSError:
+        return None  # unreadable report is not evidence of a lock
+    if _frontmatter_bool(fm, "applied"):
+        return "applied"
+    if _frontmatter_bool(fm, "expired"):
+        return "expired"
+    return None
+
+
+def lock_reason(base: str, doc_text: str | None, match_dir: Path) -> str | None:
+    """Why base's CV/CL must not be regenerated, patched, or reviewed."""
+    return doc_lock_reason(doc_text) or job_lock_reason(base, match_dir)
+
+
+def is_locked(base: str, doc_text: str | None, match_dir: Path) -> bool:
+    """True when base's CV/CL must not be regenerated, patched, or reviewed."""
+    return lock_reason(base, doc_text, match_dir) is not None
+
+
+def pair_lock_reason(base: str, docs, match_dir: Path) -> str | None:
+    """lock_reason for a CV/CL pair — a lock on either half freezes both.
+
+    Rebuilding only the unlocked half is precisely the CV/CL drift the paired
+    rebuild exists to prevent, so the pair moves together or not at all.
+    `docs` are the pair's paths; ones not yet on disk are simply skipped, which
+    still leaves the job-scoped locks to answer for them.
+    """
+    for p in docs:
+        try:
+            if p.exists():
+                reason = doc_lock_reason(p.read_text(encoding="utf-8"))
+                if reason:
+                    return reason
+        except OSError:
+            continue
+    return job_lock_reason(base, match_dir)
