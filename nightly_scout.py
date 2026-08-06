@@ -1,20 +1,25 @@
 """Nightly scout post-processing — run AFTER scraping/analysis/generation.
 
 1. Diff _analyzed.json against the last run's state to find NEW high matches.
-2. Auto-review the CV/CL of new matches scoring >= REVIEW_MIN.
+2. Auto-review the CV/CL of new matches in the top review_top_percent of the
+   ranked pool (selection.select_top("review", ...) — same mechanism CV/CL
+   generation already used, now shared instead of reinvented).
 3. Print a Telegram-ready summary to stdout — the Hermes cron job runs in
    no-agent mode, so stdout IS the notification. Empty stdout = silent night.
 
 First run (no state file) records a baseline silently so the existing
 backlog doesn't spam the channel.
 
-Env overrides: SCOUT_NOTIFY_MIN (default 0.70), SCOUT_REVIEW_MIN (0.70).
+Env overrides: SCOUT_NOTIFY_MIN (default 0.70).
 
-REVIEW_MIN was 0.80 until 2026-08-06. A job scoring 0.70-0.79 still got a CV/CL
-(match_score_threshold is 0.50) and a Telegram ping (NOTIFY_MIN is 0.70), but
-sat with no review until someone checked by hand — 54 such documents were found
-generated and never reviewed. REVIEW_MIN now matches NOTIFY_MIN: anything worth
-telling the user about is worth reviewing.
+Review used to be gated on an absolute composite_score floor (REVIEW_MIN, env
+SCOUT_REVIEW_MIN) instead of a percentile, while generation
+(config.yaml:generation_top_percent) already used select_top(). The floor
+missed real cases: composite_score and review quality correlate only weakly
+(r=0.33 across 743 reviewed documents) — 38 of those scored match<0.70 but
+review>=80, including a review=100 CV at match=0.31. Switched 2026-08-06 to
+select_top("review", ...) so review tracks the same ranked-pool percentile
+generation does, governed by config.yaml:review_top_percent.
 """
 import sys, os, json, hashlib
 from pathlib import Path
@@ -28,7 +33,6 @@ for k, v in dotenv_values(ROOT / ".env").items():
         os.environ.setdefault(k, v)
 
 NOTIFY_MIN = float(os.environ.get("SCOUT_NOTIFY_MIN", "0.70"))
-REVIEW_MIN = float(os.environ.get("SCOUT_REVIEW_MIN", "0.70"))
 
 OUTPUT_DIR = ROOT / "10_output"
 STATE_FILE = OUTPUT_DIR / "_nightly_state.json"
@@ -205,10 +209,16 @@ def main():
         key=lambda j: j["match"]["composite_score"], reverse=True,
     )
 
+    # Same jobs list object passed to select_top so its dedup keeps the
+    # original dicts (selection._dedupe returns winners by reference, never a
+    # copy) — id() membership below is safe because of that, not despite it.
+    from selection import select_top
+    review_set_ids = {id(j) for j in select_top("review", config, jobs=jobs)}
+
     reviewed, review_failed, reviewed_jobs = [], [], set()
     ready_count = 0
     for j in new_high:
-        if j["match"]["composite_score"] < REVIEW_MIN:
+        if id(j) not in review_set_ids:
             continue
         base = resolve_base(j.get("company", ""), j.get("title", ""), j.get("url", ""))
         for kind, d in (("CV", CV_DIR), ("CL", CL_DIR)):
@@ -264,12 +274,11 @@ def main():
         lines.append(dry_line)
     for j in new_high[:10]:
         s = j["match"]["composite_score"]
-        # Always 🔥 now that REVIEW_MIN == NOTIFY_MIN — every job in new_high
-        # gets reviewed, so the ✨/🔥 split no longer distinguishes anything.
-        # Left as a live branch rather than deleted: raising REVIEW_MIN back
-        # above NOTIFY_MIN (to cut review spend) restores the distinction for
-        # free, with no line to un-delete.
-        flag = "🔥" if s >= REVIEW_MIN else "✨"
+        # Distinguishes "reviewed tonight" from "notified but ranked outside
+        # the top review_top_percent" — restored by the switch to select_top,
+        # which naturally leaves some of new_high out again (a fixed
+        # percentage of the pool, not everything above NOTIFY_MIN).
+        flag = "🔥" if id(j) in review_set_ids else "✨"
         lines.append(f"{flag} {s*100:.0f}%  {j.get('company','?')} — {j.get('title','?')}")
         if j.get("location"):
             lines[-1] += f"  ({j['location']})"
