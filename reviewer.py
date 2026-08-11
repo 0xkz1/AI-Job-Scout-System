@@ -261,6 +261,61 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s.replace("**", "").replace("*", "")).strip().lower()
 
 
+def verify_rubric_evidence(body: str, document: str) -> tuple[str, list[str]]:
+    """Downgrade a Strong rubric row whose quote is not in the document.
+
+    The score is the rubric, and the rubric was the reviewer's unshown opinion:
+    a Meltwater AI Engineer posting naming NLP, Transformers, fine-tuning and
+    transfer learning throughout scored `Strong` on exactly that requirement
+    against a CV that contains none of those words in any form. That is 14
+    points on a 100-point scale, and it reached apply_priority through
+    cv_review_score at 0.6 weight.
+
+    So `Strong` now has to carry a line from the document, and the line has to
+    be there. Matching is normalised the way finding quotes are (_norm), since
+    the document is markdown and a model reliably drops the bold markers.
+
+    Deliberately partial: a quote that IS in the CV but does not actually
+    support the requirement still passes. What this buys against that case is
+    that the reviewer has to commit to a specific piece of evidence, where the
+    reader can see it is thin — which was impossible when the verdict was a
+    bare "Strong". The demotion is to `Weak`, not `None`, so a wrongly rejected
+    quote costs half a rubric row rather than a whole one.
+
+    Returns (body, [notes]) — body unchanged when there is nothing to correct.
+    """
+    import re
+    match = re.search(r'```yaml\s*\n(.*?)\n```', body, re.DOTALL)
+    if not match:
+        return body, []
+    try:
+        block = yaml.safe_load(match.group(1)) or {}
+        rubric = block.get("rubric") or []
+    except Exception as e:
+        print(f"  ⚠ rubric parse error during evidence check: {e}")
+        return body, []
+
+    haystack = _norm(document)
+    notes: list[str] = []
+    for item in rubric:
+        if not isinstance(item, dict) or str(item.get("evidence", "")).lower() != "strong":
+            continue
+        quote = str(item.get("evidence_quote") or "").strip()
+        if quote and _norm(quote) in haystack:
+            continue
+        item["evidence"] = "Weak"
+        item["downgraded_from"] = "Strong"
+        item["downgrade_reason"] = ("引用なし" if not quote
+                                    else "引用が本文に見つからない")
+        notes.append(str(item.get("requirement", "?"))[:60])
+
+    if not notes:
+        return body, []
+    rewritten = yaml.safe_dump({"rubric": rubric}, allow_unicode=True,
+                               sort_keys=False, default_flow_style=False)
+    return body.replace(match.group(0), f"```yaml\n{rewritten.strip()}\n```", 1), notes
+
+
 def trace_finding_sources(review_path: Path) -> list[tuple[str, str | None]]:
     """For each finding quote, locate the reusable source file it came from.
     Deterministic substring matching, no LLM. Returns [(quote, source or None)]
@@ -290,11 +345,14 @@ def trace_finding_sources(review_path: Path) -> list[tuple[str, str | None]]:
 CV_RUBRIC_INSTRUCTION = """FIRST, you MUST output a YAML block evaluating the job's key requirements against the document.
 List 3-5 major requirements from the job posting. For each, determine the evidence level in the document: 'Strong', 'Weak', or 'None'.
 
+`Strong` additionally requires `evidence_quote`: ONE sentence or bullet copied VERBATIM from the document under review, which a reader would accept as evidence for that requirement on its own. Copy it exactly — it is checked against the document, and a quote that is not found there is downgraded to `Weak` automatically. If nothing in the document can be quoted for a requirement, the evidence level is not `Strong`; say `Weak` or `None` and leave `evidence_quote` out.
+
 Format exactly as follows at the very beginning of your response:
 ```yaml
 rubric:
   - requirement: "Requirement description in Japanese"
     evidence: "Strong"  # or "Weak" or "None"
+    evidence_quote: "the verbatim sentence from the document"  # Strong only
   - requirement: "..."
     evidence: "None"
 ```"""
@@ -563,6 +621,13 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
 
     if doc_kind == "CL":
         review_body = _mark_unusable_bridge_suggestions(review_body)
+    else:
+        # Before _extract_score reads it, so the stored score and the stored
+        # rubric agree — invariants recompute from the body on disk and would
+        # otherwise report every corrected review as drifted.
+        review_body, demoted = verify_rubric_evidence(review_body, document)
+        for requirement in demoted:
+            print(f"  ⚠ rubric Strong→Weak, evidence not in the CV: {requirement}")
 
     # Deterministic score from the rubric; ready is derived with the CURRENT
     # config threshold (display recomputes live, this is for nightly filters)
