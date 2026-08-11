@@ -67,7 +67,12 @@ def load_run_summary() -> list[dict]:
             if len(parts) != 3:
                 continue
             site, rc, elapsed = parts[0], int(parts[1]), int(parts[2])
-            status = "ok" if rc == 0 else "timeout" if rc == 124 else "error"
+            # 125 is the nightly script's own code for a site it never started
+            # because the sites before it had spent the scrape budget. Reporting
+            # that as a failure would send someone to debug a scraper that is
+            # working; the fault is upstream, in how long the earlier ones took.
+            status = ("ok" if rc == 0 else "timeout" if rc == 124
+                      else "skipped" if rc == 125 else "error")
             out.append({"site": site, "exit": rc, "elapsed": elapsed, "status": status})
     except Exception:
         pass
@@ -81,7 +86,12 @@ def summarize_sites(summary: list[dict]) -> tuple[str, bool]:
     bad = [s for s in summary if s["status"] != "ok"]
     parts = []
     for s in bad:
-        label = "タイムアウト" if s["status"] == "timeout" else f"失敗(exit {s['exit']})"
+        if s["status"] == "timeout":
+            label = "タイムアウト"
+        elif s["status"] == "skipped":
+            label = "予算切れで未実行"
+        else:
+            label = f"失敗(exit {s['exit']})"
         parts.append(f"❌{s['site']} {label}")
     if ok:
         parts.append(f"✓{'・'.join(s['site'] for s in ok)}")
