@@ -1216,9 +1216,20 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
     the evidence are authored files, so a letter can always be built once they
     load.
 
-    Raises RuntimeError only when the authored assets are missing, because a
-    letter without them would be a different document than the one intended.
+    Raises RuntimeError when the authored assets are missing, or when the
+    posting names no employer, because a letter without either would be a
+    different document than the one intended.
     """
+    # Adzuna carries listings with an empty employer — a freelance brief posted
+    # by an individual, or a board's own relisting. Every one of them produced a
+    # letter reading "I am writing to apply for the ... position at ." and, when
+    # a bridge was written, addressed whatever name the model could find in the
+    # posting: one went out to CV-Library, the job board, as though it were the
+    # hiring company. There is no salvage — a cover letter is addressed to
+    # someone, so with no one to address it is not a document worth having.
+    if not (company or "").strip():
+        raise RuntimeError("cover letter: posting names no employer")
+
     canonical = _load_canonical_narrative()
     if not canonical:
         raise RuntimeError("cover letter: canonical narrative unavailable")

@@ -441,6 +441,24 @@ def test_the_body_never_carries_framing_the_master_template_supplies():
     assert "Hiring Team\nExample\nLondon" in letter
 
 
+def test_a_posting_with_no_employer_gets_no_letter(monkeypatch):
+    """Adzuna carries listings with an empty employer. Each produced "I am
+    writing to apply for the ... position at ." and, where a bridge was written,
+    addressed the only name the model could find in the posting — one went to
+    CV-Library, the job board, as though it were the hiring company."""
+    def fail(*_a, **_k):
+        raise AssertionError("a posting with no employer must not reach the model")
+    monkeypatch.setattr(cl, "_generate_context_bridge", fail)
+
+    for company in ("", "   "):
+        try:
+            cl.generate_cover_letter("UX Designer", company, "London", "A posting. " * 80)
+        except RuntimeError as exc:
+            assert "names no employer" in str(exc)
+        else:
+            raise AssertionError(f"built a letter addressed to {company!r}")
+
+
 def test_a_thin_posting_gets_the_static_bridge_and_says_so(monkeypatch):
     def fail(*_a, **_k):
         raise AssertionError("a thin posting must not reach the model")
