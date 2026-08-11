@@ -580,3 +580,16 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 4. **マスターのドリフト問題**: 求人ごとのレビューが毎回マスターを書き換えると、マスターが直近の求人に引きずられる。→ 修正案ごとに適用先を選択制(この文書のみ[デフォルト] / 元ファイル+この文書 / 適用しない)。frontmatter のみに一致する引用はソース適用から除外(確定ブランドの `role_tagline` を誤って上書きしかけた実例あり)。
 5. **対話履歴の整合性**: 却下された旧修正案を後から合意版に差し替えると、ユーザーのコメントが「何に反論したのか」読めなくなる。→ 差し替え時は旧案を取り消し線で残す(パーサーは引用符内の合意版だけを抽出)。
 6. **Streamlit のモジュールキャッシュ**: `app.py` は自動リロードされるが import 先(`reviewer.py` 等)はプロセス再起動まで古いまま。`ImportError: cannot import name ...` が出たらサーバー再起動。
+
+---
+
+## カバーレター: Draft/Critique/Revise から Assembler へ (2026-08-11)
+
+`cover_letter_generator.py` を再設計。旧方式(LLMが全文を起草・批評・書き直し)は求人ごとに人物像が揺れ、未経験の実績を捏造するリスクを持っていた(上の「2段階LLM戦略」節にある「テンプレート式、LLM不要」はさらに前の段階の話で、いずれも現状ではない)。
+
+新方式は **Filter, Not Persuasion** — 候補者の文脈(Canonical Narrative, 252語, 不変)を固定し、企業ごとに変わるのは1〜2文・35〜60語の Context Bridge のみ。設計思想の全文は [career/cover-letter/STRATEGY.md](../career/cover-letter/STRATEGY.md)。
+
+- 固定: [canonical_narrative_v1.md](../career/cover-letter/canonical_narrative_v1.md)(LLM書き換え禁止、バージョンで更新)
+- 選択式: [letter_facts_v1.md](../career/cover-letter/letter_facts_v1.md)(tier: core/technical/operational、求人キーワードでゲート)
+- 生成: Context Bridge のみLLM。主語反転・ツール名列挙・誇張表現・定型closingを複数ゲートで拒否し、通らなければ静的文へフォールバック
+- テスト: `tests/test_cover_letter_assembler.py`(303件)
