@@ -101,6 +101,19 @@ def test_the_first_block_is_always_a_core_one(monkeypatch):
     assert selected[0]["tier"] == "core"
 
 
+def test_every_role_the_cv_detects_can_draw_its_own_evidence():
+    """product_engineer was added to the CV's role list and never to the facts,
+    so `_select_evidence` silently fell through to the general pool — and a
+    Product Engineer posting drew a drone-surveying sales record ahead of
+    TAIFUNOME. The fallback is worth keeping, but reaching it means a role went
+    unmapped rather than that general was the right answer."""
+    from cv_generator import ROLE_KEYWORDS
+
+    mapped = {role for fact in cl._load_letter_facts() for role in fact["roles"]}
+
+    assert not set(ROLE_KEYWORDS) - mapped
+
+
 def test_a_fact_whose_cv_entry_is_gone_is_not_selectable(monkeypatch):
     """Deleting a CV entry, or marking it cover_letter: false, has to withdraw
     its letter fact — otherwise the letter keeps citing work the CV no longer
@@ -215,6 +228,109 @@ def test_bridge_rejects_handing_the_candidates_own_project_to_the_reader(monkeyp
 
     assert not ok
     assert "own project" in reason
+
+
+def test_the_employers_own_sector_is_not_a_claim_about_the_candidate(monkeypatch):
+    """A bridge names the employer first and reaches the candidate's own work
+    later in the same sentence, so a sentence-scoped sector check read "legal"
+    off the employer and rejected it. Wordsmith AI and Lloyds — the two
+    highest-ranked postings — both lost their bridges to this."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Wordsmith AI's work bringing AI to legal drafting feels relevant to the "
+        "way I built TAIFUNOME, where connecting disparate systems into one "
+        "workflow was the core challenge. I would bring that approach to the "
+        "same problem here.",
+        "", "Product Designer", "A posting.")
+
+    assert ok, reason
+
+
+def test_sector_experience_after_the_claim_verb_is_still_rejected(monkeypatch):
+    """The pattern the check exists for: "I've built similar systems for
+    financial platforms" went out in an AJ Bell letter as fabrication."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Onric ships product quickly, which is the part I want next. I have "
+        "built similar systems for financial platforms before.",
+        "", "Engineer", "A posting.")
+
+    assert not ok
+    assert reason == "unsupported 'financial' experience"
+
+
+def test_bridge_may_not_presume_a_system_the_employer_never_described(monkeypatch):
+    """"how new client requirements integrate into the platform's modular
+    architecture" went to a posting whose 8,500 words never say platform,
+    architecture or modular. The letter told them about their own engineering."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Example turns expertise into products, which is the part I want next. "
+        "I would refine how new client requirements integrate into the "
+        "platform's modular architecture.",
+        "", "Developer", "We turn a founder's expertise into a sellable product.")
+
+    assert not ok
+    assert reason == "assumes an employer platform the posting never mentions"
+
+
+def test_a_system_the_posting_does_name_may_be_worked_on(monkeypatch):
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Ashby builds tools for recruiters, which is the part I want next. I "
+        "would distil the patterns into reusable parts for the design system.",
+        "", "Design Engineer", "Expand and enhance our in-house design system.")
+
+    assert ok, reason
+
+
+def test_the_candidates_own_system_is_not_a_claim_about_the_employer(monkeypatch):
+    """"the pipeline I built" names the candidate's work, so a first-person
+    continuation withdraws the objection."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Example ships quickly, which is the part I want to work on next. I "
+        "would bring what the pipeline I built taught me about failing over "
+        "before a run stops.",
+        "", "Engineer", "A posting about shipping quickly.")
+
+    assert ok, reason
+
+
+def test_bridge_may_not_close_by_pointing_back_at_the_evidence(monkeypatch):
+    """The contribution sentence is the last thing in the letter. Ending it on
+    "as I did in connecting research domains under a single engine" spends those
+    words on the paragraph directly above it."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Ashby's work on design at scale feels relevant to the way I built "
+        "TAIFUNOME. I would propose refining the design system's modularity to "
+        "support bespoke workflows, as I did in connecting research domains "
+        "under a single engine.",
+        "", "Design Engineer", "Expand and enhance our in-house design system.")
+
+    assert not ok
+    assert reason.startswith("closes by restating work already given")
+
+
+def test_the_first_sentence_may_still_reach_back_to_the_candidates_work(monkeypatch):
+    """"the way I built TAIFUNOME" in sentence one is the bridge doing its job,
+    so the backward-clause check is scoped to the closing sentence."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+
+    ok, reason = cl._vet_bridge(
+        "Ashby's work on design at scale feels relevant to the way I built "
+        "TAIFUNOME, where structure decided the pace. I would refine how the "
+        "design system supports bespoke workflows.",
+        "", "Design Engineer", "Expand and enhance our in-house design system.")
+
+    assert ok, reason
 
 
 def test_bridge_rejects_align_in_every_form(monkeypatch):

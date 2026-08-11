@@ -73,11 +73,19 @@ def _claims_unsupported_sector(text: str, persona: str) -> str | None:
     """
     persona_l = persona.lower()
     for sentence in re.split(r"(?<=[.!?])\s+", text):
-        if not _FIRST_PERSON_CLAIM.search(sentence):
+        claim = _FIRST_PERSON_CLAIM.search(sentence)
+        if not claim:
             continue
-        sentence_l = sentence.lower()
+        # Only what follows the claim verb can be its object. A context bridge
+        # names the employer first and reaches the candidate's own work later in
+        # the same sentence — "Wordsmith AI's work on legal drafting feels
+        # relevant to the way I built TAIFUNOME" — so scoping to the sentence
+        # read the employer's own sector as a claim about the candidate and
+        # rejected the bridge. That cost the top-ranked postings their bridges
+        # first, since the best matches are real companies in named sectors.
+        claimed = sentence[claim.start():].lower()
         for term in _SECTOR_TERMS:
-            if term in sentence_l and term not in persona_l:
+            if term in claimed and term not in persona_l:
                 return term
     return None
 
@@ -513,6 +521,61 @@ _BRIDGE_STYLE_BANS = (
 )
 
 
+# A comparison back to the candidate's own past work, tacked onto the end of the
+# contribution sentence: "I would propose refining the design system's
+# modularity, as I did in connecting research domains under a single engine."
+# The canonical narrative and the evidence block have already made that case, so
+# the clause spends the letter's last words arguing something the reader has
+# just read. Scoped to the final sentence only — the first sentence reaching
+# back ("feels relevant to the way I built TAIFUNOME") is the bridge working.
+_BACKWARD_CLOSE = re.compile(
+    r"\b(?:just |much |exactly )?(?:as|like)\s+I\s+(?:already\s+)?"
+    r"(?:did|have\s+done|['’]ve\s+done|had\s+done"
+    r"|built|designed|created|developed|shipped|wrote|made|ran|led)\b",
+    re.IGNORECASE,
+)
+
+
+# A definite reference to a system the employer is presumed to have. "I would
+# refine how new client requirements integrate into the platform's modular
+# architecture" went to a posting whose 8,500 words never say platform,
+# architecture, modular, codebase or infrastructure — the letter told them
+# something about their own engineering that it had no way to know. The prompt
+# already forbids inventing a description of the employer; this catches the form
+# that slips through, where a definite article presupposes the thing exists.
+_EMPLOYER_SYSTEM = re.compile(
+    r"\b(?:your|their|the)\s+(?:[\w-]+\s+){0,2}"
+    r"(platform|architecture|codebase|infrastructure|design system|tech stack|"
+    r"backend|frontend|pipeline|ecosystem|toolchain|product suite)"
+    r"(?:['’]s)?\b",
+    re.IGNORECASE,
+)
+
+
+def _asserts_an_unstated_employer_system(text: str, job_description: str) -> str | None:
+    """Return the presumed system noun the posting never mentions, else None."""
+    posting = (job_description or "").lower()
+    for match in _EMPLOYER_SYSTEM.finditer(text):
+        noun = next(group for group in match.groups() if group)
+        if noun.lower() in posting:
+            continue
+        # "the pipeline I built" is the candidate's own work, not a claim about
+        # the reader's, so a first-person continuation withdraws the objection.
+        if re.match(r"\s*(?:i\b|i['’]|my\b)", text[match.end():match.end() + 24], re.I):
+            continue
+        return noun
+    return None
+
+
+def _closes_by_restating_the_candidates_past(text: str) -> str | None:
+    """Return the backward-looking clause closing the bridge, else None."""
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    if len(sentences) < 2:
+        return None
+    match = _BACKWARD_CLOSE.search(sentences[-1])
+    return match.group(0).strip() if match else None
+
+
 # "align" in every form. Kept as a stem rather than a phrase because the model
 # routes around a phrase list: told not to write "aligns with", it produced
 # "aligned", then "alignment". A posting using the word is no excuse — it is the
@@ -918,6 +981,12 @@ def _vet_bridge(text: str, persona: str, job_title: str, job_description: str,
     handed_over = _opens_by_giving_the_reader_the_candidates_method(stripped)
     if handed_over:
         return False, f"opens by calling the candidate's own method theirs ({handed_over})"
+    presumed = _asserts_an_unstated_employer_system(stripped, job_description)
+    if presumed:
+        return False, f"assumes an employer {presumed} the posting never mentions"
+    looks_back = _closes_by_restating_the_candidates_past(stripped)
+    if looks_back:
+        return False, f"closes by restating work already given ({looks_back})"
     misattributed = _attributes_candidate_work_to_reader(stripped, evidence or [])
     if misattributed:
         return False, (f"calls the candidate's own project the reader's "
@@ -985,7 +1054,7 @@ These are the LAST TWO SENTENCES OF THE LETTER. Nothing follows them — no sign
 
 THE TWO SENTENCES, in this order:
 1. MOTIVATION — why this company's actual work is a meaningful next step for the direction described above. One connection, stated plainly. Ground it in something the POSTING states about the company; if the posting says nothing about their work (agency listings often do not), write about what the ROLE itself demands instead. Never invent a description of the employer.
-2. CONTRIBUTION — one concrete thing that could be contributed here, grounded in the evidence above. Describe WORK, not attributes, and not the tools the work is done with. It must be something the evidence actually supports.
+2. CONTRIBUTION — one concrete thing that could be contributed here, grounded in the evidence above. Describe WORK, not attributes, and not the tools the work is done with. It must be something the evidence actually supports. Forward-looking only: do not close it by comparing back to what the candidate has already done ("..., as I did in connecting research domains under a single engine"). Sentence 1 has made that comparison; the reader has the evidence paragraph above it.
 
 THE REGISTER TO WRITE IN — this is the target, imitate its restraint, do not copy its words:
 "Bending Spoons' interest in AI-supported product work feels relevant to the systems-oriented way I built TAIFUNOME. I would bring that same approach to prototyping and refining UX flows, then turning them into a coherent design system that reduces ambiguity between concept and build."
