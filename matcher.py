@@ -23,6 +23,7 @@ except ImportError:
 
 # Hardcoded to career project root since __file__ may be in workspace
 USER_PROFILE_DIR = Path("/media/kz003/atelier/00_Kazuki")
+PORTFOLIO_DIR = USER_PROFILE_DIR / "01-portfolio" / "projects"
 
 SKILLS_FILE = USER_PROFILE_DIR / "skills.md"
 ABOUT_FILE = USER_PROFILE_DIR / "about.md"
@@ -1134,12 +1135,15 @@ _OLLAMA_CTX_TIMEOUT = int(_os.getenv("OLLAMA_TIMEOUT", "120"))
 _OLLAMA_CTX_KEEP_ALIVE = _os.getenv("OLLAMA_KEEP_ALIVE", "10m")
 
 _persona_cache = None
+# Length of the assembled persona before PERSONA_CHAR_BUDGET is applied, so a
+# test can tell "fits" from "was cut to fit". See _load_persona_summary.
+_persona_assembled_chars = 0
 
-# Large enough that nothing is cut today (the assembled persona is ~37,800
-# characters). It is a runaway guard, not a budget to spend down: context
-# carries 0.64 of the composite, so a persona the scorer cannot see is the
-# most expensive saving available.
-PERSONA_CHAR_BUDGET = 45000
+# Large enough that nothing is cut today (the assembled persona, with the
+# portfolio subset, is ~55,000 characters). It is a runaway guard, not a budget
+# to spend down: context carries 0.64 of the composite, so a persona the scorer
+# cannot see is the most expensive saving available.
+PERSONA_CHAR_BUDGET = 64000
 
 # The Havas Lynx posting is 9,608 characters and the previous 5,000 cut it in
 # half, so role_fit was judged on the generic agency duties in the first half
@@ -1163,8 +1167,27 @@ def _load_persona_summary() -> str:
     #
     # Most load-bearing first, because the tail of a long persona is what a
     # small model stops attending to.
-    persona_files = ["profile.md", "skills.md", "timeline.md", "ethos.md",
-                     "about.md", "interests.md", "cover-letter-evidence.md"]
+    persona_files = ["profile.md", "skills.md", "timeline.md", "education.md",
+                     "ethos.md", "about.md", "interests.md",
+                     "cover-letter-evidence.md"]
+    # Portfolio project files, which no scoring path had ever read. The scorer
+    # wrote "no evidence of AI-assisted brainstorming in their portfolio" about
+    # a portfolio it had never been shown.
+    #
+    # A subset, not the directory. Measured against 387 stored CV reviews,
+    # role_fit undershoots graphic_designer postings by 23.2 points and
+    # creative_technologist by -4.4 — it reads this candidate as an engineer,
+    # and 14 of the 19 project files are systems write-ups that would deepen
+    # exactly that reading. These five are the ones evidencing design and art
+    # as work delivered. Ordered design-first for the same attention reason.
+    #
+    # sketch-of-tomoki-my-elder-brother.md is deliberately absent: it is
+    # artwork, not design, and role_fit is not asking about artwork.
+    portfolio_files = ["logo-design-for-myself.md",
+                       "connecting-the-dots-a-personal-graph-of-creative-practice.md",
+                       "taifunome.md",
+                       "hive-floral-pod-3d-conceptual-art.md",
+                       "so-close-yet-so-far-encounter-with-a-fox.md"]
     # Hard facts first: smaller LLMs otherwise infer "based in Japan" from
     # scattered Japan references (remote hardware, past photography) even
     # though profile.md states the location explicitly.
@@ -1198,15 +1221,32 @@ def _load_persona_summary() -> str:
     # evidence. A limit still exists so one file that grows without bound
     # cannot starve the files after it — that is the only job it has.
     per_file_limit = {"profile.md": 6000, "skills.md": 14000, "timeline.md": 8000,
-                      "ethos.md": 8000, "about.md": 4000, "interests.md": 3000,
-                      "cover-letter-evidence.md": 4000}
+                      "education.md": 3000, "ethos.md": 8000, "about.md": 4000,
+                      "interests.md": 3000, "cover-letter-evidence.md": 4000}
     for fname in persona_files:
         fpath = USER_PROFILE_DIR / fname
         if fpath.exists():
             content = fpath.read_text(encoding="utf-8").strip()
             if content:
                 parts.append(f"--- {fname} ---\n{content[:per_file_limit.get(fname, 4000)]}")
+    portfolio = []
+    for fname in portfolio_files:
+        fpath = PORTFOLIO_DIR / fname
+        if fpath.exists():
+            content = fpath.read_text(encoding="utf-8").strip()
+            if content:
+                portfolio.append(f"--- portfolio/{fname} ---\n{content[:6000]}")
+    if portfolio:
+        parts.append("--- PORTFOLIO (work delivered, not claimed) ---\n"
+                     + "\n\n".join(portfolio))
     persona = "\n\n".join(parts) if len(parts) > 1 else ""
+    # The length BEFORE the budget cut. Without it there is nothing to test:
+    # asserting len(_load_persona_summary()) <= PERSONA_CHAR_BUDGET compares the
+    # cut string against the size it was cut to, which is true by construction
+    # and stays true no matter how much evidence the cut is discarding. That
+    # tautology shipped once and passed while the portfolio was being dropped.
+    global _persona_assembled_chars
+    _persona_assembled_chars = len(persona)
     # The one place the persona is truncated. It used to be truncated twice:
     # here per file, and again by the prompt at 14,000 characters — which the
     # per-file limits summed past, to 25,429. about.md, interests.md and
@@ -1650,7 +1690,7 @@ Respond ONLY with JSON. The value MUST be a plain string (flowing prose,
 {{"summary_en": "<3-4 short, plain sentences in English>"}}
 
 ## Job Description
-{job_description[:5000]}
+{job_description[:JOB_DESC_CHAR_BUDGET]}
 """
     else:
         prompt = f"""You are a job description summarizer. Summarize the following job description in 3-4 sentences.
@@ -1662,7 +1702,7 @@ Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
 {{"summary_en": "<3-4 short, plain sentences in English>", "summary_ja": "<短く平易な日本語で3〜4文>"}}
 
 ## Job Description
-{job_description[:5000]}
+{job_description[:JOB_DESC_CHAR_BUDGET]}
 """
 
     try:
@@ -2359,7 +2399,7 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
         ("Experience", "experience"),
         ("Location", "location"),
         ("Salary", "salary"),
-        ("Context/Ethos", "context_score"),
+        ("Role Fit", "context_score"),
     ]:
         if key == "context_score":
             m_score = match.get("context_score", 0)
@@ -2429,11 +2469,27 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
     ctx_score = match.get("context_score", 0)
     ctx_reasoning_en = match.get("context_reasoning_en", "")
     ctx_reasoning_ja = match.get("context_reasoning_ja", "")
+    # The heading said "Context & Ethos" over a number that has been role_fit
+    # — could this person do the work — since the two-axis prompt landed. Ethos
+    # is scored separately and was stored but never shown, so the one case the
+    # split exists to surface (low fit, high ethos: worth a human glance before
+    # it is dropped) was invisible in the only document a human reads.
+    ctx_ethos = match.get("context_ethos")
+    ctx_requirement = match.get("context_role_requirement", "")
     lines.extend([
         f"",
-        f"## 🧠 Context & Ethos Alignment ({ctx_score*100:.0f}%)",
+        f"## 🧠 Role Fit ({ctx_score*100:.0f}%)",
         f"",
     ])
+    if ctx_ethos is not None:
+        lines.append(f"- **Could do it (role fit):** {ctx_score*100:.0f}%"
+                     f"  |  **Would want it (ethos):** {ctx_ethos*100:.0f}%")
+        if ctx_requirement:
+            lines.append(f"- **Judged against:** {ctx_requirement}")
+        if ctx_ethos - ctx_score >= 0.30:
+            lines.append("- ⚠️ Wants it far more than the profile evidences doing it "
+                         "— worth reading before dropping.")
+        lines.append("")
     if ctx_reasoning:
         # The reasoning may already contain "English\n\n**和訳:** Japanese"
         # Format as proper markdown paragraphs

@@ -14,6 +14,7 @@ which these tests pin.
 import asyncio
 
 from scraper_indeed import (
+    _MAX_DESCRIPTION_CHARS,
     _PANE_SELECTORS,
     _fill_descriptions_from_pane,
     _pane_description,
@@ -139,10 +140,22 @@ def test_a_card_with_no_jk_is_skipped_rather_than_mispaired():
 
 def test_pane_text_is_capped_and_short_text_rejected():
     """A Cloudflare interstitial is ~162 chars of chrome; a real posting measured
-    12,807-20,406. The >50 floor rejects the empty-pane case, the cap bounds the
-    prompt cost of the long ones."""
-    long_page = FakePage(hrefs=[], pane_text="x" * 9000)
-    assert len(run(_pane_description(long_page))) == 5000
+    12,807-20,406. The >50 floor rejects the empty-pane case; the cap only
+    bounds a runaway.
+
+    The cap was 5,000, below the measurement in this test's own docstring, and
+    it cut 203 of 438 stored Indeed descriptions at exactly that boundary.
+    Scrape-time truncation is the one kind that cannot be undone later — the
+    text is never written to disk — so the cap now sits above the observed
+    range instead of inside it.
+    """
+    normal_page = FakePage(hrefs=[], pane_text="x" * 20406)
+    assert len(run(_pane_description(normal_page))) == 20406, (
+        "a posting inside the measured range is being truncated at scrape time"
+    )
+
+    runaway_page = FakePage(hrefs=[], pane_text="x" * 40000)
+    assert len(run(_pane_description(runaway_page))) == _MAX_DESCRIPTION_CHARS
 
     short_page = FakePage(hrefs=[], pane_text="too short")
     assert run(_pane_description(short_page)) == ""

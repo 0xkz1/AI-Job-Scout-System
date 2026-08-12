@@ -90,6 +90,20 @@ def _headed_display_available() -> bool:
 _PANE_SELECTORS = ("#jobDescriptionText", ".jobsearch-JobComponent-description")
 
 
+# Indeed is the only site that truncates at scrape time, and 5,000 cut 203 of
+# its 438 stored descriptions — 46% — at exactly that boundary. Unlike a prompt
+# cap this one is not recoverable: the rest of the posting is never written to
+# disk, so no later rescoring can reach it. Deliberately well above
+# matcher.JOB_DESC_CHAR_BUDGET rather than equal to it — the scorer is not the
+# only reader (the CV and cover-letter generators and the reviewer read the
+# same field), and a cap raised later cannot recover text that was never
+# stored. Sized past the 12,807-20,406 chars per posting measured on the pane
+# in _fill_descriptions_from_pane, so this cuts nothing seen so far and exists
+# only to bound a runaway. Postings already saved at 5,000 stay truncated
+# until they are scraped again.
+_MAX_DESCRIPTION_CHARS = 24000
+
+
 async def _pane_description(page) -> str:
     """The description text currently shown in the listing page's preview pane."""
     for selector in _PANE_SELECTORS:
@@ -98,7 +112,7 @@ async def _pane_description(page) -> str:
             continue
         text = (await el.inner_text()).strip()
         if len(text) > 50:
-            return text[:5000]
+            return text[:_MAX_DESCRIPTION_CHARS]
     return ""
 
 
@@ -154,7 +168,7 @@ async def _fill_descriptions_from_pane(page, jobs_by_jk: dict[str, dict]) -> int
 async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
     """
     Navigate to a job's detail page and extract the full description text.
-    Returns up to 5000 chars of cleaned text, or "" on failure.
+    Returns up to _MAX_DESCRIPTION_CHARS of cleaned text, or "" on failure.
 
     DOES NOT WORK on Indeed and cannot be made to. /viewjob is Cloudflare-blocked
     outright (see _fill_descriptions_from_pane), so every call here burns ~62s over
@@ -209,14 +223,14 @@ async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
                                 continue
                             return ""
                         text = re.sub(r"\n{3,}", "\n\n", text.strip())
-                        return text[:5000]
+                        return text[:_MAX_DESCRIPTION_CHARS]
 
             # Fallback: grab the main content area
             main_el = await page.query_selector("main, #main-content, #wrapper")
             if main_el:
                 text = await main_el.inner_text()
                 if text and len(text.strip()) > 100 and "cloudflare" not in text.lower():
-                    return text.strip()[:5000]
+                    return text.strip()[:_MAX_DESCRIPTION_CHARS]
 
             return ""
         except Exception:
