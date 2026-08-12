@@ -58,14 +58,20 @@ def _review_chain() -> list[tuple[str, str]]:
     credential pool — 2 are exhausted but quarantine handles them. Same
     independent-rate-limit advantages as the others.
 
-      1..N.   mistral / mistral-backup / ...             (see MISTRAL_KEYS)
-      N+1..7  nvidia..nvidia-septenary / mistralai/mistral-medium-3.5-128b — NIM 7 keys
-      N+8.    groq        / llama-3.3-70b-versatile           — GroqCloud key 1
-      N+9.    groq-back   / llama-3.3-70b-versatile           — GroqCloud key 2
-      N+10..20 zai..zai-undenary / z-ai/glm-5.2              — Z.AI pool (11 keys)
-      N+21.   opencode    / deepseek-v4-flash-free            — FREE reasoning (Zen)
-      N+22.   opencode    / big-pickle                        — independent Zen model
-      N+23.   ollama      / local                             — offline last resort
+      1..N.    mistral / mistral-backup / ...            (see MISTRAL_KEYS)
+      N+1..7   nvidia..nvidia-septenary / nemotron-super-49b-v1.5 — NIM 7 keys
+      N+8..18  zai..zai-undenary / glm-5.2                — Z.AI pool (11 keys)
+      N+19.    opencode / deepseek-v4-flash-free          — FREE reasoning (Zen)
+      N+20.    opencode / big-pickle                      — independent Zen model
+      N+21.    nvidia   / nemotron-nano-9b-v2             — cheap, looser on format
+      N+22.    ollama   / local                           — offline last resort
+
+    The prompt is ~64k characters, and that decides membership more than model
+    quality does. Measured 2026-08-12 against the real thing: mistral and the
+    NIM nemotrons take it, groq returns 413 Payload Too Large on every model
+    tried (a request-size limit on the account, not a context window), and the
+    local model is the only entry that accepts it while ignoring the output
+    format — which is why _review_is_unusable exists.
 
     Key depth is not redundancy for its own sake: a single day of work (182 reviews
     plus analysis) exhausted the first three keys AND nvidia AND stepfun, leaving
@@ -85,25 +91,25 @@ def _review_chain() -> list[tuple[str, str]]:
             return _drop_quarantined(chain)
     return _drop_quarantined([
         *((provider, REVIEW_MODEL) for provider in MISTRAL_KEYS),
-        ("nvidia", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-back", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-tertiary", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-quaternary", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-quinary", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-senary", "mistralai/mistral-medium-3.5-128b"),
-        ("nvidia-septenary", "mistralai/mistral-medium-3.5-128b"),
-        ("groq", "llama-3.3-70b-versatile"),
-        ("groq-back", "llama-3.3-70b-versatile"),
-        ("groq-tertiary", "llama-3.3-70b-versatile"),
-        ("groq-quaternary", "llama-3.3-70b-versatile"),
-        ("groq-quinary", "llama-3.3-70b-versatile"),
-        ("groq-senary", "llama-3.3-70b-versatile"),
-        ("groq-septenary", "llama-3.3-70b-versatile"),
-        ("groq-octonary", "llama-3.3-70b-versatile"),
-        ("groq-nonary", "llama-3.3-70b-versatile"),
-        ("groq-denary", "llama-3.3-70b-versatile"),
-        ("groq-undenary", "llama-3.3-70b-versatile"),
-        ("groq-duodenary", "llama-3.3-70b-versatile"),
+        # mistralai/mistral-medium-3.5-128b does not exist on NIM and never
+        # did: all seven keys answered 410 Gone, which reads as a dead account
+        # rather than a wrong model id. GET /v1/models lists what is actually
+        # served; nemotron-super-49b takes the 64k prompt and follows the
+        # format, including the CL instruction not to comment on the letter's
+        # fixed blocks. nano-9b also takes the prompt and is far cheaper, but
+        # it flagged the canonical narrative the scope section rules out — so
+        # it sits behind, as a still-useful last cloud option.
+        ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-back", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-tertiary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-quaternary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-quinary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-senary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        ("nvidia-septenary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+        # groq is gone, and not because of the model: llama-3.1-8b-instant and
+        # gpt-oss-120b return the same 413 Payload Too Large on this prompt, so
+        # the ~64k body exceeds a request-size limit on the account, not a
+        # context window. Nothing to swap to — re-add if the plan changes.
         # Z.AI 11-key pool — chain names zai..zai-undenary (see ZAI_PROVIDERS in llm_client)
         ("zai", "glm-5.2"),
         ("zai-back", "glm-5.2"),
@@ -118,6 +124,7 @@ def _review_chain() -> list[tuple[str, str]]:
         ("zai-undenary", "glm-5.2"),
         ("opencode", "deepseek-v4-flash-free"),
         ("opencode", "big-pickle"),
+        ("nvidia", "nvidia/nvidia-nemotron-nano-9b-v2"),
         ("ollama", os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")),
     ])
 
