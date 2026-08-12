@@ -1503,12 +1503,40 @@ def _ollama_context_score(job_description: str, persona_summary: str,
     for the few high-match jobs whose reports actually display it. The
     Japanese translation is added lazily at report time, not here.
 
+    role_fit rewards seniority in the posting and the CV reviews do not agree.
+    The measurements, and the fix that was tried and reverted, are recorded on
+    the prompt below — read that before attempting it again.
+
     Reasoning that calls the candidate local-first is retried once, then
     scrubbed — see _scrub_deployment_framing.
     """
     if not job_description or not persona_summary:
         return None
 
+    # KNOWN, UNFIXED: role_fit rewards seniority in the posting. Controlling for
+    # role, it rises monotonically from entry to senior in all six buckets with
+    # enough data — graphic_designer 34.0/33.7/49.3, product_designer
+    # 42.9/47.1/62.5, web_developer 38.2/44.2/66.3, research_engineer
+    # 20.8/24.8/48.8, general 22.3/24.5/38.4, creative_technologist -/65.3/76.2.
+    # It says this candidate can do a Senior Graphic Designer job better than a
+    # Junior one. The CV reviews disagree: they rate internship, entry and mid
+    # postings within 2 points of each other, while role_fit is harsher on
+    # entry than mid by 6.6 points (95% CI [+0.8, +12.4]) and on internship by
+    # 14.3 ([+4.6, +23.7]). Not a length effect — r(role_fit, description
+    # length) = +0.013 over 2,266 postings.
+    #
+    # DO NOT "fix" this by stating the level in the prompt. That was tried:
+    # a `## Seniority this posting is pitched at` block naming the level, with
+    # an instruction to judge against that level's bar and "do not reward a
+    # posting for asking for more". Measured on 47 CV-reviewed jobs, two thirds
+    # junior, both arms in one run: junior scores did not move (34.8 -> 34.4)
+    # and mid/senior rose (56.4 -> 60.7), so the junior-vs-control residual gap
+    # WIDENED from +13.0 to +17.7, 95% CI on the change [+0.4, +9.1]. Naming
+    # the level made the model more generous to senior postings and did nothing
+    # for junior ones — the opposite of the instruction it was given. Overall r
+    # rose +0.215 -> +0.333 with CI [+0.003, +0.243], a lower bound one sample
+    # from null, and rho did not separate at all; for a ranking, rho is the
+    # measure that matters. Reverted.
     shared = f"""You are a career alignment analyst. Rate this job against the candidate on TWO separate axes.
 
 ## Candidate Profile

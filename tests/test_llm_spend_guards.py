@@ -25,7 +25,7 @@ def counted_llm(monkeypatch):
     """Count context-scoring calls instead of making them."""
     calls = []
 
-    def fake(description, persona):
+    def fake(description, persona, **kwargs):
         calls.append(description)
         return {"score": 0.9, "reasoning": "looks relevant", "top_terms": ["design"]}
 
