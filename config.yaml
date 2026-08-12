@@ -70,6 +70,23 @@ include_levels:
 # Kept despite a low rate, by preference: Glasgow (39 -> 2), Dundee (10 -> 1).
 # Best performers, for reference: Creative Technologist 66.7%, Technical Artist
 # 42.9%, Digital Designer 40%, Web Designer 40%, Remote 37.9%, Edinburgh 33.3%.
+#
+# The six "bridge" terms below were added 2026-08-07. They target the roles that sit
+# between the creative-technologist target and unrelated work — jobs that pay now
+# without breaking the story. Each has its own CV profile, cover letter and outreach
+# template, so a hit routes to a document set written for it.
+#
+# Ordered by how much English-language, synchronous client contact the job carries,
+# which is the candidate's stated constraint: QA Analyst and Research Software
+# Engineer are written-first work, Technical Support is written-first only where the
+# channel is tickets rather than phone, and Implementation Consultant / Solutions
+# Engineer / Digital Producer are meeting-heavy. All six are searched; the ranking
+# matters when choosing which results to act on, not which to collect.
+#
+# Multi-word phrases, never bare "Implementation" or "Support": scraped jobs pass
+# through filter_jobs_by_keywords, which keeps a job when ANY keyword appears in the
+# title OR description. A single common word there would match nearly every posting
+# and quietly disable that filter for the whole run.
 keywords:
 - Creative Technologist
 - Technical Artist
@@ -77,13 +94,58 @@ keywords:
 - Web Designer
 - Digital Designer
 - Designer
+- Implementation Consultant
+- Solutions Engineer
+- Technical Support
+- QA Analyst
+- Digital Producer
+- Research Software Engineer
+# Manchester dropped 2026-08-07 to pay for the two keywords above. It is the weakest
+# location on the list for this candidate: Edinburgh-based, needs work now, and a
+# Manchester post is neither commutable nor a better relocation than London — which
+# stays, as the one non-Scottish market big enough to be worth the searches.
 locations:
 - Edinburgh
 - Dundee
 - Glasgow
 - London
-- Manchester
 - Remote
+
+# Per-keyword location overrides (selection.search_pairs). A keyword listed here
+# searches only these locations; anything absent keeps the full `locations` list.
+#
+# This exists because searches, not keywords, are the budgeted resource: reed runs
+# ~34s per search at depth 3 against a 1500s cron timeout, so 44 pairs is the hard
+# ceiling (invariants.check_scrape_fits_its_timeout). The full cross product of 12
+# keywords x 5 locations is 60 pairs — 2040s, a guaranteed exit 124 and truncated
+# descriptions.
+#
+# What is narrowed, and why:
+#   * The six bridge terms run Edinburgh / Glasgow / Remote. These are jobs to take
+#     now, in commuting distance or remote; a support or implementation role in
+#     London is not one this search can act on.
+#   * "Designer" and "Web Designer" give up London / Dundee. They are the two
+#     broadest design terms and overlap most with "Digital Designer", which keeps its
+#     full reach — so the design side loses the most duplicated coverage, not the
+#     best-yielding.
+#   * "Technical Artist" gives up London: the Scottish games cluster (Dundee,
+#     Edinburgh, Glasgow) is the reachable one, and London studios hire on relocation.
+#   * "Web Developer" gives up Dundee, the smallest of the four markets for it.
+# Only "Creative Technologist" and "Digital Designer" keep every location — the two
+# best-measured performers.
+# Total: 42 pairs, ~1428s on reed. Two more pairs is the whole remaining headroom, so
+# a new term needs an entry here or an existing one has to give way.
+keyword_locations:
+  Technical Artist: [Edinburgh, Dundee, Glasgow, Remote]
+  Web Developer: [Edinburgh, Glasgow, London, Remote]
+  Designer: [Edinburgh, Glasgow, Remote]
+  Web Designer: [Edinburgh, Glasgow, Remote]
+  Implementation Consultant: [Edinburgh, Glasgow, Remote]
+  Solutions Engineer: [Edinburgh, Glasgow, Remote]
+  Technical Support: [Edinburgh, Glasgow, Remote]
+  QA Analyst: [Edinburgh, Glasgow, Remote]
+  Digital Producer: [Edinburgh, Glasgow, Remote]
+  Research Software Engineer: [Edinburgh, Glasgow, Remote]
 max_pages_per_search: 3
 
 # Per-site page depth, read through selection.max_pages_for (falls back to
@@ -179,12 +241,26 @@ exclude_timezone_keywords:
 # Composite match weights. Fitted against review verdicts on 139 documents with
 # a real job description (r = +0.595 here vs +0.518 for the old 0.35/0.25/0.10/
 # 0.01/0.29 split). Context carries most of it because it is the only component
-# that reads the posting semantically, the way the reviewer does — measured alone
-# it reaches r=+0.562 while skills manages +0.192. experience is near-zero weight
-# because its spread across postings is sd=0.024 (the candidate's years are fixed,
-# so it barely varies), and salary is held at 0.01 because it correlates NEGATIVELY
-# with review outcome (r=-0.089). Skills keeps a real share: dropping it entirely
-# scores worse (+0.557) than keeping it small.
+# that reads the posting semantically, the way the reviewer does. experience is
+# near-zero weight because its spread across postings is sd=0.024 (the
+# candidate's years are fixed, so it barely varies), and salary is held at 0.01
+# because it correlates NEGATIVELY with review outcome (r=-0.089). Skills keeps
+# a real share: dropping it entirely scores worse (+0.557) than keeping it small.
+#
+# Re-measured 2026-08-11 on 419 jobs holding both an LLM context score and a
+# stored CV review — three times the original sample. Context alone came back
+# at +0.292, not the +0.562 recorded above, and skills at +0.100. The weights
+# were refit against that: non-negative, summing to 1, scored out-of-sample over
+# five folds. The refit LOST on all five seeds (-0.003 to -0.028), so it was not
+# applied and these numbers stand. Capping context by skills lost at every
+# margin too. Both failed for the same reason — every dimension is a weak
+# predictor, so no linear recombination of them has anywhere to go.
+#
+# What did work was fixing the input rather than the arithmetic: context now
+# scores whether the candidate could DO the job (r=+0.459) instead of whether
+# they would want it (r=+0.294). Note the refit wanted to zero location and
+# salary — cv_review_score is the wrong target for those, because the reviewer
+# never sees where a job is or what it pays. Do not fit those two against it.
 weights:
   skills: 0.20
   experience: 0.05
@@ -219,10 +295,16 @@ review_top_percent: 40       # top N% by composite_score get reviewed
 # It sat at 0.60 while the weight rebalance moved the median composite to 0.40,
 # which cut 75 of the top 143 jobs and shrank "top 30%" to 68 — and dropped 6 of
 # the 31 jobs that reviewed at 73+. Re-fit against those review outcomes: 0.45
-# loses none of them and stays under the current 30% cutoff (0.480). Re-check
-# this number whenever `weights` changes, since it is an absolute score and the
-# weights decide the scale.
-match_score_threshold: 0.45
+# lost none of them. Re-check this number whenever `weights` OR the meaning of
+# a dimension changes, since it is an absolute score and they decide the scale.
+#
+# 0.45 -> 0.32 on 2026-08-11, when context stopped measuring whether the
+# candidate would WANT a job and started measuring whether they could DO it.
+# That moved mean context 0.444 -> 0.272 and mean composite 0.425 -> 0.354, so
+# 0.45 would have passed 227 of the 927 rescored jobs where it used to pass 485
+# — halving the pipeline for a reason that has nothing to do with the jobs.
+# 0.32 passes 498, holding the volume the floor was tuned to.
+match_score_threshold: 0.32
 
 # Safety cap on how many NEW CVs one run may generate, independent of percent
 # (0 = no cap). Guards against a huge first run; top-% is the real selector.

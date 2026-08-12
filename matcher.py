@@ -252,6 +252,23 @@ SKILL_SYNONYMS = {
     "graphic design": "visual design",
     "art direction": "visual design",
     "visual communication": "visual design",
+    # Brand/identity synonyms — map job description variants to the
+    # brand identity / logo design / storytelling rows added for the
+    # graphic_designer role split (TAIFUNOME, My Personal Identity Mark,
+    # Feral Bestiary are the evidence backing these).
+    "brand": "brand identity",
+    "branding": "brand identity",
+    "brand design": "brand identity",
+    "brand strategy": "brand identity",
+    "visual identity": "brand identity",
+    "identity design": "brand identity",
+    "logo": "logo design",
+    "logo designer": "logo design",
+    "wordmark": "logo design",
+    "storytelling": "storytelling / narrative design",
+    "brand storytelling": "storytelling / narrative design",
+    "narrative design": "storytelling / narrative design",
+    "narrative": "storytelling / narrative design",
     # Workflow / methodology synonyms
     "workflow": "workflow automation",
     "workflows": "workflow automation",
@@ -1123,15 +1140,25 @@ def _load_persona_summary() -> str:
     global _persona_cache
     if _persona_cache is not None:
         return _persona_cache
-    persona_files = ["ethos.md", "about.md", "profile.md", "interests.md"]
+    # skills.md and timeline.md were absent, so every prompt built from this —
+    # context scoring above all — was asked whether the candidate suits a job
+    # while holding no list of what they can do and no employment history. The
+    # scorer answered on ethos alone, which is why an n8n Billing Specialist
+    # reached 92: "reduce friction, automate" is a genuine match of values, and
+    # nothing in the prompt said the work is accounting.
+    #
+    # Most load-bearing first, because the tail of a long persona is what a
+    # small model stops attending to.
+    persona_files = ["profile.md", "skills.md", "timeline.md", "ethos.md",
+                     "about.md", "interests.md", "cover-letter-evidence.md"]
     # Hard facts first: smaller LLMs otherwise infer "based in Japan" from
     # scattered Japan references (remote hardware, past photography) even
     # though profile.md states the location explicitly.
     parts = [
         "--- KEY FACTS (authoritative) ---\n"
-        "Current location: Edinburgh, Scotland, UK — settled resident since December 2025, UK work eligible.\n"
-        "Do NOT frame this as an upcoming or future move, and never claim the candidate lives in, "
-        "is near, or is relocating to the employer's location. The candidate's home is Edinburgh, full stop.\n"
+        "Current location and work eligibility are recorded in profile.md.\n"
+        "Do NOT frame a past relocation as an upcoming move, and never claim the candidate lives in, "
+        "is near, or is relocating to the employer's location.\n"
         "Any mentions of Japan below refer to past work, photography subjects, or a "
         "remote compute machine — NOT the candidate's current location."
     ]
@@ -1139,7 +1166,17 @@ def _load_persona_summary() -> str:
     # local-AI mentions and never reached the deployment-agnostic /
     # "What I Do" sections, and reported a "local-first preference" mismatch
     # against cloud-heavy jobs.
-    per_file_limit = {"ethos.md": 6500}
+    #
+    # skills.md is 12,128 characters and timeline.md 5,996, so at the 2,000
+    # default they would arrive as a fragment of their first section. They are
+    # the evidence for "can this person do the work", which is the question the
+    # 2,000 default was never sized for.
+    #
+    # life_goal.md is deliberately absent from persona_files. It says the job
+    # funds the real goal, which is equally true of every posting and separates
+    # none of them — and while it lived inside ethos.md it sat in the same
+    # prompt as the fit question, inviting "well, any job funds the art".
+    per_file_limit = {"ethos.md": 6500, "skills.md": 6500, "timeline.md": 4000}
     for fname in persona_files:
         fpath = USER_PROFILE_DIR / fname
         if fpath.exists():
@@ -1371,19 +1408,24 @@ def _ollama_context_score(job_description: str, persona_summary: str,
     if not job_description or not persona_summary:
         return None
 
-    shared = f"""You are a career alignment analyst. Rate how well this job matches the candidate's personal philosophy, work style, and ethos.
+    shared = f"""You are a career alignment analyst. Rate this job against the candidate on TWO separate axes.
 
 ## Candidate Profile
-{persona_summary[:9000]}
+{persona_summary[:14000]}
 
 ## Job Description
 {job_description[:5000]}
 
 ## Task
-Score the alignment on 0-100 (0 = completely misaligned, 100 = perfect fit).
-Consider: work philosophy, values, creative vs corporate culture, autonomy, tooling flexibility (picks cloud or local per constraint, bound to neither), multi-disciplinary creative-engineer fit.
+Score each axis 0-100, independently. Do not let one influence the other.
 
-Note: The candidate is deployment-agnostic. They run local models in personal research and standard enterprise cloud (AWS, hosted model APIs, managed services, third-party SaaS) in professional work, choosing per constraint — latency, cost, privacy, team toolchain — not per preference. This is portability, NOT a local-first bias. Do NOT describe the candidate as "local-first", do NOT treat a cloud or enterprise stack as a mismatch, and do NOT mention local-vs-cloud in the reasoning at all. Score on whether the candidate's core problem-solving ethos (reducing friction, automating pipelines, bridging design and engineering) aligns with the job's requirements."""
+1. `ethos` — would this candidate WANT this job? Work philosophy, values, creative vs corporate culture, autonomy, multi-disciplinary creative-engineer fit.
+
+2. `role_fit` — could this candidate DO this job? Judge the actual duties and required expertise against what the profile evidences. This is where a job that shares the candidate's values but demands expertise they do not have must score low. Ask what the posting says the person will DO all day, and whether the profile shows that work having been done. A posting whose core requirement appears nowhere in the profile scores under 30 on this axis no matter how appealing the company is.
+
+Name the core requirement you judged `role_fit` on, in `role_requirement`.
+
+Note: The candidate is deployment-agnostic. They run local models in personal research and standard enterprise cloud (AWS, hosted model APIs, managed services, third-party SaaS) in professional work, choosing per constraint — latency, cost, privacy, team toolchain — not per preference. This is portability, NOT a local-first bias. Do NOT describe the candidate as "local-first", do NOT treat a cloud or enterprise stack as a mismatch, and do NOT mention local-vs-cloud in the reasoning at all."""
 
     # Style for both modes: plain, simple English. Short words, short
     # sentences, no jargon or filler. Say the one thing that drives the score.
@@ -1391,7 +1433,7 @@ Note: The candidate is deployment-agnostic. They run local models in personal re
         prompt = shared + """
 
 Respond ONLY with JSON:
-{"score": <number 0-100>, "reasoning_en": "<3-4 short, plain sentences>"}
+{"ethos": <number 0-100>, "role_fit": <number 0-100>, "role_requirement": "<the duty or expertise you judged role_fit on>", "reasoning_en": "<3-4 short, plain sentences>"}
 Use simple words, short sentences. Say what fits, what does not, and the main reason for the score. No filler.
 Plain prose only — NO markdown, NO bold, NO headers, NO bullet points, NO labels like "Fits:"/"Doesn't fit:". Just 3-4 flowing sentences.
 BANNED: the reasoning must not contain "local-first", "local first", "self-hosted", "open-source preference", or any claim that cloud / enterprise / third-party tooling is a mismatch for this candidate. The candidate uses cloud and local equally.
@@ -1400,7 +1442,7 @@ BANNED: the reasoning must not contain "local-first", "local first", "self-hoste
         prompt = shared + """
 
 Respond ONLY with JSON:
-{"score": <number 0-100>, "reasoning_en": "<3-4 short, plain sentences>", "reasoning_ja": "<短く平易な日本語で3〜4文>"}
+{"ethos": <number 0-100>, "role_fit": <number 0-100>, "role_requirement": "<the duty or expertise you judged role_fit on>", "reasoning_en": "<3-4 short, plain sentences>", "reasoning_ja": "<短く平易な日本語で3〜4文>"}
 
 Write plainly. Short words, short sentences, no jargon. Say what fits and what does not, and why — nothing more. Keep English and Japanese the same length and meaning.
 Plain prose only — NO markdown, NO bold, NO headers, NO bullet points, NO labels like "Fits:"/"Doesn't fit:". Just 3-4 flowing sentences per language.
@@ -1425,7 +1467,21 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
         for match in reversed(matches):
             try:
                 data = json.loads(match.group(), strict=False)
-                score = float(data.get("score", 50))
+                # role_fit IS the score. Both axes are asked for and only one is
+                # used, which looks wasteful and is the whole mechanism: asked
+                # for ethos alone the model rated an n8n Billing Specialist 92,
+                # because "reduce friction, automate" genuinely matches the
+                # candidate's values and nothing made it weigh that the work is
+                # accounting. Given somewhere else to put "the work is
+                # adjacent", the fit judgement gets strict.
+                #
+                # Measured against 316 stored CV review scores: the old single
+                # score r=+0.294, this prompt's ethos +0.382, its role_fit
+                # +0.459 — and every blend of the two scores below role_fit on
+                # its own, consistently across five samples. ethos is kept in
+                # the record because it is the half a reader wants when
+                # deciding whether to apply anyway.
+                score = float(data.get("role_fit", data.get("score", 50)))
                 reasoning_en = data.get("reasoning_en", data.get("reasoning", ""))
                 reasoning_ja = data.get("reasoning_ja", "")
                 # Combine: English + Japanese (for display in MD)
@@ -1456,9 +1512,21 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
                 # and refreshed later — `--reanalyze --llm-context` skips anything
                 # already tagged "llm", so without this they never would be.
                 import llm_client as _lc
-                return {"score": round(score, 2), "reasoning": reasoning,
-                        "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja,
-                        "provider": _lc.last_provider}
+                out = {"score": round(score, 2), "reasoning": reasoning,
+                       "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja,
+                       "provider": _lc.last_provider}
+                # The axis that did not become the score, and the requirement it
+                # was judged against — the reader's evidence for a number that
+                # is now mostly low. Absent on a reply that predates the
+                # two-axis prompt, so callers must treat them as optional.
+                if "ethos" in data:
+                    try:
+                        out["ethos"] = max(0.0, min(100.0, float(data["ethos"]))) / 100.0
+                    except (TypeError, ValueError):
+                        pass
+                if data.get("role_requirement"):
+                    out["role_requirement"] = str(data["role_requirement"])[:200]
+                return out
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
         return None
@@ -1918,6 +1986,13 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "context_reasoning_en": ctx_match.get("reasoning_en", ""),
         "context_reasoning_ja": ctx_match.get("reasoning_ja", ""),
         "context_top_terms": ctx_match.get("top_terms", []),
+        # context_score is role_fit — could this candidate do the work. ethos —
+        # would they want it — is recorded beside it rather than mixed in: every
+        # blend of the two predicted the review outcome worse than role_fit
+        # alone, but a job scoring low on fit and high on ethos is exactly the
+        # one worth a human look before it is dropped.
+        "context_ethos": ctx_match.get("ethos"),
+        "context_role_requirement": ctx_match.get("role_requirement"),
         "context_source": ctx_source,
         # context_source only says "llm" vs "tfidf"; this says which model, so a
         # score produced by a fallback after the primary keys ran out can be told
@@ -2079,19 +2154,28 @@ def _infer_country(job: dict) -> str:
 
 
 def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None,
-                          expired: bool = False, carried: list[str] | None = None) -> str:
+                          expired: bool = False, applied: bool = False,
+                          screening_passed: bool = False, interview_passed: bool = False,
+                          carried: list[str] | None = None) -> str:
     """
     Generate a Markdown match report with YAML frontmatter for Obsidian Dataview.
     Optionally include links to generated CV and cover letter files.
 
-    `expired` is a hand-maintained flag: a boolean renders as a checkbox in
-    Obsidian's property editor, so a posting that has closed can be ticked off
-    and filtered out of a Base. Nothing here ever sets it True — it is passed
-    back in by save_match_report so a tick survives the report being rewritten.
+    `expired`, `applied`, `screening_passed`, and `interview_passed` are
+    hand-maintained flags: a boolean renders as a checkbox in Obsidian's
+    property editor, so a closed posting can be ticked off and filtered out of
+    a Base, a submitted application can be marked as sent, and each selection
+    stage (document screening, interview) can be recorded as it happens. All
+    are ALWAYS emitted, false included — an absent key renders no checkbox.
 
-    `carried` is frontmatter written by later steps (PDF and review links) that
-    this function has no way to derive; save_match_report reads it off the
-    previous report and hands it back for the same reason.
+    Nothing here ever sets any of these True; they are passed back in by the
+    caller so a tick survives the report being rewritten. All callers must pass
+    all flags — see read_flag.
+
+    `carried` is frontmatter written by later steps (PDF and review links, and
+    the `*_at` date stamps) that this function has no way to derive;
+    save_match_report reads it off the previous report and hands it back for
+    the same reason.
     """
     title = job.get("title", "Unknown")
     company = job.get("company", "Unknown")
@@ -2124,11 +2208,32 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     categories_yaml = "[" + ", ".join(categories) + "]" if categories else "[]"
     country = _infer_country(job)
 
+    # Experience level and filtering metadata
+    analysis = job.get("analysis", {})
+    exp_level = (
+        analysis.get("experience_level")
+        or job.get("seniority")
+        or match.get("experience", {}).get("job_level")
+        or "unknown"
+    )
+    if isinstance(exp_level, str):
+        exp_level = exp_level.lower().strip()
+    filter_reason = job.get("_filter_reason", "")
+    filter_status = "filtered" if filter_reason else "passed"
+    filter_yaml = f'\nfilter_status: "{filter_status}"'
+    if filter_reason:
+        clean_reason = str(filter_reason).replace('"', '\\"')
+        filter_yaml += f'\nfilter_reason: "{clean_reason}"'
+
     frontmatter = f"""---
 match_score: {score}
 match_score_pct: {score_pct}
 tier: "{_tier_short(match['tier'])}"
+level: "{exp_level}"{filter_yaml}
 expired: {"true" if expired else "false"}
+applied: {"true" if applied else "false"}
+screening_passed: {"true" if screening_passed else "false"}
+interview_passed: {"true" if interview_passed else "false"}
 company: "{company}"
 title: "{title}"
 categories: {categories_yaml}
@@ -2333,11 +2438,15 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
     return "\n".join(lines)
 
 
-def read_expired_flag(path: Path) -> bool:
-    """Read the hand-set `expired` checkbox out of an existing report.
+def read_flag(path: Path, key: str) -> bool:
+    """Read a hand-set checkbox out of an existing report's frontmatter.
 
     The report is rewritten wholesale on every rescrape, so without this a tick
     made in Obsidian would be silently reset the next time the job is scored.
+    Both checkboxes MUST be read back on every write path — each one used to be
+    preserved by only one of the two, so whichever path ran cleared the other's
+    tick (run.py's generate_outputs reset `expired`, save_match_report dropped
+    `applied`). Passing both through every call is what keeps that closed.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -2346,8 +2455,28 @@ def read_expired_flag(path: Path) -> bool:
     fm = re.match(r"\A---\n(.*?)\n---", text, re.DOTALL)
     if not fm:
         return False
-    m = re.search(r"^expired:\s*(\S+)", fm.group(1), re.MULTILINE)
-    return bool(m) and m.group(1).strip().lower() in ("true", "yes", "on")
+    m = re.search(rf"^{key}:\s*(\S+)", fm.group(1), re.MULTILINE)
+    return bool(m) and m.group(1).strip().strip('"').lower() in ("true", "yes", "on")
+
+
+def read_expired_flag(path: Path) -> bool:
+    """True when the report's `expired` checkbox is ticked."""
+    return read_flag(path, "expired")
+
+
+def read_applied_flag(path: Path) -> bool:
+    """True when the report's `applied` checkbox is ticked."""
+    return read_flag(path, "applied")
+
+
+def read_screening_passed_flag(path: Path) -> bool:
+    """True when the report's `screening_passed` checkbox is ticked."""
+    return read_flag(path, "screening_passed")
+
+
+def read_interview_passed_flag(path: Path) -> bool:
+    """True when the report's `interview_passed` checkbox is ticked."""
+    return read_flag(path, "interview_passed")
 
 
 # Properties the report never generates but other steps attach to it later: the
@@ -2355,7 +2484,9 @@ def read_expired_flag(path: Path) -> bool:
 # so they are reachable (and Dataview-queryable) from there. Rewriting the
 # report wholesale used to drop every one of them, so a rescrape silently
 # unlinked the reviews that had just been written.
-_CARRIED_REPORT_KEYS = ("cv_pdf", "cl_pdf", "cv_review", "cl_review")
+_CARRIED_REPORT_KEYS = ("cv_pdf", "cl_pdf", "cv_review", "cl_review",
+                        "applied_at", "screening_passed_at", "interview_passed_at",
+                        "screening_failed_at", "interview_failed_at")
 
 
 def read_review_scores(base: str) -> dict[str, object]:
@@ -2423,6 +2554,9 @@ def save_match_report(job: dict, match: dict, output_dir: str, cv_filename: str 
 
     report = generate_match_report(job, match, cv_filename=cv_filename, cl_filename=cl_filename,
                                    expired=read_expired_flag(filepath),
+                                   applied=read_applied_flag(filepath),
+                                   screening_passed=read_screening_passed_flag(filepath),
+                                   interview_passed=read_interview_passed_flag(filepath),
                                    carried=read_carried_properties(filepath))
     filepath.write_text(report, encoding="utf-8")
 
