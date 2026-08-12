@@ -31,6 +31,7 @@ from pathlib import Path
 
 import selection
 from filter import passes_filter
+from matcher import JOB_DESC_CHAR_BUDGET
 
 ANALYZED = Path(__file__).resolve().parent / "10_output" / "_analyzed.json"
 CHECKPOINT_EVERY = 20
@@ -99,13 +100,14 @@ def score_one(job: dict, persona: str) -> dict | None:
 
     content = call_llm(
         messages=[{"role": "user", "content": PROMPT.format(
-            # 14,000 rather than 9,000: the persona is capped per file now, and
-            # at 9,000 the window still ended inside timeline.md, so ethos.md —
-            # the document the first axis is named after — never reached the
-            # model at all. 14,000 admits profile, skills, timeline, about and
-            # ethos, which is every file either axis is judged on.
-            persona=persona[:14000],
-            description=(job.get("description") or "")[:5000])}],
+            # No second cut. 14,000 was believed to admit "every file either
+            # axis is judged on"; measured, the assembled persona was 25,429
+            # characters, so it dropped about.md, interests.md and
+            # cover-letter-evidence.md whole and left ethos.md at 16%. The
+            # persona is truncated once, by _load_persona_summary, and sent as
+            # it comes back — see matcher.PERSONA_CHAR_BUDGET.
+            persona=persona,
+            description=(job.get("description") or "")[:JOB_DESC_CHAR_BUDGET])}],
         system_prompt=("You are a career alignment scoring engine. Output ONLY valid JSON. "
                        "The candidate is deployment-agnostic: cloud and local are equally "
                        "normal for them. Never call them local-first."),

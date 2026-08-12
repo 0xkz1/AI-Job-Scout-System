@@ -1135,6 +1135,20 @@ _OLLAMA_CTX_KEEP_ALIVE = _os.getenv("OLLAMA_KEEP_ALIVE", "10m")
 
 _persona_cache = None
 
+# Large enough that nothing is cut today (the assembled persona is ~37,800
+# characters). It is a runaway guard, not a budget to spend down: context
+# carries 0.64 of the composite, so a persona the scorer cannot see is the
+# most expensive saving available.
+PERSONA_CHAR_BUDGET = 45000
+
+# The Havas Lynx posting is 9,608 characters and the previous 5,000 cut it in
+# half, so role_fit was judged on the generic agency duties in the first half
+# while the sections naming the actual work — visual thinking upstream of the
+# brief, AI used to reach a concept in hours — sat past the cut. 12,000 sends
+# 99.3% of the corpus whole (5,000 sent 89.3%).
+JOB_DESC_CHAR_BUDGET = 12000
+
+
 def _load_persona_summary() -> str:
     """Load and condense persona docs for the LLM prompt."""
     global _persona_cache
@@ -1176,14 +1190,32 @@ def _load_persona_summary() -> str:
     # funds the real goal, which is equally true of every posting and separates
     # none of them — and while it lived inside ethos.md it sat in the same
     # prompt as the fit question, inviting "well, any job funds the art".
-    per_file_limit = {"ethos.md": 6500, "skills.md": 6500, "timeline.md": 4000}
+    #
+    # These limits are sized to admit each file whole, with headroom, because
+    # the previous set cut where nothing had asked them to: skills.md lost
+    # 5,628 of its 12,128 characters and profile.md 2,880 of 4,880, so the
+    # axis that asks "could they do this job" was answered from half the
+    # evidence. A limit still exists so one file that grows without bound
+    # cannot starve the files after it — that is the only job it has.
+    per_file_limit = {"profile.md": 6000, "skills.md": 14000, "timeline.md": 8000,
+                      "ethos.md": 8000, "about.md": 4000, "interests.md": 3000,
+                      "cover-letter-evidence.md": 4000}
     for fname in persona_files:
         fpath = USER_PROFILE_DIR / fname
         if fpath.exists():
             content = fpath.read_text(encoding="utf-8").strip()
             if content:
-                parts.append(f"--- {fname} ---\n{content[:per_file_limit.get(fname, 2000)]}")
-    _persona_cache = "\n\n".join(parts) if len(parts) > 1 else ""
+                parts.append(f"--- {fname} ---\n{content[:per_file_limit.get(fname, 4000)]}")
+    persona = "\n\n".join(parts) if len(parts) > 1 else ""
+    # The one place the persona is truncated. It used to be truncated twice:
+    # here per file, and again by the prompt at 14,000 characters — which the
+    # per-file limits summed past, to 25,429. about.md, interests.md and
+    # cover-letter-evidence.md were read, capped, joined and then discarded
+    # entirely by that second cut, and ethos.md arrived at 16% of itself, so
+    # the `ethos` axis was scored nearly blind and cover-letter-evidence.md —
+    # the file that exists to evidence "can they do the work" — never reached
+    # the model at all. Callers must send what this returns, whole.
+    _persona_cache = persona[:PERSONA_CHAR_BUDGET]
     return _persona_cache
 
 
@@ -1440,10 +1472,10 @@ def _ollama_context_score(job_description: str, persona_summary: str,
     shared = f"""You are a career alignment analyst. Rate this job against the candidate on TWO separate axes.
 
 ## Candidate Profile
-{persona_summary[:14000]}
+{persona_summary}
 
 ## Job Description
-{job_description[:5000]}
+{job_description[:JOB_DESC_CHAR_BUDGET]}
 
 ## Task
 Score each axis 0-100, independently. Do not let one influence the other.
