@@ -12,12 +12,14 @@ Usage:
 
 import streamlit as st
 import subprocess
+import signal
 import json
 import os
 import re
 import sys
 import glob
 import yaml
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +31,46 @@ OUTPUT_DIR = SCRAPER_DIR / "10_output"
 ANALYZED_PATH = OUTPUT_DIR / "_analyzed.json"
 MATCH_DIR = OUTPUT_DIR / "00_matches"
 ASSET_WEAVER_SCRIPT = Path("/media/kz003/atelier/kazukiyunome/scripts/asset-weaver.py")
+
+
+class _AdoptedProcess:
+    """A chain started by an earlier Streamlit session, spoken to by PID.
+
+    Popen objects do not survive an auto-reload, and the run they refer to
+    does. This stands in for one so the reporting block needs no special case:
+    it answers poll() and returncode from whether the PID is still alive.
+
+    Only ever adopts a process this app started (its PID is read back from the
+    state file the launcher wrote), and the exit code is unknowable from
+    outside — a finished adopted run reports 0 and the log carries the truth.
+    """
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self):
+        try:
+            os.kill(self.pid, 0)
+        except OSError:
+            self.returncode = 0
+            return 0
+        return None
+
+    def terminate(self):
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    def kill(self):
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def wait(self, timeout=None):
+        return self.poll()
 
 # Add scraper dir to path so we can import matcher
 sys.path.insert(0, str(SCRAPER_DIR))
@@ -803,8 +845,17 @@ def save_kanban_data(data):
 
 # --- PDF export (CV / Cover Letter) ---
 PDF_DIR = OUTPUT_DIR / "20_pdfs"
-# Static-serving copy dir: files under ./static are served at <app>/app/static/
-STATIC_PDF_DIR = SCRAPER_DIR / "static" / "pdfs"
+
+# Recipient-facing PDF filenames carry the applicant's name so a hiring
+# manager can tell whose document this is before opening it. The internal
+# .md files (10_cvs, 10_cover-letters, 00_matches) keep their bare
+# make_safe_name(company, title) join key — renaming 5,000+ files there
+# would break the report↔CV/CL links. Only the PDF output name is prefixed.
+APPLICANT_NAME_PREFIX = "Kazuki-Yunome"
+# NOTE: ./static/pdfs/ is no longer written to — downloads go through
+# st.download_button (see _pdf_download_button). The copies already there are
+# left alone, but they duplicate every name under 10_output/20_pdfs/, so an
+# Obsidian `pdf: "[[Name.pdf]]"` wikilink has two candidates to resolve to.
 CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
 
@@ -852,10 +903,24 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     text = md_path.read_text(encoding="utf-8")
     # Strip YAML frontmatter (Obsidian metadata, not for the PDF)
     text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    # Strip Obsidian Meta Bind blocks (buttons, inputs — not for the PDF)
+    text = re.sub(r"```meta-bind[^\n]*\n.*?```\n?", "", text, flags=re.DOTALL)
     # Obsidian wiki-links → plain text ([[target|label]] → label)
     text = re.sub(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]", lambda m: m.group(2) or m.group(1), text)
     if is_cl:
         text = _dated_today(text)
+        # The LLM habitually bolds or italicises a project name mid-sentence
+        # ("I built **TAIFUNOME**", "my work on *Feral Bestiary*") as ad-lib
+        # emphasis — cover_letter_generator.py never asks for it, and unlike a
+        # CV a letter has no structural use for markdown emphasis at all (the
+        # sender block, salutation, and closing are plain text). Measured
+        # across the letters on disk: 99/471 carry stray bold, 166/471 stray
+        # italic. Stripped here rather than fixed in the prompt, since a
+        # rendering rule is certain where an LLM instruction is only ever
+        # probable — the CL word-count limit is asked for the same way and is
+        # still missed on roughly a fifth of openings.
+        text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+        text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)
 
     # Generated CVs/CLs are near-plain text: ALL-CAPS section lines, "•" bullets,
     # and meaningful single line breaks. Preprocess into real markdown.
@@ -864,8 +929,24 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
     # Bold-only lines are entry titles in EXPERIENCE/SELECTED PROJECTS but mere
     # category labels in the toolkit; only the former need breathing room.
     titles_want_space = False
+    # A CL recipient block is "Hiring Team\n<Company>\n<City>". Company lines
+    # are often ALL-CAPS (VCCP, BBC, IBM, D&AD) and would otherwise trip the
+    # ALL-CAPS section-header rule below, inflating the addressee to an h2
+    # while "Hiring Team" and the city stay body text — a broken look, and one
+    # the sender cannot see from the markdown source. The block is plain
+    # address text, so every line in it is emitted verbatim. Only active for
+    # cover letters: CVs have no such block and a "Hiring Team" heading in one
+    # would not be the addressee.
+    in_recipient_block = False
     for i, line in enumerate(lines):
         stripped = line.strip()
+        if stripped == "Hiring Team":
+            in_recipient_block = is_cl
+        elif stripped.startswith("Dear ") or not in_recipient_block:
+            in_recipient_block = False
+        if in_recipient_block:
+            out_lines.append(line)  # recipient block: never a heading
+            continue
         if i == 0 and stripped and not stripped.startswith("#"):
             out_lines.append(f"# {stripped}")  # first line = candidate name
         elif re.fullmatch(r"[A-Z][A-Z &/'’\-]{2,40}", stripped):
@@ -878,6 +959,18 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
             # its own margin — a wider one for entries than for categories.
             level = "###" if titles_want_space else "####"
             out_lines.append(f"\n{level} {stripped.strip('*')}")
+        elif re.fullmatch(r"\*\*[^*]+\*\* · .+", stripped):
+            # Same entry-title line, plus a trailing " · <link>" (a project's
+            # URL). The bare-bold pattern above requires the WHOLE line to be
+            # "**...**" — the suffix breaks that fullmatch, so this line fell
+            # through to the plain-text branch below. There it was joined to
+            # the next line with a single \n, which nl2br glues into one <p>
+            # with the following bullets — no heading tag, no page-break-avoid,
+            # and "•" bullets rendered as literal dashes instead of a <li>
+            # list. The ** and [text](url) markers are kept (not stripped):
+            # ATX headings run inline markdown, so ### processes both.
+            level = "###" if titles_want_space else "####"
+            out_lines.append(f"\n{level} {stripped}")
         elif stripped.startswith("**Other projects:"):
             # Trails the last project's bullet list, so without a break of its
             # own markdown reads it as more of that list and it ends up flush
@@ -1024,41 +1117,69 @@ def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
     nothing points at is not a finished conversion, so the two steps are one
     function with no seam for a caller to miss.
     """
-    stem = md_path.stem
+    # PDF output names carry the applicant's name; the internal .md stem
+    # (company_title) stays as the join key used to stamp pdf:/cv_pdf:/cl_pdf:
+    # frontmatter back onto the report. Versioning is by prefixed stem so new
+    # outputs mint their own sequence instead of colliding with legacy PDFs.
+    stem = f"{APPLICANT_NAME_PREFIX}_{md_path.stem}"
     md_sha = _pdf_source_sha(md_path)
     versions = _pdf_versions(stem)
     meta = _load_pdf_meta()
 
+    PDF_DIR.mkdir(exist_ok=True)
+    unversioned = PDF_DIR / f"{stem}.pdf"
+
     if versions:
         latest_n, latest_path = versions[-1]
         if meta.get(latest_path.name) == md_sha and latest_path.exists():
+            if not unversioned.exists() or unversioned.stat().st_mtime < latest_path.stat().st_mtime:
+                import shutil
+                shutil.copyfile(latest_path, unversioned)
             _set_report_pdf_property(md_path, latest_path.name)
             return latest_path, latest_n, False  # unchanged — reuse
         n = latest_n + 1
     else:
         n = 1
 
-    PDF_DIR.mkdir(exist_ok=True)
     target = PDF_DIR / _version_filename(stem, n)
-    target.write_bytes(_md_to_pdf_bytes(md_path))
+    pdf_bytes = _md_to_pdf_bytes(md_path)
+    target.write_bytes(pdf_bytes)
+    unversioned.write_bytes(pdf_bytes)
     meta[target.name] = md_sha
+    meta[unversioned.name] = md_sha
     _save_pdf_meta(meta)
     _set_report_pdf_property(md_path, target.name)
     return target, n, True
 
 
-def _static_pdf_link(pdf_path: Path, label: str) -> str:
-    """Copy a PDF into the static-served dir and return an <a download> tag."""
-    import shutil
-    import urllib.parse
-    STATIC_PDF_DIR.mkdir(parents=True, exist_ok=True)
-    static_copy = STATIC_PDF_DIR / pdf_path.name
-    if not static_copy.exists() or static_copy.stat().st_mtime < pdf_path.stat().st_mtime:
-        shutil.copyfile(pdf_path, static_copy)
-    href = "/app/static/pdfs/" + urllib.parse.quote(static_copy.name)
-    return (
-        f'<a href="{href}" download="{static_copy.name}" target="_blank" rel="noopener">'
-        f'{label}</a>'
+def _pdf_download_button(pdf_path: Path, label: str, key: str):
+    """Download one PDF via Streamlit's own button, not a hand-written <a>.
+
+    This used to be an `<a href="/app/static/…" download>` tag rendered through
+    st.markdown, and it handed back a corrupt "Unconfirmed NNNNNN.crdownload"
+    instead of a PDF. Two things combine:
+
+    * st.markdown FORCES target="_blank" rel="noopener noreferrer" onto every
+      anchor it renders — re-adding them even when the tag is written without
+      them, so the popup cannot be avoided from the HTML side.
+    * With both `download` and target="_blank", Chrome opens a throwaway tab,
+      starts the transfer inside it, then tears the tab down, racing the
+      response. When teardown wins, the transfer is interrupted and Chrome
+      leaves the unrenamed temp file behind.
+
+    Streamlit's /app/static route also sends no Content-Disposition, so that
+    `download` attribute was the only thing naming the file — lose the tab and
+    the filename goes with it, hence "Unconfirmed" rather than the CV's name.
+    st.download_button serves the bytes from /media/<hash> WITH a
+    Content-Disposition filename and no second browsing context, so neither
+    failure is reachable.
+    """
+    st.download_button(
+        label,
+        data=pdf_path.read_bytes(),
+        file_name=pdf_path.name,
+        mime="application/pdf",
+        key=key,
     )
 
 
@@ -1408,8 +1529,11 @@ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
                 suffix = " (latest)" if is_current else " (outdated)"
             else:
                 suffix = ""
-            link = _static_pdf_link(pdf_path, f"⬇ {label} v{n}{suffix}")
-            st.markdown(link, unsafe_allow_html=True)
+            _pdf_download_button(
+                pdf_path,
+                f"⬇ {label} v{n}{suffix}",
+                key=f"dl_{key_prefix}_{label}_{n}",
+            )
 
 
 with tab_review:
@@ -1441,16 +1565,25 @@ with tab_review:
     targets = [r for r in scored_rows[:math.ceil(len(scored_rows) * top_pct / 100)] if r["has_docs"]]
 
     # Collect (label, md_path, job) for every existing doc in scope, and
-    # which of them actually need a (re-)review.
-    doc_jobs = []
+    # which of them actually need a (re-)review. Locked documents (hand-edited /
+    # applied / expired — see gen_version) are held out entirely: run_review
+    # writes a backlink into the document, and a fresh verdict on a submitted or
+    # closed application is advice that can no longer be taken.
+    import gen_version
+    doc_jobs, locked_docs = [], 0
     for r in targets:
         for label, path in (("CV", CV_DIR / f"{r['base']}_CV.md"), ("CL", CL_DIR / f"{r['base']}_CL.md")):
-            if path.exists():
-                doc_jobs.append((label, path, r["job"]))
+            if not path.exists():
+                continue
+            if gen_version.is_locked(r["base"], path.read_text(encoding="utf-8"), MATCH_DIR):
+                locked_docs += 1
+                continue
+            doc_jobs.append((label, path, r["job"]))
     pending = [(l, p, j) for l, p, j in doc_jobs if not review_is_current(p)[0]]
 
     with c_docs:
-        st.metric("対象ドキュメント", f"{len(doc_jobs)} ({len(targets)} jobs)")
+        st.metric("対象ドキュメント", f"{len(doc_jobs)} ({len(targets)} jobs)",
+                  help=f"ロック済み {locked_docs} 件を除外" if locked_docs else None)
     with c_pending:
         st.metric("要レビュー (未変更はスキップ)", f"{len(pending)}")
 
@@ -1533,9 +1666,38 @@ with tab_pdf:
              or search_query.lower() in r["company"].lower()
              or search_query.lower() in r["title"].lower())
     ]
-    st.metric("Showing", f"{len(filtered)} jobs")
+    # Every row mounts four PDF widgets, so the whole filtered list cannot be
+    # rendered at once — 300+ jobs means thousands of widgets. Paginate instead
+    # of truncating: a hard [:100] slice hid every job below rank 100 while the
+    # metric still counted them, so a CV that existed on disk looked missing.
+    PAGE_SIZE = 100
+    total = len(filtered)
+    pages = max(1, -(-total // PAGE_SIZE))
 
-    for r in filtered[:100]:
+    st.session_state.setdefault("pdf_page", 1)
+    # Tightening a filter can strand the selected page past the end of the new
+    # list — clamp before the widget reads it, or the page renders empty.
+    if st.session_state["pdf_page"] > pages:
+        st.session_state["pdf_page"] = pages
+
+    col_m, col_p = st.columns([1, 2])
+    with col_m:
+        st.metric("Matching", f"{total} jobs")
+    with col_p:
+        if pages > 1:
+            st.selectbox(
+                "Page",
+                list(range(1, pages + 1)),
+                key="pdf_page",
+                format_func=lambda p: (
+                    f"{(p - 1) * PAGE_SIZE + 1}–{min(p * PAGE_SIZE, total)} of {total}"
+                ),
+            )
+
+    start = (st.session_state["pdf_page"] - 1) * PAGE_SIZE
+    page_rows = filtered[start:start + PAGE_SIZE]
+
+    for r in page_rows:
         c_score, c_job, c_cv, c_cl = st.columns([1, 4, 2, 2])
         with c_score:
             st.markdown(f"{_tier_icon(r['tier'])} `{r['score']*100:.0f}%`")
@@ -1546,8 +1708,12 @@ with tab_pdf:
         with c_cl:
             pdf_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", f"pdf_{r['url']}")
         st.divider()
-    if len(filtered) > 100:
-        st.caption(f"…and {len(filtered)-100} more — raise Min score or search to narrow down.")
+
+    if pages > 1:
+        st.caption(
+            f"Showing {start + 1}–{start + len(page_rows)} of {total}. "
+            "Use the Page selector, or search to narrow down."
+        )
 
 
 # ═════════════════════════════════════════════════════════
@@ -1592,8 +1758,77 @@ with tab_watched:
     # Two-stage pipeline state for the URL-list flow:
     #   saved_stage    — which step saved_proc is currently running ("scrape"/"analyze")
     #   saved_chain    — True when the scrape should auto-continue into --from-saved analysis
+    #   saved_log_path — file the subprocess writes to (PIPE would block on drain pause)
     st.session_state.setdefault("saved_stage", None)
     st.session_state.setdefault("saved_chain", False)
+    st.session_state.setdefault("saved_log_path", None)
+    st.session_state.setdefault("saved_log_fh", None)
+
+    def _new_chain_log(stage: str):
+        """Open a fresh log file for this stage and return (fh, path)."""
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _path = OUTPUT_DIR / f"_saved_chain_{stage}_{_ts}.log"
+        _fh = open(_path, "w", encoding="utf-8")
+        return _fh, _path
+
+    def _saved_tail(n=200):
+        """Read up to n lines from the tail of the current log file."""
+        _p = st.session_state.get("saved_log_path")
+        if not _p or not Path(_p).exists():
+            return []
+        try:
+            with open(_p, "r", encoding="utf-8") as _f:
+                return _f.read().splitlines()[-n:]
+        except OSError:
+            return []
+
+    def _close_saved_log():
+        _fh = st.session_state.pop("saved_log_fh", None)
+        if _fh:
+            try: _fh.close()
+            except Exception: pass
+
+    # Where a running chain records itself. session_state does not survive a
+    # Streamlit auto-reload, so without this a reload mid-run shows an idle
+    # button while the work is still going — and a second press would start a
+    # rival scrape that only finds the lock.
+    _CHAIN_STATE = OUTPUT_DIR / ".saved_chain_state.json"
+
+    def _write_chain_state(pid: int, log_path, stage: str):
+        try:
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            _CHAIN_STATE.write_text(json.dumps(
+                {"pid": pid, "log": str(log_path), "stage": stage}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _clear_chain_state():
+        try:
+            _CHAIN_STATE.unlink()
+        except OSError:
+            pass
+
+    def _adopt_running_chain():
+        """Re-attach to a chain this session did not launch, if one is alive."""
+        if st.session_state.get("saved_proc") is not None:
+            return
+        try:
+            state = json.loads(_CHAIN_STATE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        pid = state.get("pid")
+        try:
+            os.kill(int(pid), 0)  # signal 0 asks "does this exist", kills nothing
+        except (OSError, TypeError, ValueError):
+            _clear_chain_state()
+            return
+        st.session_state.saved_proc = _AdoptedProcess(int(pid))
+        st.session_state.saved_stage = state.get("stage") or "chain"
+        st.session_state.saved_log_path = state.get("log")
+        st.session_state.saved_chain = False
+
+    _adopt_running_chain()
 
     # ════════════════════════════════════════
     # Section B: URL List Scraper
@@ -1632,16 +1867,44 @@ with tab_watched:
     scrape_running = st.session_state.saved_proc is not None and st.session_state.saved_proc.poll() is None
 
     def _start_scrape(chain: bool):
-        """Launch scraper_url_list.py. If chain=True, auto-run run.py --from-saved
-        once the scrape exits cleanly (see the reporting block below)."""
+        """Launch the whole chain as ONE detached process.
+
+        stdout goes to a log file, not a PIPE — a PIPE blocks the subprocess
+        the moment the browser leaves the page and the Streamlit drain loop
+        stops reading (observed 2026-08-06: anon_pipe_write wchan for 37 min).
+
+        Two further reasons this is one process in its own session:
+
+        Both stages live in run_saved_chain.py, so the analysis no longer waits
+        on Streamlit to notice the scrape exited and start it. That handoff ran
+        inside the rerun loop, which does not survive an auto-reload — editing
+        any watched module restarts the script and the pending chain is
+        forgotten. On 2026-08-12 that lost the enrichment of 1,004 postings at
+        item 100, silently, with the scrape already banked.
+
+        start_new_session detaches it from Streamlit's process group, so a
+        SIGHUP or SIGTERM aimed at the server — a reload, a closed terminal —
+        does not travel to the work.
+        """
+        _close_saved_log()
+        _fh, _path = _new_chain_log("chain")
+        cmd = [sys.executable, "-u", "run_saved_chain.py"]
+        if not chain:
+            cmd.append("--scrape-only")
         st.session_state.saved_proc = subprocess.Popen(
-            [sys.executable, "-u", "scraper_url_list.py"], cwd=str(SCRAPER_DIR),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            cmd, cwd=str(SCRAPER_DIR),
+            stdout=_fh, stderr=subprocess.STDOUT, text=True,
+            start_new_session=True,
         )
-        st.session_state.saved_stage = "scrape"
-        st.session_state.saved_chain = chain
+        st.session_state.saved_stage = "chain" if chain else "scrape"
+        st.session_state.saved_chain = False  # the child owns the sequencing now
         st.session_state.saved_running = True
-        st.session_state.saved_proc_output = []  # Clear previous log
+        st.session_state.saved_log_fh = _fh
+        st.session_state.saved_log_path = str(_path)
+        # So a reload can find a run it did not start. session_state is gone by
+        # then; this file is not.
+        _write_chain_state(st.session_state.saved_proc.pid, _path,
+                           "chain" if chain else "scrape")
         st.rerun()
 
     with col_b1:
@@ -1655,10 +1918,13 @@ with tab_watched:
                               "`URL List Match Table` まで反映します。"):
                 _start_scrape(chain=True)
         else:
-            _label = "⏹ Stop 解析" if st.session_state.saved_stage == "analyze" else "⏹ Stop Scrape"
+            _label = ("⏹ Stop 一気通貫" if st.session_state.saved_stage == "chain"
+                      else "⏹ Stop Scrape")
             if st.button(_label, type="secondary", key="stop_saved", disabled=not scrape_running):
-                st.session_state.saved_chain = False  # cancel any pending chain step
+                st.session_state.saved_chain = False
                 _kill_process("saved_proc")
+                _close_saved_log()
+                _clear_chain_state()
                 st.rerun()
 
     with col_b3:
@@ -1666,68 +1932,45 @@ with tab_watched:
         if st.session_state.saved_proc is not None:
             proc = st.session_state.saved_proc
             _stage = st.session_state.saved_stage or "scrape"
-            _step_name = "解析 (run.py --from-saved)" if _stage == "analyze" else "Scrape"
-            # Drain available output lines (non-blocking)
-            try:
-                while True:
-                    line = proc.stdout.readline()
-                    if not line:
-                        break
-                    st.session_state.saved_proc_output.append(line.rstrip())
-            except Exception:
-                pass
+            _step_name = ("Scrape → 解析 一気通貫" if _stage == "chain"
+                          else "解析 (run.py --from-saved)" if _stage == "analyze"
+                          else "Scrape")
+            # Tail the log file — PIPE would block the subprocess if the
+            # browser drain paused, but the file keeps growing regardless.
+            _tail = _saved_tail(200)
 
             st.info(f"{_step_name} running (PID {proc.pid})" if proc.poll() is None
                     else f"{_step_name} finished (exit code {proc.returncode})")
 
-            if st.session_state.saved_proc_output:
+            if _tail:
                 with st.expander(f"{_step_name} Output", expanded=True):
-                    st.code("\n".join(st.session_state.saved_proc_output[-100:]))
+                    st.code("\n".join(_tail[-100:]))
 
             if proc.poll() is None:
                 import time
                 time.sleep(2)
                 st.rerun()
-            elif _stage == "scrape":
+            else:
+                # One process now owns both stages (run_saved_chain.py), so
+                # there is no handoff to perform here — only a verdict to show.
+                # An adopted run always reports 0, since an exit code cannot be
+                # read from outside the process that waited on it; the log
+                # above carries what actually happened.
                 if proc.returncode == 0:
-                    st.success("✅ Scrape 完了")
-                    if st.session_state.saved_chain:
-                        # Auto-continue into analysis. The scrape process has
-                        # exited, so its file lock is released and run.py can
-                        # acquire it (both use the "url_list_jobs" lock).
-                        st.info("→ 続けて解析を実行します…")
-                        st.session_state.saved_proc = subprocess.Popen(
-                            [sys.executable, "-u", "run.py", "--from-saved"],
-                            cwd=str(SCRAPER_DIR),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                        )
-                        st.session_state.saved_stage = "analyze"
-                        st.session_state.saved_chain = False
-                        st.session_state.saved_proc_output = []
-                        st.rerun()
-                    else:
+                    if _stage == "scrape":
+                        st.success("✅ Scrape 完了")
                         st.info("次: 🎯 **Match Analysis** タブで解析すると "
                                 "`URL List Match Table` に反映されます。")
-                        st.session_state.saved_proc = None
-                        st.session_state.saved_stage = None
+                    else:
+                        st.success("✅ 一気通貫 完了 — `URL List Match Table` に反映されました。"
+                                   "（Obsidian でテーブルを開き直すと最新化されます）")
                 elif proc.returncode == 2:
-                    st.error("⚠ Scrape skipped: another process is using url_list_jobs.json "
-                             "(a Match Analysis run holds the lock). Wait for it to finish, then retry.")
-                    st.session_state.saved_proc = None
-                    st.session_state.saved_stage = None
+                    st.error("⚠ skipped: another process holds the url_list_jobs lock. "
+                             "Wait for it to finish, then retry.")
                 else:
-                    st.error(f"❌ Scrape failed (exit code {proc.returncode}). See output above.")
-                    st.session_state.saved_proc = None
-                    st.session_state.saved_stage = None
-            else:  # _stage == "analyze"
-                if proc.returncode == 0:
-                    st.success("✅ 一気通貫 完了 — `URL List Match Table` に反映されました。"
-                               "（Obsidian でテーブルを開き直すと最新化されます）")
-                elif proc.returncode == 2:
-                    st.error("⚠ 解析 skipped: another process holds the url_list_jobs lock. "
-                             "Wait for it to finish, then run 🎯 Match Analysis.")
-                else:
-                    st.error(f"❌ 解析 failed (exit code {proc.returncode}). See output above.")
+                    st.error(f"❌ failed (exit code {proc.returncode}). See output above.")
+                _close_saved_log()
+                _clear_chain_state()
                 st.session_state.saved_proc = None
                 st.session_state.saved_stage = None
         else:
