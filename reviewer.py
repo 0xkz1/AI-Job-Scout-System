@@ -567,6 +567,29 @@ def _mark_unusable_bridge_suggestions(body: str) -> str:
                   _defuse, body, flags=re.DOTALL)
 
 
+def _review_is_unusable(body: str, doc_kind: str) -> str | None:
+    """Why this reply cannot be stored as a review, or None if it can.
+
+    The provider chain fell through on exceptions only, so a model that
+    answered 200 with an empty or off-format body ended the search. Weaker
+    models do exactly that under a 62k-character prompt: they reply, briefly,
+    with nothing the format asks for. The result is indistinguishable from a
+    clean review once written — same `submission_score: null`, same
+    `fact_block: false` — so it reads as "reviewed, nothing found" forever.
+
+    Checks the shape the prompt asks for, not the content: at least one of the
+    three finding headings, and for a CV the YAML rubric the score comes from.
+    """
+    text = (body or "").strip()
+    if len(text) < 200:
+        return f"body is {len(text)} chars"
+    if not re.search(r"###?\s*(❗|🎯|✍️)", text):
+        return "no finding sections"
+    if doc_kind == "CV" and not re.search(r"```yaml\s*\n.*?rubric", text, re.DOTALL):
+        return "no rubric block"
+    return None
+
+
 def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
     """Review a CV or CL markdown against its job. Returns the review file path.
 
@@ -602,7 +625,7 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
     errors: list[str] = []
     for prov, model in _review_chain():
         try:
-            review_body = call_llm(
+            candidate = call_llm(
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=system_prompt,
                 temperature=0.2,
@@ -611,11 +634,26 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
                 model=model,
                 use_fallbacks=False,
             )
-            used_model = f"{prov}/{model}"
-            break
         except Exception as e:  # missing key, rate limit, bad model id, timeout
             errors.append(f"{prov}:{model}: {e}")
             continue
+        unusable = _review_is_unusable(candidate, doc_kind)
+        if unusable:
+            # Returning 200 with nothing in it is the failure mode a try/except
+            # cannot see, and it is not hypothetical: 28 CL and 3 CV reviews
+            # were written on 2026-08-12 carrying only frontmatter and "未算出".
+            # The local fallback answered every one of them — it is the only
+            # entry in the chain that accepts a 62k-character prompt, so once
+            # mistral and zai are rate-limited every review lands there, and it
+            # does not follow the output format. A review that says nothing is
+            # worse than no review: nothing distinguishes it in frontmatter
+            # from a clean one, so it reads as "checked, no findings".
+            errors.append(f"{prov}:{model}: {unusable}")
+            print(f"  ⚠ {prov} returned an unusable review ({unusable}); trying next")
+            continue
+        review_body = candidate
+        used_model = f"{prov}/{model}"
+        break
     if review_body is None:
         raise RuntimeError("All review providers failed — " + "; ".join(errors))
 
