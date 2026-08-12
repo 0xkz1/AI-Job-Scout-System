@@ -102,3 +102,32 @@ def test_analyze_match_stores_context_provider(monkeypatch):
     }
     out = matcher.analyze_match(job, {"min_salary_gbp": 26000}, skip_summary=True)
     assert out["context_provider"] == "ollama"
+
+
+def test_unquoted_prose_value_is_repaired():
+    """The two-axis prompt asks for four fields and the model returns the long
+    free-text one bare often enough to matter: `"reasoning_en": The candidate's
+    ethos aligns...`. json.loads(strict=False) does not save it — an unquoted
+    value is a syntax error, not a control-character one — so the whole reply
+    was dropped and _ollama_context_score returned None. brief=True is the mode
+    llm_context_backfill runs nightly, so every new posting lost its score."""
+    import json
+    from matcher import _repair_json
+
+    blob = ('{\n "ethos": 92,\n "role_fit": 88,\n'
+            ' "role_requirement": "3D web viewers",\n'
+            ' "reasoning_en": The "systems" ethos aligns, valuing flexibility.\n}')
+
+    data = json.loads(_repair_json(blob), strict=False)
+
+    assert data["role_fit"] == 88
+    assert data["reasoning_en"].startswith("The 'systems' ethos")
+
+
+def test_valid_json_is_left_alone():
+    import json
+    from matcher import _repair_json
+
+    blob = '{"ethos": 50, "role_fit": 40, "reasoning_en": "already quoted"}'
+
+    assert json.loads(_repair_json(blob))["reasoning_en"] == "already quoted"

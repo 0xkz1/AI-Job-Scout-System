@@ -1390,6 +1390,35 @@ Respond ONLY with JSON:
         return None
 
 
+_UNQUOTED_VALUE = _re_framing.compile(
+    r'("(?:reasoning_en|reasoning_ja|role_requirement)"\s*:\s*)(?!["\d\[{])([^\n]+?)(,?)\s*\n',
+)
+
+
+def _repair_json(blob: str) -> str:
+    """Put quotes back on a prose value the model left bare.
+
+    The brief prompt asks for four fields and gets three of them right; the
+    long free-text one comes back as `"reasoning_en": The candidate's ethos
+    aligns...` often enough to matter. json.loads(strict=False) does not help —
+    an unquoted value is a syntax error, not a control-character one — so the
+    whole reply was discarded and _ollama_context_score returned None. That is
+    the mode the nightly backfill runs in, so new postings were silently
+    losing their context score entirely.
+
+    Only the known prose keys are touched, and only when the value does not
+    already open with a quote, digit, or bracket.
+    """
+    def _fix(m: _re_framing.Match) -> str:
+        value = m.group(2).rstrip().rstrip(',')
+        # Backslashes and inner quotes would just move the syntax error along,
+        # and neither carries meaning in a sentence of prose.
+        value = value.replace("\\", "").replace('"', "'")[:1500]
+        return f'{m.group(1)}"{value}"{m.group(3)}\n'
+
+    return _UNQUOTED_VALUE.sub(_fix, blob)
+
+
 def _ollama_context_score(job_description: str, persona_summary: str,
                           brief: bool = False, _retries_left: int = 1) -> dict | None:
     """
@@ -1459,14 +1488,20 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
                 "Never call them local-first, never treat a cloud/enterprise stack as a values mismatch."
             ),
             temperature=0.1,
-            max_tokens=300 if brief else 700,  # short reasoning → small budget → fast
+            # 300 was sized for a reply carrying one score and a sentence. The
+            # two-axis prompt adds role_fit and role_requirement, and at 300 the
+            # JSON is cut mid-string — the parser finds no closing brace and the
+            # whole call returns None. brief=True is the mode the nightly runs
+            # (llm_context_backfill), so every new posting silently lost its
+            # context score. Measured: 300 truncates, 500 completes.
+            max_tokens=600 if brief else 900,
         )
 
         import json, re
         matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
         for match in reversed(matches):
             try:
-                data = json.loads(match.group(), strict=False)
+                data = json.loads(_repair_json(match.group()), strict=False)
                 # role_fit IS the score. Both axes are asked for and only one is
                 # used, which looks wasteful and is the whole mechanism: asked
                 # for ethos alone the model rated an n8n Billing Specialist 92,
