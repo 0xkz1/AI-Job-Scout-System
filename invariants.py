@@ -422,10 +422,12 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
     enough NEW postings appear. reed ran at depth 10 (~1386s of the 1500s cap) until
     the multi-country expansion, then timed out.
     """
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
 
-    searches = max(1, len(config.get("keywords") or [1])) * max(
-        1, len(config.get("locations") or [1]))
+    # search_pairs, not keywords x locations: `keyword_locations` narrows some
+    # keywords to a subset of the locations, and counting the full cross product
+    # would bill the run for searches no scraper walks.
+    searches = max(1, len(search_pairs(config)))
     out = []
     for site in (config.get("sites") or []):
         if site == "remote_apis":  # API path, no page walking
@@ -481,7 +483,7 @@ def check_every_site_still_yields(config: dict) -> list[str]:
     # Sources a site records its jobs under, where they differ from the site name.
     # remote_apis fans out to three boards and tags each with its own name, so
     # looking for source == "remote_apis" finds nothing however well it is working.
-    aliases = {"remote_apis": ("remotive", "remoteok", "arbeitnow")}
+    aliases = {"remote_apis": ("remotive", "arbeitnow")}
     for site, names in aliases.items():
         newest = max((latest[n] for n in names if n in latest), default=None)
         if newest:

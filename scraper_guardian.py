@@ -265,20 +265,18 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
     seen = set()
     cache = load_description_cache()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("guardian", config)
 
     async with async_playwright() as p:
-        for kw in keywords:
-            for loc in locations:
-                jobs = await scrape_guardian(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
-                for j in jobs:
-                    dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
-                    if dedup_key not in seen:
-                        seen.add(dedup_key)
-                        all_jobs.append(j)
+        for kw, loc in search_pairs(config):
+            jobs = await scrape_guardian(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
+            for j in jobs:
+                dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    all_jobs.append(j)
 
     # --- Filter by keywords ---
     from scraper_indeed import filter_jobs_by_keywords

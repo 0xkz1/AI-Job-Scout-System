@@ -395,20 +395,18 @@ async def scrape_linkedin_all(config: dict) -> list[dict]:
     all_jobs = []
     seen = set()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("linkedin", config)
     headless = config.get("cookie_config", {}).get("headless", True)
 
-    for kw in keywords:
-        for loc in locations:
-            jobs = await scrape_linkedin(kw, loc, max_pages=max_pages, headless=headless, config=config)
-            for j in jobs:
-                dedup_key = (j["title"], j["company"], j["location"])
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    all_jobs.append(j)
+    for kw, loc in search_pairs(config):
+        jobs = await scrape_linkedin(kw, loc, max_pages=max_pages, headless=headless, config=config)
+        for j in jobs:
+            dedup_key = (j["title"], j["company"], j["location"])
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                all_jobs.append(j)
 
     return all_jobs
 

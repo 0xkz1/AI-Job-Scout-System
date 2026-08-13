@@ -7,7 +7,6 @@ Belgium) because a Swedish/Swiss company hiring remote-EMEA lists here anyway.
 
 Sources:
   - Remotive   (https://remotive.com/api/remote-jobs)   — has ?search=, remote-only
-  - RemoteOK   (https://remoteok.com/api)                — all remote, client filter
   - Arbeitnow  (https://www.arbeitnow.com/api/job-board-api) — DE/EU, remote + on-site
 
 All are inherently remote (except some Arbeitnow rows), so remote listings get a
@@ -83,38 +82,6 @@ def scrape_remotive(keyword: str, limit: int = 50) -> list[dict]:
     except Exception as e:
         print(f"  ⚠ Remotive '{keyword}' error: {e}")
     print(f"  ✓ Remotive: {len(jobs)} jobs for '{keyword}'")
-    return jobs
-
-
-# ── RemoteOK (single feed, client-side keyword filter) ────────────────────
-def scrape_remoteok(keywords: list[str]) -> list[dict]:
-    jobs = []
-    try:
-        r = requests.get("https://remoteok.com/api", headers=_UA, timeout=25)
-        if r.status_code != 200:
-            print(f"  ⚠ RemoteOK: HTTP {r.status_code}")
-            return []
-        data = r.json()
-    except Exception as e:
-        print(f"  ⚠ RemoteOK error: {e}")
-        return []
-    for it in data:
-        if not isinstance(it, dict) or it.get("legal"):
-            continue  # first element is API metadata
-        title = it.get("position") or it.get("title") or ""
-        tags = " ".join(it.get("tags", []) or [])
-        if not _matches_keywords(f"{title} {tags}", keywords):
-            continue
-        jobs.append(_job(
-            title,
-            it.get("company"),
-            it.get("location") or "Worldwide",
-            "",
-            it.get("description"),
-            it.get("url") or (f"https://remoteok.com/l/{it.get('id')}" if it.get("id") else ""),
-            "remoteok",
-        ))
-    print(f"  ✓ RemoteOK: {len(jobs)} keyword-matched jobs")
     return jobs
 
 
@@ -245,7 +212,6 @@ def scrape_remote_apis_all(config: dict) -> list[dict]:
     for kw in keywords:
         _add(scrape_remotive(kw))
         time.sleep(0.3)
-    _add(scrape_remoteok(keywords))
     # No page cap from config: Arbeitnow has no server-side search, so a partial
     # walk is a partial view of the board rather than a shallower one. The old
     # min(max_pages_per_search, 5) examined ~300 of 895 jobs and found 3 matches

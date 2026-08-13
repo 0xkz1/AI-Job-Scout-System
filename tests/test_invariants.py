@@ -314,7 +314,7 @@ def test_site_with_no_jobs_yet_is_reported_without_asserting_a_fault(monkeypatch
 
 
 def test_site_reporting_under_alias_sources_counts_as_yielding(monkeypatch, tmp_path):
-    """remote_apis tags jobs 'remotive'/'remoteok'/'arbeitnow', so matching on the
+    """remote_apis tags jobs 'remotive'/'arbeitnow', so matching on the
     site name alone would call a working scraper silent."""
     from datetime import date
 

@@ -577,13 +577,12 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     all_jobs = []
     seen = set()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("indeed", config)
     cache = load_description_cache()
 
-    searches = [(kw, loc) for kw in keywords for loc in locations]
+    searches = search_pairs(config)
     failures = []
     # Circuit breaker on the retries. Retrying every search costs up to
     # 36 x 2 x 45s = 54 minutes of sleeping, which on a night where Cloudflare
