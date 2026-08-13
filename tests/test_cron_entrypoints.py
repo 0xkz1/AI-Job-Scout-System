@@ -85,11 +85,37 @@ def test_the_scraper_still_tells_the_operator_to_use_xvfb():
     ("scraper_url_list.py", "pasted job links are never ingested"),
     ("scraper_saved.py", "manually saved jobs are never ingested"),
     ("run.py", "nothing is scraped, analysed or matched"),
-    ("nightly_scout.py", "nothing is ever reviewed — run.py does not review"),
+    ("nightly_scout.py", "new arrivals are never reviewed — run.py does not review"),
+    ("rereview_top.py", "the un-reviewed backlog is never swept, only new arrivals"),
 ])
 def test_the_nightly_runs_every_stage(script, reason):
     text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
     assert script in text, f"run_cron.sh omits {script}: {reason}"
+
+
+def test_the_backfill_does_not_rewrite_reviews_it_already_has():
+    """rereview_top.py overwrites existing reviews by default — correct when the
+    reviewer's logic has changed, ruinous as a nightly habit, since it would pay
+    for every review in the selection every single night."""
+    commands = _commands(ROOT / "run_cron.sh")
+    assert "rereview_top.py --new-only" in commands, (
+        "the nightly backfill must pass --new-only or it re-reviews the whole "
+        "selection every night"
+    )
+
+
+def test_every_stage_counts_towards_the_exit_code():
+    """The summary loop and the exit-code loop are separate lists, so a stage
+    added to one and not the other is silently excluded from the verdict."""
+    commands = _commands(ROOT / "run_cron.sh")
+    declared = set(re.findall(r"^stage\s+(\w+)\s", commands, re.M))
+    assert declared, "no stages found"
+    for names in re.findall(r"for k in ([\w\s]+); do", commands):
+        listed = set(names.split())
+        assert listed == declared, (
+            f"stage list {sorted(listed)} does not match the stages actually "
+            f"run, {sorted(declared)}"
+        )
 
 
 def _commands(script: Path) -> str:

@@ -71,15 +71,34 @@ stage() {
 
 # Order matters. url-list and saved-jobs write into 00_saved/ staging; run.py
 # ingests that staging as part of its own merge, so both must land before it.
-# nightly_scout reviews what run.py ranked, so it must come after.
+# Both review stages read what run.py ranked, so they come after.
 stage url_list  20m "${RUNNER[@]}" "${PYTHON}" scraper_url_list.py
 stage saved     20m "${RUNNER[@]}" "${PYTHON}" scraper_saved.py
 stage pipeline   6h "${RUNNER[@]}" "${PYTHON}" -u run.py
-stage review     4h "${PYTHON}" -u nightly_scout.py
+
+# Two review stages, because they answer different questions and neither covers
+# the other.
+#
+# nightly_scout is a DIFF: it compares against _nightly_state.json and reviews
+# only what is new since last time, then prints the Telegram summary. That is
+# what makes it a good notifier and a bad backfiller — run it twice in one
+# evening and the second run finds nothing, because the first updated the state.
+# It is not that it failed; it is that "new" is all it was ever asked for.
+#
+# backfill is the sweep: every document in the review selection that has no
+# review file yet. --new-only is what keeps it affordable — rereview_top.py
+# overwrites existing reviews by default, which is right when the reviewer's
+# logic changed and ruinous as a nightly habit.
+#
+# Without the sweep the backlog only grows: 237 jobs held a generated CV and no
+# review, including ones sitting in the top 10% of the pool, because every
+# arrival after their own night was someone else's "new".
+stage review    4h "${PYTHON}" -u nightly_scout.py
+stage backfill  4h "${PYTHON}" -u rereview_top.py --new-only
 
 echo ""
 echo "──────── summary ────────"
-for k in url_list saved pipeline review; do
+for k in url_list saved pipeline review backfill; do
     printf '  %-10s %s\n' "$k" "${STATUS[$k]:-skipped}"
 done
 echo "  00_matches:       $(find 10_output/00_matches -name '*.md' 2>/dev/null | wc -l) reports"
@@ -90,7 +109,9 @@ echo "  log:              ${LOG}"
 
 # Non-zero only if every stage failed — a partial night is still a useful night,
 # and a red cron line for one flaky site trains the reader to ignore red lines.
-for k in url_list saved pipeline review; do
+# Keep this list in step with the stages above; it silently under-reports if a
+# stage is added and not listed here.
+for k in url_list saved pipeline review backfill; do
     [ "${STATUS[$k]:-}" = "ok" ] && exit 0
 done
 exit 1
