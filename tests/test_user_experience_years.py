@@ -56,6 +56,32 @@ def test_a_span_is_measured_to_the_current_year(profile):
     assert exp["years_python"] == datetime.datetime.now().year - 2019 + 1
 
 
+def test_a_stated_effective_figure_beats_the_span(profile):
+    """A span says when something started, not that it ran without a break.
+    Python began in 2019 and amounts to about 5 years, not 8."""
+    exp = profile("## Skills Acquisition Timeline\n\n"
+                  "- **Python:** 2019–present, intermittent — roughly 5 years effective\n")
+    assert exp["years_python"] == 5
+
+
+def test_an_intermittent_line_with_no_figure_contributes_nothing(profile):
+    """The line has declared its own span unreliable and offered no replacement,
+    so there is no honest number to take. Reading the span anyway is what let
+    "Photography: 2020-present, intermittent" claim 7 years and, through max(),
+    override a stated 3 for the same skill group."""
+    exp = profile("## Skills Acquisition Timeline\n\n"
+                  "- **Digital Art/3D:** 2020–present, intermittent — roughly 3 years effective\n"
+                  "- **Photography:** 2020–present, intermittent (architectural)\n")
+    assert exp["years_creative"] == 3
+
+
+def test_a_plain_span_still_counts_when_nothing_disputes_it(profile):
+    """Only "intermittent" suppresses the span. A line that just states dates is
+    taken at face value."""
+    exp = profile("## Skills Acquisition Timeline\n\n- **AI/ML:** 2022–2024 (ComfyUI)\n")
+    assert exp["years_ai"] == 3
+
+
 def test_a_closed_span_ends_where_it_says(profile):
     exp = profile("## Skills Acquisition Timeline\n\n- **Python:** 2019–2023 (contract work)\n")
     assert exp["years_python"] == 5

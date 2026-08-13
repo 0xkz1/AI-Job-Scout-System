@@ -124,6 +124,15 @@ _TIMELINE_SPAN = re.compile(
     re.IGNORECASE,
 )
 
+# "roughly 5 years effective". A span says when something started, not that it
+# ran without a break, and this practice was intermittent — Python began in 2019
+# and amounts to about 5 years, not 8. Where a line states the effective figure
+# it wins outright, because the span cannot know about the gaps.
+_TIMELINE_EFFECTIVE = re.compile(
+    r"(?:roughly|about|approximately|around|~)?\s*(?P<years>\d{1,2})\s*years?\s+effective",
+    re.IGNORECASE,
+)
+
 # The document's own qualification of its own spans: "roughly 4 years of paid
 # work between Jul 2019 and Jul 2023".
 _PAID_WORK = re.compile(
@@ -193,13 +202,27 @@ def load_user_experience() -> dict[str, Any]:
     if section:
         for line in section.group(1).splitlines():
             label = re.match(r"\s*-\s*\*\*(?P<label>[^*]+)\*\*", line)
-            span = _TIMELINE_SPAN.search(line)
-            if not (label and span):
+            if not label:
                 continue
+            stated = _TIMELINE_EFFECTIVE.search(line)
+            if stated:
+                years = int(stated.group("years"))
+            elif "intermittent" in line.lower():
+                # The line has declared its own span unreliable and given no
+                # figure to replace it, so there is no honest number here.
+                # Falling through to the span would do exactly what the word
+                # warns against: "Photography: 2020-present, intermittent" read
+                # as a span claims 7 years and, through max(), was overriding a
+                # stated 3 for the same skill group.
+                continue
+            else:
+                span = _TIMELINE_SPAN.search(line)
+                if not span:
+                    continue
+                end_raw = span.group("end").lower()
+                end = current_year if end_raw == "present" else int(end_raw)
+                years = max(1, end - int(span.group("start")) + 1)
             words = label.group("label").lower()
-            end_raw = span.group("end").lower()
-            end = current_year if end_raw == "present" else int(end_raw)
-            years = max(1, end - int(span.group("start")) + 1)
             for key, needles in _TIMELINE_SKILL_WORDS.items():
                 if any(n in words for n in needles):
                     exp[key] = max(exp.get(key, 0), years)
