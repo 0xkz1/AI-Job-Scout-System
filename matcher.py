@@ -107,18 +107,68 @@ def load_user_skills() -> dict[str, list[str]]:
     return skills
 
 
+# Which words in a timeline label name which skill. A label can name several
+# ("Python/Linux/Automation"), so each is matched against the label's own words.
+_TIMELINE_SKILL_WORDS = {
+    "years_python": ("python",),
+    "years_linux": ("linux",),
+    "years_automation": ("automation",),
+    "years_creative": ("digital art", "3d", "photography", "design"),
+    "years_web": ("web dev", "web development"),
+    "years_ai": ("ai/ml", "ai / ml", "machine learning"),
+}
+
+# "2019-present", "2019 – present", "2019 to present", and closed "2019-2023".
+_TIMELINE_SPAN = re.compile(
+    r"(?P<start>(?:19|20)\d{2})\s*(?:[-–—]|to)\s*(?P<end>present|(?:19|20)\d{2})",
+    re.IGNORECASE,
+)
+
+# The document's own qualification of its own spans: "roughly 4 years of paid
+# work between Jul 2019 and Jul 2023".
+_PAID_WORK = re.compile(
+    r"(?:roughly|about|approximately|around|~)?\s*(?P<years>\d{1,2})\s*years?\s+of\s+paid\s+work",
+    re.IGNORECASE,
+)
+
+
 def load_user_experience() -> dict[str, Any]:
-    """
-    Extract key experience facts from about.md using robust regex.
+    """Experience facts, read from timeline.md's explicit list.
+
+    It used to read about.md, keyed on the literal string "Feral", inferring
+    Python/Linux/automation years from a creative project's date range — its own
+    comment ended in a question mark. Rewording a heading zeroed it: about.md's
+    `### "Feral" — Narrative World Development (2023 – Present)` became
+    `### TAIFUNOME — Independent Studio (2023 – Present)` with Feral demoted to
+    a bullet, and since the regex's `.` does not cross newlines, nothing
+    matched. years_python, years_linux and years_automation all became 0 and
+    user_estimated_years halved from 4 to 2, silently, on a prose edit.
+
+    timeline.md states the same facts outright under "Skills Acquisition
+    Timeline" and always did. Reading that is both accurate and robust: the
+    spans are labelled, so a reworded sentence elsewhere cannot silently zero
+    them.
+
+    Two different numbers come out of it, and conflating them is what would
+    overstate the CV:
+
+    - `years_*` are calendar spans — how long this person has been doing the
+      thing at all. Python since 2019 is 8.
+    - `years_professional` is what an employer means by "N+ years experience".
+      timeline.md qualifies its own span: "worked in stretches rather than
+      continuously — roughly 4 years of paid work between Jul 2019 and Jul
+      2023". When the profile says that, it is the honest answer and it is what
+      calculate_experience_match scores against.
     """
     import datetime
     current_year = datetime.datetime.now().year
 
-    exp = {
+    exp: dict[str, Any] = {
         "years_python": 0,
         "years_linux": 0,
         "years_creative": 0,
         "years_automation": 0,
+        "years_professional": 0,
         "location": "Edinburgh, UK",
         "work_eligibility": "UK eligible",
         "availability": "20-50 hours/week",
@@ -131,31 +181,32 @@ def load_user_experience() -> dict[str, Any]:
         ],
     }
 
-    if not ABOUT_FILE.exists():
+    timeline = USER_PROFILE_DIR / "timeline.md"
+    if not timeline.exists():
         return exp
+    content = timeline.read_text(encoding="utf-8")
 
-    content = ABOUT_FILE.read_text(encoding="utf-8")
+    section = re.search(
+        r"^##\s*Skills Acquisition Timeline\s*$(.*?)(?=^##\s|\Z)",
+        content, re.M | re.S,
+    )
+    if section:
+        for line in section.group(1).splitlines():
+            label = re.match(r"\s*-\s*\*\*(?P<label>[^*]+)\*\*", line)
+            span = _TIMELINE_SPAN.search(line)
+            if not (label and span):
+                continue
+            words = label.group("label").lower()
+            end_raw = span.group("end").lower()
+            end = current_year if end_raw == "present" else int(end_raw)
+            years = max(1, end - int(span.group("start")) + 1)
+            for key, needles in _TIMELINE_SKILL_WORDS.items():
+                if any(n in words for n in needles):
+                    exp[key] = max(exp.get(key, 0), years)
 
-    def extract_years(pattern: str) -> int:
-        # Matches 'YYYY' or 'YYYY – Present' using a more flexible middle section
-        match = re.search(rf"{pattern}.*?(\d{{4}})\s*[–\-]?\s*Present", content, re.IGNORECASE)
-        if match:
-            start_year = int(match.group(1))
-            return max(1, current_year - start_year + 1)
-        return 0
-
-    # Based on about.md content structure
-    # Feral: (2023 – Present) -> python/automation/linux context?
-    # Architectural Visualization: (2025 – Present) -> creative context
-    
-    if "Feral" in content:
-        yrs = extract_years("Feral")
-        exp["years_python"] = yrs
-        exp["years_automation"] = yrs
-        exp["years_linux"] = yrs
-
-    if "Architectural Visualization" in content:
-        exp["years_creative"] = extract_years("Architectural Visualization")
+    paid = _PAID_WORK.search(content)
+    if paid:
+        exp["years_professional"] = int(paid.group("years"))
 
     return exp
 
@@ -734,15 +785,20 @@ def calculate_experience_match(job_level: str, user_exp: dict) -> dict:
         "unknown": 2,
     }
 
-    # User experience: sum all relevant years
-    user_years = max(
+    # What a posting means by "N+ years" is paid work, not how long someone has
+    # owned the skill. timeline.md states both — spans since 2019, and "roughly
+    # 4 years of paid work between Jul 2019 and Jul 2023" — and scoring against
+    # the span would claim 8 years where the profile says 4. That is the same
+    # overstatement as listing a logo mark that is still a sketch.
+    #
+    # max() over the spans, not sum, when no paid-work figure is stated: the
+    # spans overlap, so adding them counts one year several times.
+    user_total = user_exp.get("years_professional", 0) or max(
         user_exp.get("years_python", 0),
         user_exp.get("years_linux", 0),
         user_exp.get("years_automation", 0),
         user_exp.get("years_creative", 0),
     )
-    # Use the max of specific skill years (prevent summing overlapping years)
-    user_total = user_years
 
     job_years = level_map.get(job_level, 2)
 
