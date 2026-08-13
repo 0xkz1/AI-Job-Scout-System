@@ -381,30 +381,53 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
     letter_dir = os.path.join(output_dir, "10_cover-letters")
     os.makedirs(letter_dir, exist_ok=True)
 
+    passed_jobs = [j for j in jobs if not j.get("_filter_reason")]
+
     cv_threshold = config.get("match_score_threshold", 0.50)
     # CV/CL generation is the expensive part (one LLM pass each), so it acts only
     # on the top generation_top_percent of the ranked pool — the same selection
     # every stage uses (selection.py), so generation and review stay in step.
     # A count cap still guards against a huge first run.
     from selection import select_top
-    eligible_ids: set[int] = {id(j) for j in select_top("generation", config, jobs=passed_jobs)}
+    selected = select_top("generation", config, jobs=passed_jobs)
+    eligible_ids: set[int] = {id(j) for j in selected}
     cv_limit = config.get("cv_generation_limit", 0)
     if cv_limit and len(eligible_ids) > cv_limit:
-        # Keep only the best cv_limit of the eligible set (already score-ranked).
-        capped = [j for j in select_top("generation", config, jobs=passed_jobs)][:cv_limit]
-        eligible_ids = {id(j) for j in capped}
+        # The cap counts what this run would WRITE, not where a job sits in the
+        # ranking. Slicing the ranked list at cv_limit instead made everything
+        # below that rank permanently unreachable: the top 150 are re-selected
+        # every night, almost all of them already have a CV, and the loop below
+        # only writes when the file is absent — so the run generated 10 CVs
+        # against a cap of 150 and handed the 140 unused slots back rather than
+        # to rank 151. "Synechron Graphic Designer" sat at rank 437 of 1,636,
+        # inside the top 30% and above threshold, and no number of runs would
+        # ever have reached it.
+        #
+        # Skipping jobs that already have a CV does not weaken the overwrite
+        # protection, because there is none to weaken: this path never
+        # regenerates an existing document (see `if not os.path.exists` below,
+        # and the docstring — manual edits are preserved). Regeneration is
+        # regen_top_docs.py's job, the same split as nightly_scout vs
+        # rereview_top on the review side.
+        pending = [j for j in selected
+                   if not os.path.exists(os.path.join(
+                       cv_dir,
+                       f"{make_safe_name(j.get('company', 'company'), j.get('title', 'job'))}_CV.md"))]
+        eligible_ids = {id(j) for j in pending[:cv_limit]}
 
     cv_generated = 0
     cv_skipped = 0
     letter_generated = 0
     letter_skipped = 0
     cv_over_limit = 0
+    cv_locked = 0
 
     seen_bases: set[str] = set()
-    for job in passed_jobs:
+    for job in jobs:
         match = job.get("match", {})
         if not match:
             continue
+        is_filtered = bool(job.get("_filter_reason"))
         base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
         # Distinct jobs can share company+title (dedupe keeps them separate when
         # descriptions differ) — disambiguate with a stable URL-hash suffix so
@@ -498,7 +521,11 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
             f.write(report)
 
     print(f"  📊 Saved {len(passed_jobs)} match reports to {match_dir}/")
-    limit_note = f", {cv_over_limit} outside top {cv_limit}" if cv_limit else ""
+    # "deferred", not "outside top N": the cap now counts documents this run
+    # would write, so these are jobs whose turn is a later run rather than jobs
+    # permanently below a rank line.
+    limit_note = f", {cv_over_limit} deferred past this run's cap of {cv_limit}" if cv_limit else ""
+    limit_note += f", {cv_locked} locked (applied/expired)" if cv_locked else ""
     print(f"  📄 Saved {cv_generated} tailored CVs to {cv_dir}/ (skipped {cv_skipped} below {cv_threshold:.0%} threshold or missing desc{limit_note})")
     print(f"  ✉️  Saved {letter_generated} cover letters to {letter_dir}/ (skipped {letter_skipped} below {cv_threshold:.0%} threshold or missing desc{limit_note})")
 
