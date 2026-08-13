@@ -74,3 +74,45 @@ def test_the_scraper_still_tells_the_operator_to_use_xvfb():
     text = (ROOT / "scraper_indeed.py").read_text(encoding="utf-8")
     assert "xvfb-run" in text
     assert "_headed_display_available" in text
+
+
+# The nightly is only a nightly if it runs every stage. Each of these was
+# missing at some point and the absence showed up as a quiet backlog rather than
+# an error: url-list.md unread for weeks, five of six sites never scraped, and
+# 237 jobs carrying a generated CV with no review because nothing invoked the
+# reviewer.
+@pytest.mark.parametrize("script,reason", [
+    ("scraper_url_list.py", "pasted job links are never ingested"),
+    ("scraper_saved.py", "manually saved jobs are never ingested"),
+    ("run.py", "nothing is scraped, analysed or matched"),
+    ("nightly_scout.py", "nothing is ever reviewed — run.py does not review"),
+])
+def test_the_nightly_runs_every_stage(script, reason):
+    text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
+    assert script in text, f"run_cron.sh omits {script}: {reason}"
+
+
+def _commands(script: Path) -> str:
+    """The script with comments stripped.
+
+    Asserting over raw text is what made this test fail on the comment
+    explaining the very flag it forbids. Behaviour lives in the commands.
+    """
+    return "\n".join(line for line in script.read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+def test_the_pipeline_stage_is_not_pinned_to_one_site():
+    """A single-site nightly meant LinkedIn, Reed, Adzuna, Guardian and the
+    remote APIs contributed nothing on the scheduled path."""
+    assert "--site" not in _commands(ROOT / "run_cron.sh"), (
+        "the nightly pins run.py to one site; with no --site it covers them all"
+    )
+
+
+def test_one_failing_stage_does_not_cancel_the_others():
+    """A flaky site must not cost the night its reviews. `set -e` would end the
+    run on the first non-zero exit."""
+    text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
+    assert "set -euo" not in text, "set -e aborts the nightly on the first stage that fails"
+    assert "timeout" in text, "a hung browser would otherwise eat the whole night"
