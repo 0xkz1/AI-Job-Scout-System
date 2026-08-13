@@ -1847,14 +1847,14 @@ def calculate_context_match(job_description: str) -> dict:
         else:
             reasons.append(f"Job language differs from personal brand style ({tier})")
 
-        # Normalize raw similarity to 0-1 range.
-        # TF-IDF cosine similarity between persona docs and short job
-        # metadata typically falls in 0.015-0.098 (measured on 507 jobs).
-        # A raw *2.5 multiplier only produced 4-24% scores, squashing the
-        # 29% weight to negligible contribution. Linear stretch maps the
-        # observed 1st-99th percentile range to 0-100%.
-        RAW_FLOOR = 0.015   # P1 observed
-        RAW_CEIL = 0.079    # P99 observed
+        # Normalize raw similarity to 0-1 range by stretching the observed
+        # P1-P99 band. Re-measured on 588 postings against the persona as it
+        # stands now: P1 0.008, P50 0.048, P99 0.136. The previous pair (0.015,
+        # 0.079) came from 507 postings and a smaller persona, and against
+        # today's distribution 21% of jobs sat at or above that ceiling —
+        # everything in the top fifth compressed onto one value.
+        RAW_FLOOR = 0.008   # P1 observed, n=588
+        RAW_CEIL = 0.136    # P99 observed, n=588
         if best_sim <= RAW_FLOOR:
             normalized = 0.0
         elif best_sim >= RAW_CEIL:
@@ -1864,13 +1864,30 @@ def calculate_context_match(job_description: str) -> dict:
 
         # TF-IDF measures word overlap, not meaning: "Gas Designer" shares
         # "design / technical / drawings / project" with the persona and
-        # saturates to 1.0 despite being a different field. Cap the fallback
-        # so surface overlap can register a positive signal but never claim a
-        # perfect fit — only the LLM read (context_source="llm") is trusted
-        # to award a high context score. Raise the cap by enabling
-        # --llm-context (option A).
-        TFIDF_SCORE_CAP = 0.6
-        normalized = min(normalized, TFIDF_SCORE_CAP)
+        # saturates despite being a different field. Cap the fallback so
+        # surface overlap can register a positive signal but never claim a fit
+        # the LLM has not confirmed — only context_source="llm" is trusted to
+        # award a high context score.
+        #
+        # 0.30, not 0.6, because the axis under it changed meaning. The cap was
+        # set when context asked "would this candidate want this job" and
+        # averaged ~0.46; since 5dedcf8 it asks "could they do it" and the
+        # LLM-scored median is 0.30. At 0.6 an unread job outranked roughly
+        # 85% of read ones on an axis carrying 0.64 of the composite, which is
+        # how four trade postings — Mechanical Designer, Electrical Designer,
+        # Sales Engineer - Rockfall and Geotechnical — reached the generation
+        # set with a skills score of 0.0, held out only by an
+        # exclude_title_keywords entry.
+        #
+        # Scaled into the band rather than clipped at the top of it. A hard
+        # min() put 52% of postings on the cap exactly, discarding the ordering
+        # the similarity had just computed — the same "one value for everything
+        # above a line" flaw as the stale RAW_CEIL above it. Multiplying keeps
+        # the full 0..cap gradient, so a job the model never read ranks at most
+        # as high as a typical read one, and unread jobs still sort among
+        # themselves.
+        TFIDF_SCORE_CAP = 0.30
+        normalized = normalized * TFIDF_SCORE_CAP
 
         return {
             "score": round(normalized, 2),

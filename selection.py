@@ -66,6 +66,37 @@ def max_pages_for(site: str, config: dict | None = None) -> int:
         return default
 
 
+def search_pairs(config: dict | None = None) -> list[tuple[str, str]]:
+    """Every (keyword, location) search a site walks, in order.
+
+    The full cross product is not affordable: each pair is one serial search
+    (~34s on reed at depth 3) against a 1500s per-site cron timeout, so the
+    whole keyword list is capped at 44 pairs — see
+    invariants.check_scrape_fits_its_timeout. Spending six locations on every
+    keyword therefore rations how many keywords can exist at all.
+
+    `keyword_locations` buys the difference back: a keyword whose roles only
+    matter where the candidate can actually take them (the support /
+    implementation / QA / operations terms are Edinburgh-or-remote jobs, not
+    ones worth relocating for) searches a subset instead of all six. A keyword
+    absent from the map keeps the full location list, so the default behaviour
+    is unchanged.
+
+    Every site loops over this rather than nesting its own keywords x locations,
+    so a budget decision made in config.yaml applies to all of them — and the
+    invariant counts the same pairs the scrapers walk.
+    """
+    config = config if config is not None else load_config()
+    keywords = config.get("keywords") or []
+    locations = config.get("locations") or [""]
+    per_keyword = config.get("keyword_locations") or {}
+    pairs: list[tuple[str, str]] = []
+    for kw in keywords:
+        locs = per_keyword.get(kw) or locations
+        pairs += [(kw, loc) for loc in locs]
+    return pairs
+
+
 def _dedupe(jobs: list[dict]) -> list[dict]:
     """One entry per (company, title) — the one scored against the fullest
     description.
@@ -152,12 +183,27 @@ def is_unscoreable(job: dict) -> bool:
     # chars ending in "…", has no full-text field and no job-details endpoint (every
     # candidate path 404s), and what it cuts is the tail — the requirements list.
     #
-    # Excluded from RANKING too, not just review, because a summary scores higher
-    # than a full description rather than lower: across 980 filter-passing jobs,
-    # composite 0.440 vs 0.340 and context 0.454 vs 0.398. A 500-char excerpt is the
-    # opening pitch, so the model sees only what the posting is selling and none of
-    # what it demands. Left in the pool these outrank real postings — "Billing
-    # Specialist" and several "Talent Pool" registrations scored 0.81-0.83 that way.
+    # Excluded from RANKING too, not just review. A 500-char excerpt is the
+    # opening pitch, so the model sees what the posting is selling and none of
+    # what it demands, and summaries used to outscore full descriptions rather
+    # than underscore them: 0.440 vs 0.340 composite across 980 filter-passing
+    # jobs. Left in the pool they outranked real postings — "Billing Specialist"
+    # and several "Talent Pool" registrations reached 0.81-0.83 that way.
+    #
+    # That measurement no longer holds, and the reason is worth recording.
+    # scikit-learn was missing from the venv, so calculate_context_match
+    # returned a flat 0.50 for every job the LLM path did not cover; installing
+    # it and recalibrating dropped the truncated cohort from 0.450 to 0.336
+    # while full descriptions held at 0.354. Traced across seven snapshots, the
+    # gap closed at exactly that change and nowhere else. So a good part of the
+    # inflation this rule was written against was the dead constant, not the
+    # excerpts.
+    #
+    # The rule stays anyway. The mechanism argument is unchanged — an excerpt
+    # still cannot state what a job requires — the margin is now 0.018 either
+    # way, and lifting it would admit 1,223 Adzuna postings, a third of the
+    # database, on one measurement. Revisit with a re-scrape that supplies real
+    # descriptions, not by deleting the guard.
     if job.get("description_truncated"):
         return True
 

@@ -349,20 +349,31 @@ def test_full_descriptions_in_the_top_band_are_silent(monkeypatch, tmp_path):
         {"generation_top_percent": 30, "review_top_percent": 30}) == []
 
 
-def test_truncated_summaries_really_do_outscore_full_text():
+def test_truncated_summaries_do_not_quietly_outscore_full_text():
     """The measurement the exclusion rests on, asserted against the live DB.
 
-    A 500-char summary scoring HIGHER than a full description is counter-intuitive
-    enough that it needs guarding: if it ever reverses, excluding these from ranking
-    stops being justified and this test should fail loudly rather than let the
-    exclusion persist on a stale premise. Skipped when the DB has too few of either
-    kind to compare.
+    Written when a 500-char summary scored 0.440 against a full description's
+    0.340 — counter-intuitive enough to guard, since the exclusion was justified
+    by that gap. It asserted the gap stayed open.
+
+    It no longer is, and the cause was not the excerpts. scikit-learn was absent
+    from the venv, so the TF-IDF fallback returned a flat 0.50 for every job the
+    LLM path did not cover; installing it and recalibrating moved the truncated
+    cohort 0.450 -> 0.336 while full text held at 0.354. Across seven DB
+    snapshots the gap closes at that change and nowhere else.
+
+    So the direction is no longer the thing to pin — the exclusion now rests on
+    the mechanism (an excerpt cannot state what a job requires), and what needs
+    guarding is the opposite failure: summaries running away again, which is
+    what a second dead-constant regression would look like. A margin of a few
+    points either way is noise and must not fail; a large edge to the summaries
+    is the alarm.
     """
     import json
     import statistics
 
     from filter import passes_filter
-    from selection import _dedupe, is_unscoreable, load_config
+    from selection import _dedupe, load_config
 
     if not invariants.ANALYZED.exists():
         pytest.skip("no live DB")
@@ -370,13 +381,18 @@ def test_truncated_summaries_really_do_outscore_full_text():
     pool = [j for j in _dedupe(json.loads(invariants.ANALYZED.read_text(encoding="utf-8")))
             if j.get("match") and passes_filter(j, config)[0]]
     trunc = [j["match"]["composite_score"] for j in pool if j.get("description_truncated")]
-    full = [j["match"]["composite_score"] for j in pool if not is_unscoreable(j)]
+    # Not `not is_unscoreable(j)` — that helper excludes truncated jobs itself,
+    # so the two sets were never each other's complement.
+    full = [j["match"]["composite_score"] for j in pool if not j.get("description_truncated")]
     if len(trunc) < 30 or len(full) < 30:
         pytest.skip("not enough of each kind to compare")
-    assert statistics.mean(trunc) > statistics.mean(full), (
-        f"summaries no longer outscore full text (summary {statistics.mean(trunc):.3f} "
-        f"vs full {statistics.mean(full):.3f}) — re-examine whether they still need "
-        f"holding out of the ranking"
+    edge = statistics.mean(trunc) - statistics.mean(full)
+    assert edge < 0.05, (
+        f"truncated summaries outscore full descriptions by {edge:+.3f} "
+        f"(summary {statistics.mean(trunc):.3f} vs full {statistics.mean(full):.3f}). "
+        f"That is the shape of a scoring path returning a constant for jobs it "
+        f"cannot read — check SKLEARN_AVAILABLE and the LLM context path before "
+        f"trusting any ranking built on this."
     )
 
 
