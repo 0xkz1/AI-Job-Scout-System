@@ -86,6 +86,65 @@ MISTRAL_PROVIDERS = {
     "mistral-denary": "MISTRAL_API_KEY_DENARY",
 }
 
+# Multi-key pools for OpenAI-compatible providers. Same pattern as MISTRAL_PROVIDERS:
+# one account per key, each with its own rate limit / monthly quota, so depth =
+# throughput. The actual base-URL + key-env lookup lives in _OPENAI_COMPAT below;
+# these dicts are kept for code that enumerates available keys (e.g. tests that
+# count providers, or future dynamic chain construction). Provider names here must
+# match the keys in _OPENAI_COMPAT.
+#
+# Key source for nvidia keys:
+#   nvidia       — OpenCode auth.json nvidia.key (nvapi-jps...)
+#   nvidia-back  — Hermes profiles/researcher .env (nvapi-UQ1...)
+# Key source for groq keys:
+#   groq         — original key, shared with .env GROQ_API_KEY (gsk_Z6zh...)
+#   groq-back    — second key provided by user 2026-08-09 (gsk_REJM...)
+
+NVIDIA_PROVIDERS = {
+    "nvidia":            "NVIDIA_API_KEY",
+    "nvidia-back":       "NVIDIA_BACKUP_API_KEY",
+    "nvidia-tertiary":   "NVIDIA_TERTIARY_API_KEY",
+    "nvidia-quaternary": "NVIDIA_QUATERNARY_API_KEY",
+    "nvidia-quinary":    "NVIDIA_QUINARY_API_KEY",
+    "nvidia-senary":     "NVIDIA_SENARY_API_KEY",
+    "nvidia-septenary":  "NVIDIA_SEPTENARY_API_KEY",
+}
+
+GROQ_PROVIDERS = {
+    "groq":            "GROQ_API_KEY",
+    "groq-back":       "GROQ_BACKUP_API_KEY",
+    "groq-tertiary":   "GROQ_TERTIARY_API_KEY",
+    "groq-quaternary": "GROQ_QUATERNARY_API_KEY",
+    "groq-quinary":    "GROQ_QUINARY_API_KEY",
+    "groq-senary":     "GROQ_SENARY_API_KEY",
+    "groq-septenary":  "GROQ_SEPTENARY_API_KEY",
+    "groq-octonary":   "GROQ_OCTONARY_API_KEY",
+    "groq-nonary":     "GROQ_NONARY_API_KEY",
+    "groq-denary":     "GROQ_DENARY_API_KEY",
+    "groq-undenary":   "GROQ_UNDENARY_API_KEY",
+    "groq-duodenary":  "GROQ_DUODECENARY_API_KEY",
+}
+
+# Z.AI (GLM-5.2) — 11 keys from Hermes credential pool.
+#   zai            = ZAI_API_KEY (env-sourced, label=GLM_API_KEY)
+#   zai-back       = api-key-cao (exhausted in Hermes, quarantine auto-handles)
+#   zai-tertiary   = api-key-bak (exhausted in Hermes)
+#   zai-quaternary = api-key-comp (ok)
+#   zai-quinary    = api-key-gei (ok) ... zai-undenary = api-key-terra (ok)
+ZAI_PROVIDERS = {
+    "zai":            "ZAI_API_KEY",
+    "zai-back":       "ZAI_BACKUP_API_KEY",
+    "zai-tertiary":   "ZAI_TERTIARY_API_KEY",
+    "zai-quaternary": "ZAI_QUATERNARY_API_KEY",
+    "zai-quinary":    "ZAI_QUINARY_API_KEY",
+    "zai-senary":     "ZAI_SENARY_API_KEY",
+    "zai-septenary":  "ZAI_SEPTENARY_API_KEY",
+    "zai-octonary":   "ZAI_OCTONARY_API_KEY",
+    "zai-nonary":     "ZAI_NONARY_API_KEY",
+    "zai-denary":     "ZAI_DENARY_API_KEY",
+    "zai-undenary":   "ZAI_UNDENARY_API_KEY",
+}
+
 
 def _quarantine_filter_chain(chain: list[str]) -> list[str]:
     """Skip providers currently sidelined by key_quarantine (import kept lazy so
@@ -110,12 +169,11 @@ def _maybe_quarantine(provider: str, err: str) -> None:
 def _is_transient_error(e: Exception) -> bool:
     """Check if a RuntimeError is a transient (retryable) failure."""
     err_str = str(e).lower()
-    # Rate limits, server errors, network issues
+    # Rate limits, server errors, network issues (excluding 401/403 which are fatal auth failures)
     markers = [
         "429", "rate limit", "too many requests", "quota",
-        "502", "503", "504", "500", "bad gateway", "service unavailable",
+        "402", "502", "503", "504", "500", "payment required", "bad gateway", "service unavailable",
         "timeout", "timed out", "connection", "eof", "refused", "reset",
-        "401", "403", "unauthorized", "forbidden",
     ]
     return any(m in err_str for m in markers)
 
@@ -184,13 +242,49 @@ def call_llm(
             errors.append(f"{prov}: {e}")
             print(f"[llm_client #{cid}] {prov} unavailable ({e}), trying next fallback")
         except RuntimeError as e:
+            # Record an exhausted or rate-limited key even when it is the last
+            # candidate in this call.  The old ordering returned/raised first
+            # for the final provider, so a one-provider probe (or the tail of
+            # the fallback chain) could repeatedly spend its retry budget on
+            # the same bad key without ever placing it in quarantine.
+            _maybe_quarantine(prov, str(e))
             if not _is_transient_error(e) or is_last:
                 if errors:
                     raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
                 raise  # non-transient (or nothing left) → propagate
             errors.append(f"{prov}: {e}")
-            _maybe_quarantine(prov, str(e))
             print(f"[llm_client #{cid}] {prov} transient failure, trying next fallback: {e}")
+
+
+# (connect, read). A hosted chat API that has not accepted a TCP connection in 5
+# seconds is not going to answer this call, and a live one streams a review back
+# in well under 45. The single 60 these replaced was applied to both phases.
+_HTTP_TIMEOUT = (5, 45)
+
+# Ollama is local and can be loading a model off disk, so it keeps a long read
+# budget; only the connect phase is short, because localhost either accepts
+# immediately or is not running.
+_OLLAMA_CONNECT_TIMEOUT = 5
+
+
+def _retry_same_provider(exc: Exception) -> bool:
+    """Whether a second attempt at the SAME provider is worth the wait.
+
+    A 429 or a 5xx says the provider is alive and busy; a moment later it may
+    answer, and the fallback chain is long enough that burning a key over one
+    rate limit is wasteful. A timeout or a refused connection says nothing is
+    coming, and retrying it twice more costs 2 minutes to learn what the first
+    attempt already established.
+
+    That distinction is what made a stalled review run look like a quarantine
+    problem. Measured on 2026-08-13: Mistral's 429s cost ~3s each and fell
+    through correctly, while every unresponsive provider cost 60+1+60+2+60 =
+    183s before the chain moved on. Six of those in a row is 18 minutes of a run
+    that had otherwise been writing a review every 75 seconds.
+    """
+    text = str(exc).lower()
+    dead = ("timeout", "timed out", "connection", "refused", "reset", "eof")
+    return not any(marker in text for marker in dead)
 
 
 def _call_provider(
@@ -248,7 +342,7 @@ def _call_mistral(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=60,
+                timeout=_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
@@ -256,11 +350,18 @@ def _call_mistral(
                 raise RuntimeError(
                     f"mistral/{model} returned empty content (max_tokens={max_tokens})")
             return content
-        except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            if attempt < retries:
+        except requests.HTTPError as e:
+            if resp.status_code in (401, 403):
+                raise ValueError(f"Mistral API key invalid or unauthorized (HTTP {resp.status_code})") from e
+            if attempt < retries and _retry_same_provider(e):
                 time.sleep(2 ** attempt)
                 continue
-            raise RuntimeError(f"Mistral API error after {retries+1} attempts: {e}")
+            raise RuntimeError(f"Mistral API error after {attempt+1} attempts: {e}")
+        except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
+            if attempt < retries and _retry_same_provider(e):
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"Mistral API error after {attempt+1} attempts: {e}")
 
 
 def _call_stepfun(
@@ -295,15 +396,15 @@ def _call_stepfun(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=60,
+                timeout=_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            if attempt < retries:
+            if attempt < retries and _retry_same_provider(e):
                 time.sleep(2 ** attempt)
                 continue
-            raise RuntimeError(f"StepFun API error after {retries+1} attempts: {e}")
+            raise RuntimeError(f"StepFun API error after {attempt+1} attempts: {e}")
 
 
 def _call_openrouter(
@@ -336,15 +437,15 @@ def _call_openrouter(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=60,
+                timeout=_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            if attempt < retries:
+            if attempt < retries and _retry_same_provider(e):
                 time.sleep(2 ** attempt)
                 continue
-            raise RuntimeError(f"OpenRouter API error after {retries+1} attempts: {e}")
+            raise RuntimeError(f"OpenRouter API error after {attempt+1} attempts: {e}")
 
 
 # OpenAI-compatible providers reachable with just a base URL + bearer key.
@@ -358,8 +459,51 @@ _OPENAI_COMPAT = {
     # OpenCode Zen "go" = same key, PAID endpoint — unlocks the paid catalog
     # (glm-5, deepseek-v4, qwen3.x …). Reuses the opencode key if no go-specific one.
     "opencode-go": ("https://opencode.ai/zen/go/v1", ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"), "OPENCODE_GO_MODEL"),
-    "nvidia":   ("https://integrate.api.nvidia.com/v1", ("NVIDIA_API_KEY",), "NVIDIA_MODEL"),
-    "zai":      ("https://api.z.ai/api/paas/v4", ("ZAI_API_KEY", "ZAI_CODING_API_KEY"), "ZAI_MODEL"),
+    # NVIDIA NIM — one entry per key for independent rate-limit pools.
+    #   nvidia         = nvapi-jps... (OpenCode auth.json + JIS .env, env:NVIDIA_API_KEY)
+    #   nvidia-back    = nvapi--XQ... (Hermes auth.json, api-key-cao)
+    #   nvidia-tertiary= nvapi-cbu... (Hermes auth.json, api-key-com)
+    #   nvidia-quaternary = nvapi-epV... (Hermes, api-key-kaso)
+    #   nvidia-quinary = nvapi-y12... (Hermes, api-key-kazukiyunome)
+    #   nvidia-senary  = nvapi-kt_... (Hermes, api-key-gei)
+    #   nvidia-septenary = nvapi-78O... (Hermes, yunome0505)
+    "nvidia":              ("https://integrate.api.nvidia.com/v1", ("NVIDIA_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-back":         ("https://integrate.api.nvidia.com/v1", ("NVIDIA_BACKUP_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-tertiary":     ("https://integrate.api.nvidia.com/v1", ("NVIDIA_TERTIARY_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-quaternary":   ("https://integrate.api.nvidia.com/v1", ("NVIDIA_QUATERNARY_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-quinary":      ("https://integrate.api.nvidia.com/v1", ("NVIDIA_QUINARY_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-senary":       ("https://integrate.api.nvidia.com/v1", ("NVIDIA_SENARY_API_KEY",), "NVIDIA_MODEL"),
+    "nvidia-septenary":    ("https://integrate.api.nvidia.com/v1", ("NVIDIA_SEPTENARY_API_KEY",), "NVIDIA_MODEL"),
+    "zai":          ("https://api.z.ai/api/paas/v4", ("ZAI_API_KEY",), "ZAI_MODEL"),
+    "zai-back":     ("https://api.z.ai/api/paas/v4", ("ZAI_BACKUP_API_KEY",), "ZAI_MODEL"),
+    "zai-tertiary": ("https://api.z.ai/api/paas/v4", ("ZAI_TERTIARY_API_KEY",), "ZAI_MODEL"),
+    "zai-quaternary": ("https://api.z.ai/api/paas/v4", ("ZAI_QUATERNARY_API_KEY",), "ZAI_MODEL"),
+    "zai-quinary":  ("https://api.z.ai/api/paas/v4", ("ZAI_QUINARY_API_KEY",), "ZAI_MODEL"),
+    "zai-senary":    ("https://api.z.ai/api/paas/v4", ("ZAI_SENARY_API_KEY",), "ZAI_MODEL"),
+    "zai-septenary": ("https://api.z.ai/api/paas/v4", ("ZAI_SEPTENARY_API_KEY",), "ZAI_MODEL"),
+    "zai-octonary":  ("https://api.z.ai/api/paas/v4", ("ZAI_OCTONARY_API_KEY",), "ZAI_MODEL"),
+    "zai-nonary":    ("https://api.z.ai/api/paas/v4", ("ZAI_NONARY_API_KEY",), "ZAI_MODEL"),
+    "zai-denary":    ("https://api.z.ai/api/paas/v4", ("ZAI_DENARY_API_KEY",), "ZAI_MODEL"),
+    "zai-undenary":  ("https://api.z.ai/api/paas/v4", ("ZAI_UNDENARY_API_KEY",), "ZAI_MODEL"),
+    # Groq — ultra-low-latency inference, OpenAI-compatible. One entry per key.
+    #   groq            = gsk_Z6zh... (original, shared with OpenCode auth.json)
+    #   groq-back       = gsk_REJM... (second key, added 2026-08-09)
+    #   groq-tertiary..undenary = 9 valid keys provided by user 2026-08-09
+    "groq":            ("https://api.groq.com/openai/v1", ("GROQ_API_KEY",), "GROQ_MODEL"),
+    "groq-back":       ("https://api.groq.com/openai/v1", ("GROQ_BACKUP_API_KEY",), "GROQ_MODEL"),
+    "groq-tertiary":   ("https://api.groq.com/openai/v1", ("GROQ_TERTIARY_API_KEY",), "GROQ_MODEL"),
+    "groq-quaternary": ("https://api.groq.com/openai/v1", ("GROQ_QUATERNARY_API_KEY",), "GROQ_MODEL"),
+    "groq-quinary":    ("https://api.groq.com/openai/v1", ("GROQ_QUINARY_API_KEY",), "GROQ_MODEL"),
+    "groq-senary":     ("https://api.groq.com/openai/v1", ("GROQ_SENARY_API_KEY",), "GROQ_MODEL"),
+    "groq-septenary":  ("https://api.groq.com/openai/v1", ("GROQ_SEPTENARY_API_KEY",), "GROQ_MODEL"),
+    "groq-octonary":   ("https://api.groq.com/openai/v1", ("GROQ_OCTONARY_API_KEY",), "GROQ_MODEL"),
+    "groq-nonary":     ("https://api.groq.com/openai/v1", ("GROQ_NONARY_API_KEY",), "GROQ_MODEL"),
+    "groq-denary":     ("https://api.groq.com/openai/v1", ("GROQ_DENARY_API_KEY",), "GROQ_MODEL"),
+    "groq-undenary":   ("https://api.groq.com/openai/v1", ("GROQ_UNDENARY_API_KEY",), "GROQ_MODEL"),
+    "groq-duodenary":  ("https://api.groq.com/openai/v1", ("GROQ_DUODECENARY_API_KEY",), "GROQ_MODEL"),
+    # Together AI — OpenAI-compatible, hosts open models (Llama, Qwen, Deepseek).
+    # Add TOGETHER_API_KEY to .env to activate.
+    "together":  ("https://api.together.xyz/v1", ("TOGETHER_API_KEY",), "TOGETHER_MODEL"),
 }
 
 
@@ -401,7 +545,7 @@ def _call_openai_compat(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=120,
+                timeout=_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
@@ -416,10 +560,10 @@ def _call_openai_compat(
                     f"(reasoning-token exhaustion at max_tokens={max_tokens}?)")
             return content
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            if attempt < retries:
+            if attempt < retries and _retry_same_provider(e):
                 time.sleep(2 ** attempt)
                 continue
-            raise RuntimeError(f"{provider} API error after {retries+1} attempts: {e}")
+            raise RuntimeError(f"{provider} API error after {attempt+1} attempts: {e}")
 
 
 def _call_ollama(
@@ -447,15 +591,15 @@ def _call_ollama(
                     "options": {"temperature": temperature, "num_predict": max_tokens},
                     "keep_alive": keep_alive,
                 },
-                timeout=timeout,
+                timeout=(_OLLAMA_CONNECT_TIMEOUT, timeout),
             )
             resp.raise_for_status()
             return resp.json()["message"]["content"]
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            if attempt < retries:
+            if attempt < retries and _retry_same_provider(e):
                 time.sleep(2 ** attempt)
                 continue
-            raise RuntimeError(f"Ollama API error after {retries+1} attempts: {e}")
+            raise RuntimeError(f"Ollama API error after {attempt+1} attempts: {e}")
 
 
 def _build_messages(messages: list[dict], system_prompt: str) -> list[dict]:
