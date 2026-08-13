@@ -83,12 +83,17 @@ stage pipeline   6h "${RUNNER[@]}" "${PYTHON}" -u run.py
 # Bank's UI Software Engineer sat at composite 0.80 — the top of the pool — on a
 # persona two revisions old, because it arrived after the last full rescore.
 #
-# Capped rather than exhaustive. context_persona_chars keys the score to the
-# persona that produced it, so editing one line of timeline.md marks every job
-# stale at once: 1,642 of them tonight. Doing that in a single night is a
-# six-hour LLM bill for a profile tweak. 400 a night converges in under a week
-# and keeps the nightly's length predictable — the same reasoning as
-# cv_generation_limit, which is a cap on what a run writes, not a rank cut.
+# Ordinarily this is small: postings ingested since the last run, which carry no
+# score from the current persona at all. 385 tonight. It only becomes large when
+# the persona genuinely changes — rescore_context.PERSONA_DRIFT_THRESHOLD keeps
+# a 1.4% edit from marking the whole corpus stale, after an earlier version did
+# exactly that and 63% of the rescored postings came back with the same number.
+#
+# The cap is for the case that remains: a real persona edit, which legitimately
+# invalidates everything. 400 a night spreads that over a few nights instead of
+# one six-hour bill, and keeps the nightly's length predictable — the same
+# reasoning as cv_generation_limit, a bound on what a run writes rather than a
+# line below which work never happens.
 #
 # Before the review stages, so they rank on scores from the current persona.
 stage rescore    3h "${PYTHON}" -u rescore_context.py --limit 400

@@ -48,9 +48,38 @@ DESIGN_ROLES = {"graphic_designer", "product_designer"}
 CHECKPOINT_EVERY = 20
 
 
+# How much the persona has to move before a score built on the older one is
+# worth buying again. Measured: adding the portfolio grew it 25,429 -> 54,260
+# characters, +113%, and rescoring was clearly right. Writing one line of
+# effective years into timeline.md grew it 54,260 -> 55,048, +1.4%, and marked
+# all 1,642 eligible postings stale — of the 162 rescored before that was
+# noticed, 63% came back identical to two decimal places and the mean absolute
+# change was 0.0246, less than the run-to-run variance of the model itself.
+#
+# 10% is above that noise and well below a real edit. Under it, only postings
+# with no persona stamp at all are due: newly ingested ones that were never
+# scored against the current persona rather than ones scored against a
+# marginally different one.
+PERSONA_DRIFT_THRESHOLD = 0.10
+
+
+def _is_stale(stamped: int | None, current: int) -> bool:
+    """Whether a score stamped against `stamped` characters of persona is stale.
+
+    Never scored on any persona -> always due. Otherwise due only when the
+    persona has moved more than PERSONA_DRIFT_THRESHOLD, because a rescore that
+    returns the same number is a call paid for nothing.
+    """
+    if stamped is None:
+        return True
+    if stamped == current:
+        return False
+    return abs(current - stamped) / max(stamped, 1) > PERSONA_DRIFT_THRESHOLD
+
+
 def due(jobs: list[dict], config: dict, roles: set[str] | None = None,
         persona_chars: int | None = None) -> list[dict]:
-    """Postings a ranking will actually read, that are not already on this persona.
+    """Postings a ranking will actually read, whose score is worth buying again.
 
     A posting the filter drops, or one with too little description to score,
     never reaches a ranking — buying it a second opinion spends a call on an
@@ -61,7 +90,8 @@ def due(jobs: list[dict], config: dict, roles: set[str] | None = None,
         m = job.get("match") or {}
         if roles is not None and m.get("detected_role") not in roles:
             continue
-        if persona_chars is not None and m.get("context_persona_chars") == persona_chars:
+        if persona_chars is not None and not _is_stale(
+                m.get("context_persona_chars"), persona_chars):
             continue
         if m.get("context_score") is None:
             continue
