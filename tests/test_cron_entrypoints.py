@@ -87,6 +87,7 @@ def test_the_scraper_still_tells_the_operator_to_use_xvfb():
     ("run.py", "nothing is scraped, analysed or matched"),
     ("nightly_scout.py", "new arrivals are never reviewed — run.py does not review"),
     ("rereview_top.py", "the un-reviewed backlog is never swept, only new arrivals"),
+    ("rescore_context.py", "jobs already in the DB keep scores from an older persona"),
 ])
 def test_the_nightly_runs_every_stage(script, reason):
     text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
@@ -101,6 +102,32 @@ def test_the_backfill_does_not_rewrite_reviews_it_already_has():
     assert "rereview_top.py --new-only" in commands, (
         "the nightly backfill must pass --new-only or it re-reviews the whole "
         "selection every night"
+    )
+
+
+def test_the_rescore_is_capped_and_runs_before_the_reviews():
+    """Two things at once, because both are easy to get wrong.
+
+    Capped: context_persona_chars keys a score to the persona that produced it,
+    so one edited line of timeline.md marks every job stale — 1,642 of them the
+    night this was added. Uncapped that is a six-hour LLM bill for a profile
+    tweak; capped it converges over a few nights.
+
+    Ordered: the review stages rank the pool, so they have to see scores from
+    the persona in force now, not the one from before the pipeline ran.
+    """
+    commands = _commands(ROOT / "run_cron.sh")
+    rescore = re.search(r"^stage\s+rescore\s.*$", commands, re.M)
+    assert rescore, "no rescore stage"
+    assert "--limit" in rescore.group(0), (
+        "an uncapped rescore turns any profile edit into a full-corpus LLM run"
+    )
+    order = re.findall(r"^stage\s+(\w+)\s", commands, re.M)
+    assert order.index("rescore") < order.index("review"), (
+        "reviews would rank on scores the rescore is about to replace"
+    )
+    assert order.index("pipeline") < order.index("rescore"), (
+        "the rescore should see everything the pipeline just ingested"
     )
 
 

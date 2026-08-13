@@ -76,6 +76,23 @@ stage url_list  20m "${RUNNER[@]}" "${PYTHON}" scraper_url_list.py
 stage saved     20m "${RUNNER[@]}" "${PYTHON}" scraper_saved.py
 stage pipeline   6h "${RUNNER[@]}" "${PYTHON}" -u run.py
 
+# run.py scores what it ingests and nothing else, so anything already in the
+# database when the persona changes keeps the score it was given against the old
+# one. Two scales in one ranking rank nothing (5dedcf8), and the drift is
+# invisible: a stale score looks exactly like a fresh one. National Westminster
+# Bank's UI Software Engineer sat at composite 0.80 — the top of the pool — on a
+# persona two revisions old, because it arrived after the last full rescore.
+#
+# Capped rather than exhaustive. context_persona_chars keys the score to the
+# persona that produced it, so editing one line of timeline.md marks every job
+# stale at once: 1,642 of them tonight. Doing that in a single night is a
+# six-hour LLM bill for a profile tweak. 400 a night converges in under a week
+# and keeps the nightly's length predictable — the same reasoning as
+# cv_generation_limit, which is a cap on what a run writes, not a rank cut.
+#
+# Before the review stages, so they rank on scores from the current persona.
+stage rescore    3h "${PYTHON}" -u rescore_context.py --limit 400
+
 # Two review stages, because they answer different questions and neither covers
 # the other.
 #
@@ -98,7 +115,7 @@ stage backfill  4h "${PYTHON}" -u rereview_top.py --new-only
 
 echo ""
 echo "──────── summary ────────"
-for k in url_list saved pipeline review backfill; do
+for k in url_list saved pipeline rescore review backfill; do
     printf '  %-10s %s\n' "$k" "${STATUS[$k]:-skipped}"
 done
 echo "  00_matches:       $(find 10_output/00_matches -name '*.md' 2>/dev/null | wc -l) reports"
@@ -111,7 +128,7 @@ echo "  log:              ${LOG}"
 # and a red cron line for one flaky site trains the reader to ignore red lines.
 # Keep this list in step with the stages above; it silently under-reports if a
 # stage is added and not listed here.
-for k in url_list saved pipeline review backfill; do
+for k in url_list saved pipeline rescore review backfill; do
     [ "${STATUS[$k]:-}" = "ok" ] && exit 0
 done
 exit 1
