@@ -2351,11 +2351,19 @@ def _is_summary_only(job: dict) -> bool:
     500-char excerpt is the opening pitch with the requirements cut off — so a
     hand-written query had no way to avoid ranking them above real postings.
 
-    selection.is_unscoreable is the authority for pipeline stages and applies the
-    same rule plus the junk/length checks; this is deliberately just the flag that
-    reaches the report, kept here so generate_match_report has no import cycle.
+    Delegates to selection.is_unscoreable rather than reimplementing part of it.
+    It used to test description_truncated alone, which is the Adzuna case only —
+    so a posting held out for being too SHORT still reported `scoreable: true`.
+    "PODFather — Product Designer" showed match_score 0.79 and scoreable: true
+    with a 313-character body reading "This vacancy has now been filled", and no
+    CV was generated for it, correctly, with the report giving no hint why. 563
+    postings above threshold were in that state.
+
+    The import is local because selection imports filter which imports this
+    module; at module scope it is a cycle.
     """
-    return bool(job.get("description_truncated"))
+    from selection import is_unscoreable  # local import: avoids a cycle
+    return is_unscoreable(job)
 
 
 def _infer_country(job: dict) -> str:
@@ -2496,6 +2504,32 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
             f"",
         ]
 
+    # Why no CV/CL exists, said in the report rather than left to be worked out.
+    # A held-out posting still shows a match score — "PODFather — Product
+    # Designer" reads 0.79 on a 313-character body that says "This vacancy has
+    # now been filled" — and until now the report gave no hint that nothing
+    # downstream would ever act on it. The score is real arithmetic over thin
+    # evidence, so the honest thing is to print it AND say it is not trusted.
+    unscoreable_warning = []
+    if not description_missing and _is_summary_only(job):
+        desc_len = len((job.get("description") or "").strip())
+        if job.get("description_truncated"):
+            why = ("求人票がAPIの要約(500字)しか取れておらず、要件部分が切り落とされています。"
+                   "/ Only a truncated API summary was captured; the requirements are cut off.")
+        else:
+            why = (f"求人票の本文が{desc_len}字しかなく、要件を照合できません。"
+                   f"/ The body is only {desc_len} characters — too little to check requirements against.")
+        unscoreable_warning = [
+            f"",
+            f"> [!WARNING]",
+            f"> **⚠️ CV・カバーレターは生成されません / No CV or cover letter will be generated**",
+            f"> {why}",
+            f"> スコアは算出されていますが根拠が薄いため、ランキングからも除外されています。"
+            f"求人票を取り直せば対象に戻ります。",
+            f"> *(Scored, but held out of ranking and generation. Re-scrape the description to admit it.)*",
+            f"",
+        ]
+
     dup_urls = job.get("duplicate_urls") or []
     dup_lines = [f"**Also posted at:** {u}" for u in dup_urls]
 
@@ -2508,6 +2542,7 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
         *dup_lines,
         f"",
         *desc_warning,
+        *unscoreable_warning,
         f"## 🎯 Overall Match: {match['tier']} ({score_pct}%)",
         f"",
         f"---",
