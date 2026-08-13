@@ -1,4 +1,21 @@
 #!/bin/bash
+# NOT the scheduled nightly. Do not put this in crontab.
+#
+# The nightly that actually runs is job-scout-nightly, a Hermes cron job on the
+# `archivist` profile at 02:00, whose script is
+# dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh. It is
+# invisible to `crontab -l`, to systemd timers, and to a bare `hermes cron list`
+# — that lists the default profile only, so you have to ask each profile by
+# name. Believing there was no scheduler is how this file came to be rewritten
+# as a parallel nightly in the first place.
+#
+# Scheduling both would run two pipelines against one _analyzed.json.
+#
+# Kept as the manual/foreground equivalent: same stages, simpler budgeting, no
+# Telegram delivery. Use it to run the pipeline by hand or to test a stage in
+# isolation. Anything that belongs in the real nightly belongs in
+# job_scout_nightly.sh.
+#
 # The whole nightly, in one process.
 #
 # It used to be a fragment: scraper_saved.py and `run.py --site indeed`. Three

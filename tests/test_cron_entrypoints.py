@@ -68,6 +68,47 @@ def test_python_is_the_venv_not_whatever_is_on_path(script):
     assert not bare, f"{script.name} still invokes a bare python3: {bare}"
 
 
+HERMES_NIGHTLY = Path(
+    "/home/kz003/dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh")
+
+
+def test_run_cron_says_it_is_not_the_scheduled_one():
+    """The scheduled nightly is a Hermes cron job on the `archivist` profile,
+    invisible to `crontab -l`, to systemd timers, and to a bare
+    `hermes cron list` — that shows the default profile only. Believing nothing
+    was scheduled is how run_cron.sh got rewritten as a parallel nightly;
+    scheduling both would run two pipelines against one _analyzed.json."""
+    text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
+    assert "NOT the scheduled nightly" in text
+    assert "job_scout_nightly.sh" in text, (
+        "run_cron.sh must name the script that really runs, or the next reader "
+        "repeats the same mistake"
+    )
+
+
+@pytest.mark.skipif(not HERMES_NIGHTLY.exists(), reason="hermes dotfiles not present")
+@pytest.mark.parametrize("script,reason", [
+    ("rescore_context.py", "scores stay on whatever persona produced them; "
+                           "llm_context_backfill skips anything already LLM-scored"),
+    ("rereview_top.py", "only new arrivals are reviewed, so each night's "
+                        "leftovers accumulate unreviewed forever"),
+])
+def test_the_real_nightly_has_the_stages_this_repo_added(script, reason):
+    text = HERMES_NIGHTLY.read_text(encoding="utf-8")
+    assert script in text, f"the scheduled nightly omits {script}: {reason}"
+
+
+@pytest.mark.skipif(not HERMES_NIGHTLY.exists(), reason="hermes dotfiles not present")
+def test_the_real_nightly_sweeps_after_it_notifies():
+    """notify() diffs against _nightly_state.json, so it reviews what is new.
+    Sweeping first would review tonight's arrivals and notify would review them
+    again — the diff is keyed on state, not on whether a review file exists."""
+    text = HERMES_NIGHTLY.read_text(encoding="utf-8")
+    assert text.index("\nnotify\n") < text.index("rereview_top.py"), (
+        "the backlog sweep runs before notify, duplicating tonight's reviews"
+    )
+
+
 def test_the_scraper_still_tells_the_operator_to_use_xvfb():
     """The entrypoints implement what scraper_indeed's message advises. If that
     advice is ever reworded away, these wrappers lose their stated reason."""
