@@ -323,23 +323,20 @@ def fill_descriptions(jobs: list[dict], cache: dict | None = None) -> None:
 
 def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     """Every keyword x location in config, deduped by posting id."""
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     from scraper_helper import load_description_cache
 
-    keywords = config.get("keywords", [])
-    locations = config.get("locations", [""])
     max_pages = max_pages_for("linkedin", config)
 
     all_jobs: list[dict] = []
     seen_ids: set[str] = set()
 
-    for kw in keywords:
-        for loc in locations:
-            for job in search(kw, loc, max_pages=max_pages):
-                if job["job_id"] in seen_ids:
-                    continue
-                seen_ids.add(job["job_id"])
-                all_jobs.append(job)
+    for kw, loc in search_pairs(config):
+        for job in search(kw, loc, max_pages=max_pages):
+            if job["job_id"] in seen_ids:
+                continue
+            seen_ids.add(job["job_id"])
+            all_jobs.append(job)
 
     print(f"\n  🔗 {len(all_jobs)} unique postings before descriptions")
     fill_descriptions(all_jobs, load_description_cache())
@@ -348,8 +345,13 @@ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     # missing description as void), so it is dead weight in the pipeline.
     all_jobs = [j for j in all_jobs if j.get("description")]
 
+    # config.get, not a bare `keywords` — that NameError fired here, one line
+    # after 502 descriptions had been fetched over the network, and took all
+    # 726 postings down with it. Every other scraper reads the list the same
+    # way (see scraper_linkedin.scrape_linkedin_all); this one never did, so
+    # LinkedIn returned nothing on every run that reached this line.
     from scraper_indeed import filter_jobs_by_keywords
-    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
+    all_jobs = filter_jobs_by_keywords(all_jobs, config.get("keywords", []))
 
     print(f"  ✓ Total: {len(all_jobs)} jobs from LinkedIn (guest)")
     return all_jobs
