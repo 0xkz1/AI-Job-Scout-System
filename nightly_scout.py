@@ -41,6 +41,21 @@ STATE_FILE = OUTPUT_DIR / "_nightly_state.json"
 RUN_SUMMARY = OUTPUT_DIR / "_nightly_run_summary.tsv"
 SITE_YIELD = OUTPUT_DIR / "_nightly_site_yield.tsv"
 YIELD_HISTORY = OUTPUT_DIR / "_nightly_site_yield_history.json"
+STATUS_HISTORY = OUTPUT_DIR / "_nightly_site_status_history.json"
+
+# Nights without a clean scrape before a site is called stale.
+#
+# summarize_sites already reports tonight's timeouts and budget skips, so none
+# of this is invisible on any single night. What one night cannot say is whether
+# it is a hiccup or the standing shape of the run. Between 2026-08-12 and
+# 08-15 guardian, adzuna and remote_apis were skipped every night — each night's
+# message said "予算切れで未実行" and each read like an unlucky night, while the
+# yield history froze at one entry apiece because a site that never runs never
+# records a zero. dry_sites cannot see this: it only judges sites that ran.
+#
+# Three, not two: the budget is genuinely spent by a slow night now and again,
+# and a warning that fires on ordinary variance is one people learn to skip.
+STALE_NIGHTS_BEFORE_WARNING = 3
 
 # Nights of zero jobs, from a site that exited cleanly, before it is reported.
 # One is normal — a narrow keyword set on a quiet night genuinely returns
@@ -153,6 +168,55 @@ def dry_sites(history: dict[str, list[int]], yields: dict[str, int]) -> list[str
         recent = (history.get(site) or [])[-DRY_NIGHTS_BEFORE_WARNING:]
         if len(recent) >= DRY_NIGHTS_BEFORE_WARNING and not any(recent):
             flagged.append(f"{site}({len(recent)}晩連続0件)")
+    return flagged
+
+
+def update_status_history(summary: list[dict]) -> dict[str, list[str]]:
+    """Append tonight's per-site outcome to the rolling status history and save.
+
+    Unlike the yield history, a skipped or timed-out site is recorded too — that
+    is the whole point. The yield history deliberately holds only sites that
+    ran, which leaves the ones that never start with no record at all.
+
+    Sites absent from tonight's summary are left untouched, so removing a site
+    from the nightly does not accumulate phantom failures against it.
+    """
+    try:
+        history = json.loads(STATUS_HISTORY.read_text())
+        if not isinstance(history, dict):
+            history = {}
+    except Exception:
+        history = {}
+
+    for s in summary:
+        past = history.get(s["site"]) or []
+        if not isinstance(past, list):
+            past = []
+        history[s["site"]] = (past + [s["status"]])[-YIELD_HISTORY_KEEP:]
+
+    try:
+        STATUS_HISTORY.write_text(json.dumps(history, indent=0))
+    except OSError:
+        pass
+    return history
+
+
+def stale_sites(history: dict[str, list[str]], summary: list[dict]) -> list[str]:
+    """Sites that have not completed a scrape for enough consecutive nights to
+    be a standing problem rather than an unlucky night.
+
+    Judged only on sites in tonight's summary, so a site retired from the
+    nightly stops being reported once it stops appearing.
+    """
+    flagged = []
+    tonight = {s["site"] for s in summary}
+    for site in sorted(tonight):
+        recent = (history.get(site) or [])[-STALE_NIGHTS_BEFORE_WARNING:]
+        if len(recent) < STALE_NIGHTS_BEFORE_WARNING:
+            continue
+        if any(status == "ok" for status in recent):
+            continue
+        flagged.append(f"{site}({len(recent)}晩連続未取得)")
     return flagged
 
 
@@ -270,18 +334,28 @@ def main():
     dry = dry_sites(update_yield_history(yields), yields)
     dry_line = f"🕳 収穫ゼロ: {'・'.join(dry)} — セレクタ切れの疑い" if dry else ""
 
+    # health_line already names tonight's timeouts and skips. This says how long
+    # they have been going on, which is the part a single night cannot carry: a
+    # site skipped once lost a night, a site skipped every night since Tuesday
+    # is not in the nightly at all any more and nobody decided that.
+    stale = stale_sites(update_status_history(summary), summary)
+    stale_line = (f"🚨 {'・'.join(stale)} — 予算配分かタイムアウトの設定を見直す"
+                  if stale else "")
+
     if not new_high and not any_failure and not dry:
         return  # every site ok, nothing new — the only truly silent case
 
     if not new_high:
         # No new matches but a site failed or came back empty — say which.
-        detail = "\n".join(x for x in (health_line, dry_line) if x)
+        detail = "\n".join(x for x in (health_line, stale_line, dry_line) if x)
         print(f"⚠️ AI Job Scout — 新着なし。スクレイプに問題:\n{detail}")
         return
 
     lines = [f"🎯 AI Job Scout — 新着の高マッチ {len(new_high)}件 (新規求人{len(new_jobs)}件中)"]
     if health_line:
         lines.append(f"📡 {health_line}")
+    if stale_line:
+        lines.append(stale_line)
     if dry_line:
         lines.append(dry_line)
     for j in new_high[:10]:
