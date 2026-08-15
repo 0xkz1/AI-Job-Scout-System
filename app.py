@@ -1127,14 +1127,10 @@ def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
     meta = _load_pdf_meta()
 
     PDF_DIR.mkdir(exist_ok=True)
-    unversioned = PDF_DIR / f"{stem}.pdf"
 
     if versions:
         latest_n, latest_path = versions[-1]
         if meta.get(latest_path.name) == md_sha and latest_path.exists():
-            if not unversioned.exists() or unversioned.stat().st_mtime < latest_path.stat().st_mtime:
-                import shutil
-                shutil.copyfile(latest_path, unversioned)
             _set_report_pdf_property(md_path, latest_path.name)
             return latest_path, latest_n, False  # unchanged — reuse
         n = latest_n + 1
@@ -1144,9 +1140,7 @@ def _convert_pdf_versioned(md_path: Path) -> tuple[Path, int, bool]:
     target = PDF_DIR / _version_filename(stem, n)
     pdf_bytes = _md_to_pdf_bytes(md_path)
     target.write_bytes(pdf_bytes)
-    unversioned.write_bytes(pdf_bytes)
     meta[target.name] = md_sha
-    meta[unversioned.name] = md_sha
     _save_pdf_meta(meta)
     _set_report_pdf_property(md_path, target.name)
     return target, n, True
