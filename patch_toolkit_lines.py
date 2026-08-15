@@ -22,8 +22,10 @@ import sys
 from pathlib import Path
 
 from cv_generator import _cv_root
+import gen_version
 
 CV_DIR = Path(__file__).resolve().parent / "10_output" / "10_cvs"
+MATCH_DIR = Path(__file__).resolve().parent / "10_output" / "00_matches"
 
 # Category lines whose text changed. Keyed by the CV's category heading, which
 # is stable — only the skill list under it moves.
@@ -71,9 +73,12 @@ def main() -> int:
         return 1
 
     files = sorted(CV_DIR.glob("*_CV.md"))
-    changed = total = 0
+    changed = total = locked = 0
     for f in files:
         original = f.read_text(encoding="utf-8")
+        if gen_version.is_locked(f.stem[:-3], original, MATCH_DIR):
+            locked += 1
+            continue
         patched, n = patch(original, lines)
         if not n:
             continue
@@ -83,7 +88,8 @@ def main() -> int:
             f.write_text(patched, encoding="utf-8")
 
     verb = "patched" if args.apply else "would patch"
-    print(f"{verb} {changed}/{len(files)} CVs, {total} toolkit lines")
+    print(f"{verb} {changed}/{len(files)} CVs, {total} toolkit lines"
+          + (f", {locked} locked (skipped)" if locked else ""))
     if not args.apply:
         print("dry run — nothing written. Re-run with --apply.")
     return 0

@@ -29,8 +29,10 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from cv_generator import get_employment_section, _bold_experience_titles  # noqa: E402
+import gen_version  # noqa: E402
 
 CV_DIR = ROOT / "10_output" / "10_cvs"
+MATCH_DIR = ROOT / "10_output" / "00_matches"
 
 # Splice target: the text between the EXPERIENCE heading and the next section
 # heading (SELECTED PROJECTS). Captures the two anchors so they are preserved
@@ -63,9 +65,12 @@ def main() -> int:
     args = ap.parse_args()
     cv_dir = Path(args.dir)
 
-    changed = skipped_nomatch = unchanged = 0
+    changed = skipped_nomatch = unchanged = locked = 0
     for f in sorted(cv_dir.glob("*_CV.md")):
         text = f.read_text(encoding="utf-8")
+        if gen_version.is_locked(f.stem[:-3], text, MATCH_DIR):
+            locked += 1
+            continue
         m = _SECTION_RE.search(text)
         if not m:
             skipped_nomatch += 1
@@ -86,7 +91,7 @@ def main() -> int:
 
     verb = "patched" if args.write else "would patch"
     print(f"\n{verb}: {changed}  |  既に最新: {unchanged}  |  "
-          f"対象外(職歴セクション無し): {skipped_nomatch}")
+          f"対象外(職歴セクション無し): {skipped_nomatch}  |  ロック済み: {locked}")
     if not args.write and changed:
         print("dry-run — 反映するには --write を付けて再実行")
     return 0

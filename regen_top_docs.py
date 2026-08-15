@@ -37,6 +37,7 @@ from selection import ranked_jobs, select_top  # noqa: E402
 ANALYZED = ROOT / "10_output" / "_analyzed.json"
 CV_DIR = ROOT / "10_output" / "10_cvs"
 CL_DIR = ROOT / "10_output" / "10_cover-letters"
+MATCH_DIR = ROOT / "10_output" / "00_matches"
 ARCHIVE = ROOT / "10_output" / ".cls_archive" / f"pre_gate_{date.today():%Y%m%d}"
 
 
@@ -112,15 +113,22 @@ def main():
 
     targets = []
     skipped_current = 0
+    skipped_locked = 0
     for job in top:
         base = make_safe_name(job.get("company", ""), job.get("title", ""))
         if only is not None and base not in only:
             continue
         role = detect_role_type(job.get("title", ""), job.get("description", ""))
+        cv_p, cl_p = CV_DIR / f"{base}_CV.md", CL_DIR / f"{base}_CL.md"
+        # Hand-edited / applied / expired — see gen_version. A lock on either
+        # half freezes the pair, and the job-scoped ones hold even before either
+        # file exists, so an expired posting is not handed a first CV either.
+        if gen_version.pair_lock_reason(base, (cv_p, cl_p), MATCH_DIR):
+            skipped_locked += 1
+            continue
         # --stale-only: skip a pair whose CV and CL both already carry the current
         # fingerprint — nothing affecting them has changed since they were built.
         if args.stale_only:
-            cv_p, cl_p = CV_DIR / f"{base}_CV.md", CL_DIR / f"{base}_CL.md"
             if cv_p.exists() and cl_p.exists():
                 try:
                     if (gen_version.is_current(cv_p.read_text(encoding="utf-8"), role)
@@ -134,6 +142,8 @@ def main():
     scope_note = scope
     if args.stale_only:
         scope_note += f", 最新版スキップ{skipped_current}件"
+    if skipped_locked:
+        scope_note += f", ロック済みスキップ{skipped_locked}件"
     print(f"[{time.strftime('%H:%M:%S')}] CV+CLペア再生成: {len(targets)}件 ({scope_note})", flush=True)
     if args.dry_run:
         for b, _, r in targets:
@@ -177,7 +187,12 @@ def main():
             cl_p = CL_DIR / f"{base}_CL.md"
             cl_p.write_text(_stamp(cl_p.read_text(encoding="utf-8"), stamp), encoding="utf-8")
             cl_done += 1
-            if 'opening_source: "template"' in cl_p.read_text(encoding="utf-8"):
+            # "assembled-static" is the assembler's equivalent of the old
+            # template fallback: the letter is valid, but its bridge is the
+            # neutral one, so nothing in it was written for this posting.
+            cl_text = cl_p.read_text(encoding="utf-8")
+            if 'opening_source: "assembled-static"' in cl_text \
+                    or 'opening_source: "template"' in cl_text:
                 fallback += 1
         except Exception as e:
             cl_fail += 1

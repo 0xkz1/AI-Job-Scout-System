@@ -26,7 +26,10 @@ import re
 import sys
 from pathlib import Path
 
+import gen_version
+
 CL_DIR = Path(__file__).resolve().parent / "10_output" / "10_cover-letters"
+MATCH_DIR = Path(__file__).resolve().parent / "10_output" / "00_matches"
 
 OLD_TAIFUNOME = (
     "Most recently I designed TAIFUNOME from the ground up as an independent "
@@ -119,8 +122,12 @@ def main() -> int:
     counts: dict[str, int] = {}
     changed = 0
     skipped: list[str] = []
+    locked: list[str] = []
     for f in files:
         original = f.read_text(encoding="utf-8")
+        if gen_version.is_locked(f.stem[:-3], original, MATCH_DIR):
+            locked.append(f.name)
+            continue
         if has_no_company(original):
             skipped.append(f.name)
             continue
@@ -142,6 +149,10 @@ def main() -> int:
         print(f"\nskipped {len(skipped)} letters addressed to nobody "
               f"(empty company — regenerate once the job has one):")
         for name in skipped:
+            print(f"  {name}")
+    if locked:
+        print(f"\nskipped {len(locked)} locked letters (hand-edited / applied / expired):")
+        for name in locked:
             print(f"  {name}")
     if not args.apply:
         print("\ndry run — nothing written. Re-run with --apply.")
