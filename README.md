@@ -26,7 +26,7 @@ That was the original thesis, scoped to the UK. It hasn't changed — it just **
 
 The pipeline:
 
-1. **Scrapes** the full reachable market — Reed, Guardian Jobs, Indeed, LinkedIn (UK) + **Adzuna's multi-country API (GB/DE/NL/FR/AT/ES)** + **remote-native boards (Remotive, RemoteOK, Arbeitnow)** that surface Nordics/CH/LU remote roles Adzuna doesn't cover — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
+1. **Scrapes** the full reachable market — Reed, Guardian Jobs, Indeed, LinkedIn (UK) + **Adzuna's multi-country API (GB/DE/NL/FR/AT/ES)** + **remote-native boards (Remotive, Arbeitnow)** that surface Nordics/CH/LU remote roles Adzuna doesn't cover — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
 2. **Guards** the widened pool *before* matching — timezone-locked (Americas-hours) and on-site-abroad roles are dropped or down-scored, so a bigger pool doesn't become a noisier one
 3. **Analyzes** each job with an LLM — salary parsing, skill extraction, title-only seniority classification
 4. **Matches** each job on 5 weighted axes, including an **eligibility-aware location model** (target-country remote 0.85, EU/EMEA remote 0.80, US remote 0.18 — the timezone penalty is deliberate)
@@ -44,7 +44,7 @@ flowchart TD
     subgraph SRC["Sources — full reachable market (UK → EU/EMEA + remote)"]
         UK["UK boards<br/>Reed · Guardian · Indeed · LinkedIn"]
         ADZ["Adzuna API<br/>GB · DE · NL · FR · AT · ES"]
-        REM["Remote-native boards<br/>Remotive · RemoteOK · Arbeitnow"]
+        REM["Remote-native boards<br/>Remotive · Arbeitnow"]
         MAN["Manual intake<br/>url-list · watched · saved"]
     end
     SRC --> STG["00_saved/ staging<br/>raw JSON, URL-deduped"]

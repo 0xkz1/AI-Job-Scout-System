@@ -21,8 +21,10 @@ import re
 import sys
 import fcntl
 from datetime import datetime
+from pathlib import Path
 
 import yaml
+import gen_version
 
 from scraper_indeed import scrape_indeed_all, save_jobs as save_indeed
 # Guest endpoints, not the authenticated UI: the logged-in scraper cannot run
@@ -35,9 +37,11 @@ from scraper_reed import scrape_reed_all
 from scraper_guardian import scrape_guardian_all
 from scraper_adzuna import scrape_adzuna_all
 from scraper_remote_apis import scrape_remote_apis_all
+from scraper_url_list import normalize_url
 from analyzer import analyze_job
 from filter import filter_jobs, print_filter_summary
-from matcher import analyze_match, generate_match_report, load_user_skills, load_user_experience, make_safe_name
+from matcher import (analyze_match, generate_match_report, load_user_skills, load_user_experience,
+                     make_safe_name, read_applied_flag, read_expired_flag)
 from cv_generator import generate_cv, detect_role_type
 from cover_letter_generator import save_cover_letter
 
@@ -355,20 +359,32 @@ def archive_duplicate_files(archived_jobs: list[dict], output_dir: str):
 
 # Frontmatter keys on a match report that the analyzer does not own, so a full
 # report regeneration must copy them across instead of dropping them. Anything
-# a human ticks in the Bases table, or the WebUI writes after the fact, belongs
-# here — otherwise the next run silently discards it.
+# the WebUI writes after the fact belongs here — otherwise the next run
+# silently discards it.
+#
+# `applied:` deliberately does NOT belong here any more. generate_match_report
+# now emits it itself (so Obsidian renders a checkbox on every report), and a
+# key appearing in both places lands TWICE in the frontmatter — the generated
+# `applied: false` first, the carried `applied: true` after. Every reader takes
+# the first match, so the duplicate would read as "not applied" and quietly
+# unlock a submitted application. Ticked checkboxes ride the `expired=` /
+# `applied=` arguments instead, which is also what fixed this path resetting
+# `expired` on every run.
 PRESERVED_FRONTMATTER_PREFIXES = (
     "cv_pdf:",
     "cl_pdf:",
     "cv_review:",
     "cl_review:",
-    "applied:",
     "applied_at:",
+    "screening_passed_at:",
+    "interview_passed_at:",
+    "screening_failed_at:",
+    "interview_failed_at:",
 )
 
 
-def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
-    """Generate match reports, tailored CVs and cover letters for filter-passed jobs.
+def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
+    """Generate match reports for all jobs, and tailored CVs/cover letters for filter-passed jobs.
 
     Shared by the normal scrape path and --reanalyze. Existing CV/CL files are
     never overwritten (manual edits are preserved); match reports are always
@@ -446,14 +462,20 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
         cv_filename_md = f"{cv_name}.md"
         cl_filename_md = f"{cl_name}.md"
 
-        cv_filename_link = None
-        cl_filename_link = None
-
-        # Step 1: Generate CV first (top-N match, above threshold, has description)
+        # Step 1: Generate CV first (top-N match, above threshold, has description, not filtered out)
         within_limit = (not cv_limit) or (id(job) in eligible_ids)
-        if not within_limit and composite_score >= cv_threshold:
+        if not within_limit and composite_score >= cv_threshold and not is_filtered:
             cv_over_limit += 1
-        if within_limit and composite_score >= cv_threshold and not match.get("description_missing", False):
+        # A job ticked applied or expired is frozen (see gen_version). Both
+        # steps below only write when the file is absent, so what this stops is
+        # a FIRST CV/CL — which is the whole point for `expired`: a closed
+        # posting must not be handed freshly generated documents.
+        job_locked = gen_version.job_lock_reason(base, Path(match_dir))
+        if job_locked:
+            cv_locked += 1
+            cv_skipped += 1
+            letter_skipped += 1
+        elif within_limit and composite_score >= cv_threshold and not match.get("description_missing", False) and not is_filtered:
             cv_path = os.path.join(cv_dir, cv_filename_md)
             if not os.path.exists(cv_path):
                 role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
@@ -470,36 +492,63 @@ def generate_outputs(passed_jobs: list[dict], config: dict, output_dir: str):
                 cv_generated += 1
             else:
                 cv_skipped += 1
-            cv_filename_link = cv_filename_md
 
             # Step 2: Generate cover letter (skip if exists)
             cl_path = os.path.join(letter_dir, cl_filename_md)
             if not os.path.exists(cl_path):
-                save_cover_letter(
-                    job.get('title', ''),
-                    job.get('company', ''),
-                    job.get('location', 'Edinburgh'),
-                    job.get('description', ''),
-                    letter_dir,
-                    match_filename=match_filename,
-                    cv_filename=cv_name
-                )
-                letter_generated += 1
+                # The assembler refuses to build a letter without its authored
+                # assets rather than emitting one with the identity block
+                # missing. That is the right call for one letter and the wrong
+                # one for the run, which still has its CVs and its report to
+                # finish — so the refusal is caught per job and named.
+                try:
+                    save_cover_letter(
+                        job.get('title', ''),
+                        job.get('company', ''),
+                        job.get('location', 'Edinburgh'),
+                        job.get('description', ''),
+                        letter_dir,
+                        match_filename=match_filename,
+                        cv_filename=cv_name
+                    )
+                    letter_generated += 1
+                except Exception as e:
+                    letter_skipped += 1
+                    print(f"  ✗ CL {base[:45]}: {str(e)[:80]}", flush=True)
             else:
                 letter_skipped += 1
-            cl_filename_link = cl_filename_md
         else:
             cv_skipped += 1
             letter_skipped += 1
 
+        # The report's cv:/cover_letter: links describe WHAT IS ON DISK, not what
+        # this pass happened to generate. Deriving them from the branch above
+        # instead meant every job that fell out of the generation set — score
+        # drifting under the threshold, or the top-N% boundary moving past it —
+        # had its links dropped on the next run while its CV and CL sat there,
+        # reviewed and scored. That is how 368 of 534 existing CVs ended up
+        # orphaned in their own reports. It also un-linked the applied/expired
+        # documents, which take the skip branch by design and are exactly the
+        # ones whose links must never move.
+        cv_filename_link = cv_filename_md if os.path.exists(os.path.join(cv_dir, cv_filename_md)) else None
+        cl_filename_link = cl_filename_md if os.path.exists(os.path.join(letter_dir, cl_filename_md)) else None
+
         # Step 3: Generate match report (with links to CV/CL)
-        report = generate_match_report(job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link)
         report_path = os.path.join(match_dir, f"{match_filename}.md")
+        # The two hand-ticked checkboxes must be read off the previous report and
+        # handed back, or a full regeneration resets them. This call used to pass
+        # neither, so every run silently cleared `expired` — the sibling path
+        # (matcher.save_match_report) passed `expired` but not `applied`, so the
+        # two paths each wiped exactly what the other preserved.
+        report = generate_match_report(
+            job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link,
+            expired=read_expired_flag(Path(report_path)),
+            applied=read_applied_flag(Path(report_path)),
+        )
         # Reports are fully regenerated each run, but some frontmatter is owned
-        # by a human or the WebUI rather than the analyzer — cv_pdf/cl_pdf are
-        # written at PDF-conversion time, and applied/applied_at are ticked by
-        # hand in the Bases table. Carry them over or they'd vanish on every
-        # reanalyze.
+        # by the WebUI rather than the analyzer — cv_pdf/cl_pdf are written at
+        # PDF-conversion time. Carry them over or they'd vanish on every
+        # reanalyze. (applied/expired ride the arguments above instead.)
         if os.path.exists(report_path):
             try:
                 with open(report_path) as f:
@@ -928,7 +977,7 @@ async def main():
 
             # NOTE: Previously this block deleted old reports/CVs not in the current filtered set.
             # Removed to preserve high-match reports across runs.
-            generate_outputs(passed, config, output_dir)
+            generate_outputs(analyzed, config, output_dir)
 
             # Warn about missing descriptions
             missing_desc = [j for j in passed if j.get("match", {}).get("description_missing")]
@@ -1040,7 +1089,7 @@ async def main():
 
         if "remote_apis" in sites:
             print(f"\n{'='*60}")
-            print("🌍 REMOTE APIs (Remotive / RemoteOK / Arbeitnow)")
+            print("🌍 REMOTE APIs (Remotive / Arbeitnow)")
             print(f"{'='*60}")
             print("  (Free remote-native boards — Nordics/CH/LU/EU remote roles)")
             try:
@@ -1084,13 +1133,16 @@ async def main():
         print(f"\n{'='*60}")
         print(f"📂 MERGING {len(_saved_jobs_to_merge)} SAVED JOBS INTO ANALYSIS")
         print(f"{'='*60}")
-        # Deduplicate by URL
-        existing_urls = {j.get("url") for j in all_jobs if j.get("url")}
+        # Deduplicate by URL (normalized — the same posting reaches this list
+        # under both its clean URL and a tracking-param variant when url-list.md
+        # holds both, and two records for one job is the result)
+        existing_urls = {normalize_url(j["url"]) for j in all_jobs if j.get("url")}
         merged = 0
         for j in _saved_jobs_to_merge:
-            if j.get("url") not in existing_urls:
+            u = normalize_url(j["url"]) if j.get("url") else None
+            if u not in existing_urls:
                 all_jobs.append(j)
-                existing_urls.add(j.get("url"))
+                existing_urls.add(u)
                 merged += 1
         print(f"  → Merged {merged} new jobs (skipped {len(_saved_jobs_to_merge) - merged} duplicates)")
         print(f"{'='*60}\n")
@@ -1113,11 +1165,21 @@ async def main():
         try:
             with open(raw_path, "r", encoding="utf-8") as f:
                 existing_analyzed = json.load(f)
-            existing_urls = {j["url"] for j in existing_analyzed if j.get("url")}
+            # Normalized, because "known" is a property of the posting, not of
+            # the string it was pasted as. A LinkedIn URL copied out of the app
+            # carries ?lipi=<tracking>, an Adzuna one ?utm_medium=api — neither
+            # changes the job, but both miss an exact-string match and get
+            # ingested as a second copy of a job already in the DB. Those copies
+            # score lower by construction (the filter/LLM budget has already
+            # been spent on the original, so the re-scrape falls back to TF-IDF
+            # context and loses the title_relevance rescue): Digital Waffle "AI
+            # Applications Specialist" sat at 0.81 and its ?lipi= twin at 0.05,
+            # and 12 such pairs were in the DB on 2026-08-07.
+            existing_urls = {normalize_url(j["url"]) for j in existing_analyzed if j.get("url")}
             # duplicate_urls: alternate postings of jobs already merged away —
             # still "known", must not be re-ingested as new
             for j in existing_analyzed:
-                existing_urls.update(j.get("duplicate_urls") or [])
+                existing_urls.update(normalize_url(u) for u in (j.get("duplicate_urls") or []))
             print(f"\n  📂 Existing DB: {len(existing_analyzed)} jobs ({len(existing_urls)} known URLs)")
         except Exception:
             existing_analyzed = []
@@ -1135,12 +1197,12 @@ async def main():
     for j in all_jobs:
         u, r = j.get("url"), j.get("route")
         if u and r in priority_routes:
-            fresh_route_by_url[u] = r
+            fresh_route_by_url[normalize_url(u)] = r
     if fresh_route_by_url:
         route_upgraded = 0
         for j in existing_analyzed:
             for u in [j.get("url"), *(j.get("duplicate_urls") or [])]:
-                r = fresh_route_by_url.get(u)
+                r = fresh_route_by_url.get(normalize_url(u)) if u else None
                 if r and j.get("route") != r:
                     j["route"] = r
                     route_upgraded += 1
@@ -1149,7 +1211,8 @@ async def main():
             print(f"  🏷  Re-tagged route on {route_upgraded} already-known jobs")
 
     # --- Skip already-known jobs (incremental mode) ---
-    new_jobs = [j for j in all_jobs if j.get("url") and j["url"] not in existing_urls]
+    new_jobs = [j for j in all_jobs
+                if j.get("url") and normalize_url(j["url"]) not in existing_urls]
     no_url_jobs = [j for j in all_jobs if not j.get("url")]
     skipped_count = len(all_jobs) - len(new_jobs) - len(no_url_jobs)
     print(f"  🆕 {len(new_jobs)} new jobs to analyze (skipped {skipped_count} already in DB)")
@@ -1262,7 +1325,23 @@ async def main():
     print(f"  💾 DB updated: {len(merged_analyzed)} total jobs (+{len(new_analyzed)} new)")
 
     # --- Filter on ALL merged jobs (not just this run's new ones) ---
-    if not args.no_filter:
+    # When --from-saved found nothing new and no route re-tag, skip the
+    # expensive output regeneration (filter summary + 1811 match reports +
+    # cover letters = 577KB of stdout).  These outputs are unchanged from
+    # the last run that *did* have new jobs, so regenerating them is a no-op
+    # that costs ~18 s of wall time and, via the Streamlit PIPE, the stall
+    # observed 2026-08-06.  --reanalyze intentionally bypasses this skip.
+    _skip_outputs = (
+        not new_analyzed
+        and not no_url_jobs
+        and not locals().get("route_upgraded", 0)
+        and not getattr(args, "reanalyze", False)
+    )
+    if _skip_outputs:
+        print("  ⏭  No new jobs — skipping match report regeneration")
+        passed = [j for j in merged_analyzed]  # final summary only
+        filtered = []
+    elif not args.no_filter:
         passed, filtered = filter_jobs(merged_analyzed, config)
         print_filter_summary(passed, filtered)
     else:
@@ -1271,19 +1350,19 @@ async def main():
         print("\n  ⚠ Skipping filter (--no-filter)")
 
     # --- Save filtered results as job-description.md files ---
-    if passed:
+    if merged_analyzed and not _skip_outputs:
         print(f"\n{'='*60}")
-        print(f"💾 SAVING FILTERED JOBS...")
+        print(f"💾 SAVING ALL JOBS & MATCH REPORTS...")
         print(f"{'='*60}")
         # Save to 00_matches for unified structure
         matches_dir = os.path.join(output_dir, "00_matches")
         os.makedirs(matches_dir, exist_ok=True)
         save_indeed(passed, matches_dir)
-        # Save match reports, CVs and cover letters
-        generate_outputs(passed, config, output_dir)
+        # Save match reports for all jobs, CVs and cover letters for passed jobs
+        generate_outputs(merged_analyzed, config, output_dir)
 
     # --- Summary ---
-    if args.summary:
+    if args.summary and not _skip_outputs:
         print_summary(passed)
 
     # --- Final stats ---
@@ -1297,12 +1376,14 @@ async def main():
     print(f"  Filtered:  {len(locals().get('filtered', []))}")
     print(f"  Output:    {output_dir}/")
     
-    # Warn about missing descriptions
-    missing_desc = [j for j in passed if j.get("match", {}).get("description_missing")]
-    if missing_desc:
-        print(f"\n  ⚠️  WARNING: {len(missing_desc)} matched jobs had missing descriptions (unreliable match score, no CV/CL generated):")
-        for j in missing_desc:
-            print(f"     - {j.get('company', 'Unknown')}: {j.get('title', 'Unknown')} ({j.get('url', 'No URL')})")
+    # Warn about missing descriptions (only when outputs were actually
+    # regenerated — otherwise the warning is identical to the last run).
+    if not _skip_outputs:
+        missing_desc = [j for j in passed if j.get("match", {}).get("description_missing")]
+        if missing_desc:
+            print(f"\n  ⚠️  WARNING: {len(missing_desc)} matched jobs had missing descriptions (unreliable match score, no CV/CL generated):")
+            for j in missing_desc:
+                print(f"     - {j.get('company', 'Unknown')}: {j.get('title', 'Unknown')} ({j.get('url', 'No URL')})")
             
     print(f"{'='*60}\n")
 
