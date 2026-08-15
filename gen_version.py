@@ -43,7 +43,7 @@ TEMPLATE_DIR = PROFILE_DIR / "career" / "cover-letter"
 # that function's source — so a layout fix needs no bump here. Measured
 # 2026-08-01: at the old 13mm margin 9 of 15 CVs ran to three pages; at 10mm
 # none do.
-GEN_SPEC_VERSION = "2026-08-02.1"  # letter head: no company in the salutation, no county in the address, date moved to render time
+GEN_SPEC_VERSION = "2026-08-08.1"  # strategy-led narrative CL: plan verified evidence before drafting, then vet the full body
 
 # Data files whose CONTENT feeds every pair, regardless of role.
 _GLOBAL_FILES = [
@@ -105,11 +105,17 @@ def is_current(text: str, role_type: str = "general") -> bool:
 def role_of(text: str) -> str:
     """The role a generated doc was built for, read from its own frontmatter.
 
-    A CV names its profile (`source_profile`), a cover letter its template
-    (`source_template`); both end in the role name. Falls back to "general",
-    which is what generation itself falls back to.
+    Assembled cover letters state it outright in `role_type`, because they are
+    built from one canonical narrative rather than a per-role template — their
+    `source_template` link no longer ends in the role name. Older documents name
+    a profile (`source_profile`) or a template (`source_template`) whose link
+    tail IS the role. Falls back to "general", which is what generation itself
+    falls back to.
     """
     import re
+    m = re.search(r'^role_type:\s*"?([\w-]+)"?\s*$', text, re.MULTILINE)
+    if m:
+        return m.group(1)
     m = re.search(r'^source_(?:profile|template):\s*"?\[\[[^\]]*?([\w-]+)\]\]',
                   text, re.MULTILINE)
     return m.group(1) if m else "general"

@@ -256,7 +256,7 @@ def generate_draft(row: dict, force: bool = False) -> tuple[Path | None, str]:
     template = tpl_path.stem
 
     from cv_generator import get_header
-    role_title, role_tagline = get_header(row["role"])
+    role_title = get_header(row["role"])
 
     body = re.sub(r"\A---\n.*?\n---\n", "", tpl, flags=re.DOTALL)
     m = re.search(r'^subject:\s*"(.*?)"', tpl, flags=re.MULTILINE)
@@ -270,7 +270,6 @@ def generate_draft(row: dict, force: bool = False) -> tuple[Path | None, str]:
     fills = {
         "company": row["company"],
         "role_title": role_title,
-        "role_tagline": role_tagline,
         # HTML comments are invisible in Obsidian's markdown preview and in
         # any plain-text reading of the draft, but mark the signature's exact
         # extent so save_imap_draft can render it as a distinct styled block
