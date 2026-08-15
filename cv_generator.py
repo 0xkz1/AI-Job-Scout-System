@@ -206,6 +206,15 @@ _TOOLKIT_CATEGORY_ORDER = {
     "technical_artist":      ["3D & Generative Media", "Design & Visual Production", "Programming & Automation", "AI Systems & Agents"],
     "data_analysis":         ["Programming & Automation", "AI Systems & Agents", "Systems & Infrastructure"],
     "development_support":   ["Systems & Infrastructure", "Programming & Automation", "AI Systems & Agents"],
+    # Bridge roles: API/integration and systems work leads, design trails. A
+    # support or implementation reader is scanning for the stack they run, and
+    # product_ops is the one of the four where the front end and the visual work
+    # are part of the job rather than a footnote.
+    "implementation_specialist": ["Programming & Automation", "Systems & Infrastructure", "Frontend & Product Engineering", "AI Systems & Agents"],
+    "product_ops":           ["Frontend & Product Engineering", "Programming & Automation", "Design & Visual Production", "Systems & Infrastructure"],
+    "qa_engineer":           ["Programming & Automation", "Systems & Infrastructure", "Frontend & Product Engineering", "AI Systems & Agents"],
+    "technical_support":     ["Systems & Infrastructure", "Programming & Automation", "AI Systems & Agents"],
+    "research_engineer":     ["Programming & Automation", "AI Systems & Agents", "Systems & Infrastructure", "Documentation & Knowledge"],
 }
 
 
@@ -254,7 +263,32 @@ ROLE_KEYWORDS = {
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
     "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
-    "product_engineer": ["product engineer", "product engineering", "product-led", "product ownership", "full-stack product", "fullstack product", "product builder"],
+    "product_engineer": [
+        "product engineer", "product engineering", "product-led", "product ownership",
+        "full-stack product", "fullstack product", "product builder",
+        # AI-applications / agent-infrastructure roles: title says "AI" not
+        # "product" but the role IS product engineering with an AI toolset —
+        # building real multi-agent systems in production, not demos.
+        #
+        # Title-signal keywords: these read as role NAMES in a title, so they
+        # can fire on a title hit (×10) without polluting body-only matches
+        # the way a bare "ai applications" would — "ai applications" appeared
+        # once in a print-designer JD's prose ("experience using AI
+        # applications") and tied the graphic_designer score, stealing the
+        # route. Keep these title-only-ish; use title-specific variants below
+        # for body-signal ones.
+        "ai applications specialist", "ai application specialist",
+        "ai engineer", "ai specialist",
+        "agentic developer", "agent developer",
+        # Tool names that signal this is an agent-automation post, not a
+        # prompt-engineer post — Claude Code and Codex are explicitly named
+        # in the Digital Waffle/AI Applications Specialist JD. These are
+        # specific enough to also be safe as body-hits.
+        "claude code", "openai codex",
+        # Body-signal phrases: distinctive enough not to appear in unrelated
+        # postings. "multi-agent" in prose is almost always the real thing.
+        "multi-agent", "agent-driven", "autonomous research agent",
+    ],
     # "ux &" / "ux and" / "ux design" rather than a bare "ux": the graphic_designer
     # split gave "digital designer" away, so a hybrid title like "UX & Digital
     # Designer" scored zero here and routed to the brand CV. A bare "ux" would
@@ -268,6 +302,34 @@ ROLE_KEYWORDS = {
     # vocabulary stays with product_designer.
     "graphic_designer": ["graphic designer", "graphic design", "digital designer", "brand designer", "brand design", "brand visuals", "visual identity", "brand identity", "creative designer", "artworker", "print design", "packaging designer", "motion designer", "motion graphics", "marketing designer", "studio designer", "midweight designer", "adobe creative suite", "indesign", "illustrator"],
     "camera_assistant": ["camera assistant", "photography assistant", "photo assistant", "camera operator", "studio photographer", "photographer", "photography"],
+    # ── Bridge roles (2026-08-07) ────────────────────────────────────────────
+    # Added because the creative-technologist search alone was not producing
+    # first-round interviews: these are the adjacent jobs where the Terra Drone
+    # client-facing years and the integration/operations work count as the main
+    # qualification rather than as background. Each has its own profile, cover
+    # letter and outreach template, so a match routes to documents written for it.
+    #
+    # Phrases, not single words. "support", "implementation", "integration" and
+    # "quality" each appear in ordinary prose in most postings, and a body hit is
+    # worth 1 against a title hit's 10 — but enough stray body hits still outvote
+    # a role with no title evidence at all, which is exactly how camera_assistant
+    # once captured a Digital Designer posting.
+    "implementation_specialist": ["implementation consultant", "implementation specialist", "implementation engineer", "implementation analyst", "integration specialist", "integration consultant", "solutions engineer", "solution engineer", "solutions consultant", "onboarding specialist", "technical consultant", "professional services", "customer solutions"],
+    "product_ops": ["product operations", "product ops", "web operations", "website coordinator", "website manager", "web content", "content operations", "digital operations", "data operations", "digital coordinator", "digital producer", "web coordinator", "content executive", "cms administrator"],
+    "qa_engineer": ["qa engineer", "qa analyst", "qa tester", "quality assurance", "quality engineer", "test analyst", "test engineer", "software tester", "test automation", "sdet"],
+    "technical_support": ["technical support", "support engineer", "support analyst", "support specialist", "application support", "it support", "service desk", "helpdesk", "help desk", "1st line support", "2nd line support", "first line support", "second line support"],
+    # Research Software Engineer — Edinburgh-specific path (Bayes Centre, CodeBase,
+    # university-adjacent orgs). Irregular postings; matched on title phrases rather
+    # than bare "research" which appears in every description. The abbreviation
+    # "rse" is deliberately NOT listed: matching is substring, not word-boundary,
+    # so it fires inside "nurse", "course" and "parser" — and a title hit is
+    # worth 10, enough to route a nursing post to a research CV on its own.
+    # "research software" is listed as well as "research software engineer" so the
+    # exact title "Research Software Engineer" scores TWO title hits. It also
+    # contains web_developer's "software engineer", and scoring is by hit count with
+    # ties broken by dict order — one hit each sent the canonical RSE title to the
+    # web-developer CV.
+    "research_engineer": ["research software engineer", "research software", "research engineer", "research developer", "research computing", "scientific software", "research infrastructure", "computational researcher", "creative informatics", "data science engineer"],
 }
 
 def detect_role_type(job_title: str, job_description: str = "") -> str:
@@ -536,6 +598,41 @@ STATIC_EXPERIENCE = {
         "logo-design-for-myself",
         "feral-bestiary-plate-001",
         "portfolio_website",
+    ],
+    # Bridge roles: the evidence these readers want is a system that had to keep
+    # working for someone else — integrations, monitoring, repair — so the
+    # shipped platforms lead and the visual work stays on the "Other projects"
+    # line. product_ops is the exception: the site itself is the job there, so
+    # the Portfolio Website sits second.
+    "implementation_specialist": [
+        "taifunome-research-platform",
+        "ai-job-scout-system",
+        "hermes-ai-agent-orchestration-system",
+        "portfolio_website",
+    ],
+    "product_ops": [
+        "taifunome-research-platform",
+        "portfolio_website",
+        "ai-job-scout-system",
+        "ai-asset-tagger-system",
+    ],
+    "qa_engineer": [
+        "ai-job-scout-system",
+        "taifunome-research-platform",
+        "hermes-ai-agent-orchestration-system",
+        "portfolio_website",
+    ],
+    "research_engineer": [
+        "taifunome-research-platform",
+        "ai-job-scout-system",
+        "ai-asset-tagger-system",
+        "hermes-ai-agent-orchestration-system",
+    ],
+    "technical_support": [
+        "ai-job-scout-system",
+        "hermes-ai-agent-orchestration-system",
+        "taifunome-research-platform",
+        "web3-node-ops",
     ],
     # The general profile also carries the longest PROFILE text, so its four
     # write-ups have to be the short ones or the CV spills onto a third page.
