@@ -66,3 +66,11 @@ test-results/
 
 # Debug output
 debug_*.py
+
+# Pre-refactor snapshots (working copies, not history)
+.backup/
+
+# Generated documents that land at the repo root instead of 10_output/.
+# Sweep them into 10_output/.stray_from_root_<date>/ — that path is already
+# ignored by the 10_output/* rule above.
+/*.pdf
