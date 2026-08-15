@@ -308,6 +308,8 @@ def _call_provider(
         return _call_openrouter(messages, system_prompt, temperature, max_tokens, retries, model)
     elif provider in _OPENAI_COMPAT:
         return _call_openai_compat(provider, messages, system_prompt, temperature, max_tokens, retries, model)
+    elif provider == "litellm-gateway":
+        return _call_litellm_gateway(messages, system_prompt, temperature, max_tokens, retries, model)
     else:
         return _call_ollama(messages, system_prompt, temperature, max_tokens, retries, model)
 
@@ -405,6 +407,71 @@ def _call_stepfun(
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"StepFun API error after {attempt+1} attempts: {e}")
+
+
+def _call_litellm_gateway(
+    messages: list[dict],
+    system_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+    model: Optional[str] = None,
+) -> str:
+    """Route through atelier/forge/litellm-gateway instead of one JIS-managed key.
+
+    Added 2026-08-15, additive: nothing above this function changed, and no
+    existing provider chain (FALLBACK_PROVIDERS, reviewer._review_chain) calls
+    it yet. It exists to be tried standalone first.
+
+    The gateway holds its own model-level fallback chain (router_settings in
+    its config.yaml — mistral-medium falls to nvidia-nim, then groq-fast, then
+    zai-glm, then ollama-gemma) and its own retry/cooldown handling, so a call
+    here gets that behavior for free rather than needing key_quarantine.py's
+    44-entry table reimplemented a second time. Verified end to end 2026-08-15:
+    a mistral-medium request returned content from llama-3.1-8b-instant
+    (groq-fast) in 1.71s — the gateway's own fallback firing mid-call, invisibly
+    to the caller.
+
+    Auth is a Virtual Key scoped to this project's registered models
+    (LITELLM_GATEWAY_API_KEY), not the gateway's master key — a leaked or
+    runaway JIS key then cannot spend against another project's budget or reach
+    a model this project was never given.
+    """
+    base_url = os.environ.get("LITELLM_GATEWAY_URL", "http://localhost:4001")
+    api_key = os.environ.get("LITELLM_GATEWAY_API_KEY")
+    if not api_key:
+        raise ValueError("LITELLM_GATEWAY_API_KEY not set")
+
+    model = model or os.environ.get("LITELLM_GATEWAY_MODEL", "mistral-medium")
+    full_messages = _build_messages(messages, system_prompt)
+
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(
+                f"{base_url}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": full_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                timeout=_HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"].get("content") or ""
+            if not content.strip():
+                raise RuntimeError(
+                    f"litellm-gateway/{model} returned empty content (max_tokens={max_tokens})")
+            return content
+        except (requests.RequestException, KeyError, json.JSONDecodeError, RuntimeError) as e:
+            if attempt < retries and _retry_same_provider(e):
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"litellm-gateway API error after {attempt+1} attempts: {e}")
 
 
 def _call_openrouter(
