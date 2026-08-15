@@ -30,6 +30,10 @@ def test_spent_or_revoked_key_gets_days():
     assert kq.cooldown_for("quota exceeded") == kq.DEFAULT_COOLDOWN_DAYS
 
 
+def test_payment_required_is_a_quarantine_trigger():
+    assert kq.is_quota_or_auth_error("402 Client Error: Payment Required")
+
+
 def test_message_with_both_signals_reads_as_recoverable():
     """A 429 body that also says "quota" must take the short cooldown — the cheap
     mistake is retrying too early, not losing the key."""

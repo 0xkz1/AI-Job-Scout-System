@@ -43,7 +43,10 @@ DEFAULT_COOLDOWN_DAYS = 5
 # — far cheaper than losing a live key for five days.
 RATE_LIMIT_COOLDOWN_MINUTES = 15
 _RATE_LIMIT_MARKERS = ("429", "rate limit", "too many requests")
-_AUTH_MARKERS = ("401", "403", "unauthorized", "forbidden", "quota", "insufficient")
+_AUTH_MARKERS = (
+    "401", "402", "403", "unauthorized", "forbidden", "quota", "insufficient",
+    "payment required", "exceeded balance",
+)
 _QUOTA_MARKERS = _RATE_LIMIT_MARKERS + _AUTH_MARKERS
 
 
