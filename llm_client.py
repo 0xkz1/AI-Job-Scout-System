@@ -156,6 +156,37 @@ def _quarantine_filter_chain(chain: list[str]) -> list[str]:
         return chain
 
 
+# A per-provider cap on REQUEST BODY size, which is not the same thing as a
+# context window. Groq's models all advertise a 131k-token context, and all of
+# them still answer 413 Payload Too Large well below it — the limit is on the
+# account's request size, so no model swap escapes it. Bisected 2026-08-17:
+# 21,812 prompt chars accepted, 22,281 refused, identically on gpt-oss-120b,
+# gpt-oss-20b, qwen3.6-27b and compound-mini. 21,000 leaves margin for the JSON
+# envelope the chars are wrapped in.
+#
+# Checked BEFORE the call rather than handled after, because 413 is not a
+# transient error: retrying it, or walking 12 groq keys that will each refuse
+# the same body, is pure latency. Skipping is also what lets groq sit at the
+# FRONT of the chain — it is the fastest provider here by an order of magnitude
+# (0.4-0.6s vs mistral's several seconds), and the two call sites it cannot
+# serve (reviewer's ~98k prompt, matcher's ~63k role_fit prompt) now route past
+# it automatically instead of needing their own hand-maintained chains.
+_PROVIDER_MAX_PROMPT_CHARS = {p: 21000 for p in GROQ_PROVIDERS}
+
+
+def _size_filter_chain(chain: list[str], messages: list[dict],
+                       system_prompt: str) -> list[str]:
+    """Drop providers that cannot accept a prompt this large, preserving order.
+
+    Never returns empty: if every provider is too small, the original chain is
+    tried anyway, so a wrong cap degrades to today's behaviour (one 413) rather
+    than to no call at all.
+    """
+    size = sum(len(m.get("content", "") or "") for m in messages) + len(system_prompt or "")
+    kept = [p for p in chain if size <= _PROVIDER_MAX_PROMPT_CHARS.get(p, float("inf"))]
+    return kept or chain
+
+
 def _maybe_quarantine(provider: str, err: str) -> None:
     """Sideline a provider whose key looks exhausted or rejected."""
     try:
@@ -225,6 +256,9 @@ def call_llm(
     # key that cannot answer, and deleting it would lose the key once its quota
     # resets. Order is untouched, so it returns to its original position.
     chain = _quarantine_filter_chain(chain)
+    # Then drop whoever cannot physically accept a body this big, so an
+    # oversized prompt never spends a 413 (see _PROVIDER_MAX_PROMPT_CHARS).
+    chain = _size_filter_chain(chain, messages, system_prompt)
 
     errors: list[str] = []
     for i, prov in enumerate(chain):
