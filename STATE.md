@@ -23,7 +23,21 @@ grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
 
 ## High Priority (loop is waiting on a human)
 
-- **Four of six sites are not being scraped.** The 2026-08-15 run summary:
+- **Verify tonight (2026-08-16) that the reorder worked.** The site order was
+  changed in `job_scout_nightly.sh` (dotfiles `2cc5cdf`) to
+  `linkedin, adzuna, remote_apis, reed, guardian, indeed`. Expected: five sites
+  complete, indeed truncated instead of three sites skipped. Check with
+
+  ```bash
+  cat 10_output/_nightly_run_summary.tsv
+  ```
+
+  Any row with exit `125` means the budget still does not stretch, and the next
+  move is two cron slots rather than another reorder.
+
+### The finding that prompted it
+
+- **Four of six sites were not being scraped.** The 2026-08-15 run summary:
 
   | site | exit | elapsed |
   |------|------|---------|
@@ -35,14 +49,14 @@ grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
   | remote_apis | 125 (skipped) | 0s |
 
   The review backlog sweep also aborted on timeout. Only linkedin completed.
-  This is the standing shape of the run, not one bad night — the yield history
-  for reed, guardian, adzuna and remote_apis has been frozen at one entry each
+  This was the standing shape of the run, not one bad night — the yield history
+  for reed, guardian, adzuna and remote_apis had been frozen at one entry each
   since 08-12.
 
-  The fix is a budget question, not a scraper question: linkedin and indeed
-  together consume 4218s of a 7020s deadline, so the four sites after them
-  cannot fit. Either the two slow sites get smaller page counts, or the run
-  splits across two cron slots.
+  A budget question, not a scraper question: 1818 + 2400 + 1116 = 5334s of the
+  5400s scrape `DEADLINE`, leaving 66s against a 180s `MIN_SITE_SECONDS`. The
+  highest-yielding site of all, adzuna at 411 jobs, was sitting fourth in line
+  behind the two most expensive ones.
 
 ## Watch List
 
