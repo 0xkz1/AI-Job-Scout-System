@@ -84,6 +84,17 @@ MISTRAL_PROVIDERS = {
     "mistral-octonary": "MISTRAL_API_KEY_OCTONARY",
     "mistral-nonary": "MISTRAL_API_KEY_NONARY",
     "mistral-denary": "MISTRAL_API_KEY_DENARY",
+    # Added 2026-08-17, after 6 of the 10 above were sitting on 402. Verified
+    # per-key that day that the allowances really are independent — 4 alive and
+    # 6 spent at the same moment — so these add throughput rather than sharing
+    # a pool (which is what makes the Z.AI keys worthless in bulk). They land
+    # in reviewer's chain automatically: it builds from this table, which is
+    # why the table exists.
+    "mistral-undenary": "MISTRAL_API_KEY_UNDENARY",
+    "mistral-duodenary": "MISTRAL_API_KEY_DUODENARY",
+    "mistral-tredenary": "MISTRAL_API_KEY_TREDENARY",
+    "mistral-quattuordenary": "MISTRAL_API_KEY_QUATTUORDENARY",
+    "mistral-quindenary": "MISTRAL_API_KEY_QUINDENARY",
 }
 
 # Multi-key pools for OpenAI-compatible providers. Same pattern as MISTRAL_PROVIDERS:
@@ -291,9 +302,45 @@ def call_llm(
 
 
 # (connect, read). A hosted chat API that has not accepted a TCP connection in 5
-# seconds is not going to answer this call, and a live one streams a review back
-# in well under 45. The single 60 these replaced was applied to both phases.
+# seconds is not going to answer this call. The single 60 these replaced was
+# applied to both phases.
+#
+# 45s is the read budget for an ORDINARY call and is deliberately short: the
+# point of splitting these was to stop a dead provider costing 183s. It is the
+# wrong budget for a big prompt, though, and that cost more than it saved.
+# Measured 2026-08-17 on the real 98,577-char review prompt:
+# nemotron-super-49b answers it in 128.3s, so all seven NVIDIA keys were being
+# abandoned at 45s on every review — 315s per review spent on calls that could
+# not have succeeded, while the provider itself was healthy (HTTP 200 on
+# /v1/models, valid keys). Mistral answers the same prompt in 25.1s, so the
+# review path fell to a chain of guaranteed timeouts whenever Mistral's keys
+# were spent, which is 6 of 10 right now.
 _HTTP_TIMEOUT = (5, 45)
+
+# Above this the read budget starts growing, because the time a model needs
+# scales with what it was given. 20k chars is just above the largest ORDINARY
+# call site (cv_generator's 15,065; the cover-letter bridge's 12,644), so the
+# common path keeps exactly the 45s it has now.
+_TIMEOUT_GROWTH_FROM_CHARS = 20_000
+# One extra second per 400 chars over that. On the 98,577-char review prompt
+# this gives 241s, roughly double the 128.3s measured — headroom for a slower
+# key without ever letting a hung connection sit for the old 183s-style cost.
+_TIMEOUT_CHARS_PER_SECOND = 400
+_TIMEOUT_READ_CEILING = 300
+
+
+def _http_timeout_for(messages: list[dict], system_prompt: str = "") -> tuple[int, int]:
+    """(connect, read) sized to this prompt — see _HTTP_TIMEOUT.
+
+    Connect stays fixed: accepting a TCP connection does not get harder with a
+    longer body. Only the read budget grows.
+    """
+    connect, read = _HTTP_TIMEOUT
+    size = sum(len(m.get("content", "") or "") for m in messages) + len(system_prompt or "")
+    if size > _TIMEOUT_GROWTH_FROM_CHARS:
+        read = min(_TIMEOUT_READ_CEILING,
+                   read + (size - _TIMEOUT_GROWTH_FROM_CHARS) // _TIMEOUT_CHARS_PER_SECOND)
+    return (connect, read)
 
 # Ollama is local and can be loading a model off disk, so it keeps a long read
 # budget; only the connect phase is short, because localhost either accepts
@@ -378,7 +425,7 @@ def _call_mistral(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_HTTP_TIMEOUT,
+                timeout=_http_timeout_for(full_messages),
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
@@ -432,7 +479,7 @@ def _call_stepfun(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_HTTP_TIMEOUT,
+                timeout=_http_timeout_for(full_messages),
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -493,7 +540,7 @@ def _call_litellm_gateway(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_HTTP_TIMEOUT,
+                timeout=_http_timeout_for(full_messages),
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
@@ -538,7 +585,7 @@ def _call_openrouter(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_HTTP_TIMEOUT,
+                timeout=_http_timeout_for(full_messages),
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -646,7 +693,7 @@ def _call_openai_compat(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_HTTP_TIMEOUT,
+                timeout=_http_timeout_for(full_messages),
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
