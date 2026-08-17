@@ -106,10 +106,17 @@ def _review_chain() -> list[tuple[str, str]]:
         ("nvidia-quinary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
         ("nvidia-senary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
         ("nvidia-septenary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        # groq is gone, and not because of the model: llama-3.1-8b-instant and
-        # gpt-oss-120b return the same 413 Payload Too Large on this prompt, so
-        # the ~64k body exceeds a request-size limit on the account, not a
-        # context window. Nothing to swap to — re-add if the plan changes.
+        # groq is absent by measurement, not by model choice. Bisected against
+        # the live API 2026-08-17: it accepts 21,812 prompt chars and refuses
+        # 22,281, identically on gpt-oss-120b, gpt-oss-20b, qwen3.6-27b and
+        # compound-mini — an account request-BODY cap, not a context window
+        # (every one of those advertises 131k tokens). A review prompt measures
+        # ~98,577 chars, so nothing groq serves can take it and no model swap
+        # will change that. llm_client now enforces this generally
+        # (_PROVIDER_MAX_PROMPT_CHARS), so groq leads the general chain and is
+        # skipped here on size; do not "fix" its absence by adding it back.
+        # What WOULD make groq usable here is a smaller prompt, not a different
+        # model — the persona alone is ~55k chars.
         # Z.AI 11-key pool — chain names zai..zai-undenary (see ZAI_PROVIDERS in llm_client)
         ("zai", "glm-5.2"),
         ("zai-back", "glm-5.2"),
