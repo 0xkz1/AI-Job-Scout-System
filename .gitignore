@@ -44,6 +44,12 @@ env/
 # Environment / secrets
 .env
 *.env
+# Both patterns above only match a name ENDING in .env, so every timestamped
+# backup this repo's own scripts leave behind (.env.bak_20260818_072116) sat
+# untracked but unignored — one `git add -A` from committing 24 Mistral keys,
+# plus the groq, zai and nvidia pools, in plaintext.
+.env.*
+!.env.example
 cookies/
 .browser_context/
 

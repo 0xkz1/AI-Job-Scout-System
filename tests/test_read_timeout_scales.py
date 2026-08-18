@@ -58,9 +58,27 @@ def test_the_budget_grows_with_the_prompt():
 
 def test_every_hosted_provider_uses_the_scaled_timeout():
     """A provider left on the bare constant would keep timing out on reviews
-    while the others no longer do — the failure this whole change removes."""
+    while the others no longer do — the failure this whole change removes.
+
+    Counts the call to _http_timeout_for rather than the whole `timeout=...`
+    expression: litellm-gateway wraps it in a max() against a floor, because
+    one request there fans out across the gateway's own retries and model
+    fallbacks and so needs more than any single model's budget. That is still
+    a scaled timeout — it is the bare constant this test exists to catch.
+    """
     import inspect
     src = inspect.getsource(llm_client)
     assert "timeout=_HTTP_TIMEOUT" not in src, \
         "a requests call still uses the unscaled constant"
-    assert src.count("timeout=_http_timeout_for(full_messages)") >= 5
+    assert src.count("_http_timeout_for(full_messages)") >= 5
+
+
+def test_the_gateway_outwaits_a_single_provider():
+    """The gateway is a chain behind one request, so a budget sized to one
+    model's response cut it off mid-chain — measured 2026-08-18, sixteen of
+    ninety-two CV calls timed out at 45s against a gateway that logged 200 OK
+    for them afterwards, which is a paid-for answer thrown away.
+    """
+    ordinary = llm_client._http_timeout_for(_msgs(14_947))[1]
+    assert llm_client._GATEWAY_READ_TIMEOUT > ordinary, \
+        "the gateway floor must exceed the ordinary per-provider budget"

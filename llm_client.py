@@ -216,6 +216,16 @@ def _is_transient_error(e: Exception) -> bool:
         "429", "rate limit", "too many requests", "quota",
         "402", "502", "503", "504", "500", "payment required", "bad gateway", "service unavailable",
         "timeout", "timed out", "connection", "eof", "refused", "reset",
+        # A reasoning model that spent its whole max_tokens budget on hidden
+        # reasoning and returned HTTP 200 with no content. The raise site says
+        # it exists so "the caller's provider chain [can] fall through to the
+        # next model" — but without this marker the chain treated it as fatal
+        # and stopped at the provider that produced it. groq/gpt-oss-120b does
+        # this deterministically on short-output calls, and groq leads the
+        # chain, so every cover-letter bridge died on the FIRST provider while
+        # eight Mistral keys sat live and unreached. It is transient in the only
+        # sense that matters here: another model answers it.
+        "returned empty content",
     ]
     return any(m in err_str for m in markers)
 
@@ -327,6 +337,22 @@ _TIMEOUT_GROWTH_FROM_CHARS = 20_000
 # key without ever letting a hung connection sit for the old 183s-style cost.
 _TIMEOUT_CHARS_PER_SECOND = 400
 _TIMEOUT_READ_CEILING = 300
+
+# The gateway is a chain, not a provider, so the budget that fits one model's
+# response time cuts it off mid-chain. A single call there can walk several
+# deployments (its router_settings.num_retries is 2) and then several models
+# (its fallbacks run mistral-medium → nvidia-nim → groq-fast → zai-glm →
+# ollama-gemma) before anything answers.
+#
+# Measured 2026-08-18: an ordinary 14,947-char prompt comes back in 1.28s when
+# the first deployment takes it. But sixteen of the ninety-two CVs generated
+# that morning hit the 45s ceiling instead — and the gateway logged 200 OK for
+# them afterwards. So the timeout was not saving anything: JIS was walking away
+# from answers it had already paid for, then spending a second key on the same
+# work. A hung gateway now costs one 300s wait instead of one 45s wait, and
+# _retry_same_provider already refuses to try a timed-out provider twice, so
+# that cost is paid once per call rather than three times.
+_GATEWAY_READ_TIMEOUT = int(os.environ.get("LITELLM_GATEWAY_READ_TIMEOUT", "300"))
 
 
 def _http_timeout_for(messages: list[dict], system_prompt: str = "") -> tuple[int, int]:
@@ -540,7 +566,14 @@ def _call_litellm_gateway(
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                 },
-                timeout=_http_timeout_for(full_messages),
+                # Not _http_timeout_for alone: that sizes a budget to one
+                # model's response time, and this endpoint is a whole chain
+                # behind one request. See _GATEWAY_READ_TIMEOUT. The
+                # prompt-scaled value still wins when it is the larger of the
+                # two, so a review-sized body keeps the headroom it was given.
+                timeout=(_HTTP_TIMEOUT[0],
+                         max(_http_timeout_for(full_messages)[1],
+                             _GATEWAY_READ_TIMEOUT)),
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"].get("content") or ""
