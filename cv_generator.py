@@ -206,6 +206,12 @@ _TOOLKIT_CATEGORY_ORDER = {
     "technical_artist":      ["3D & Generative Media", "Design & Visual Production", "Programming & Automation", "AI Systems & Agents"],
     "data_analysis":         ["Programming & Automation", "AI Systems & Agents", "Systems & Infrastructure"],
     "development_support":   ["Systems & Infrastructure", "Programming & Automation", "AI Systems & Agents"],
+    # Split out of development_support: a platform/infra reader scans for the
+    # stack they operate before the language they write in, and reads the AI
+    # block as tooling used across the SDLC rather than as a novelty — so the
+    # documentation block trails the three that matter and the design work sits
+    # last by master-file order.
+    "platform_engineer":     ["Systems & Infrastructure", "Programming & Automation", "AI Systems & Agents", "Documentation & Knowledge"],
     # Bridge roles: API/integration and systems work leads, design trails. A
     # support or implementation reader is scanning for the stack they run, and
     # product_ops is the one of the four where the front end and the visual work
@@ -258,7 +264,23 @@ def get_toolkit(role_type: str = "general") -> str:
 
 # Role type detection from job title/description
 ROLE_KEYWORDS = {
-    "development_support": ["development support", "dev support", "tools engineer", "pipeline engineer", "build engineer", "internal tools", "production support", "platform engineer"],
+    "development_support": ["development support", "dev support", "tools engineer", "pipeline engineer", "build engineer", "internal tools", "production support"],
+    # "platform engineer" used to route here, which answered an infrastructure
+    # posting with a "Development Support Engineer" headline — a support title
+    # for a build-and-own-it job. Infra/SRE/DevOps postings ask for the stack
+    # you run, so they get their own profile and their own project ordering.
+    # "platform engineer" covers "Platform Engineering" by substring; the two
+    # devops spellings do not cover each other. Bare "sre" is deliberately
+    # absent — it matches inside unrelated words.
+    "platform_engineer": [
+        "platform engineer", "infrastructure engineer", "devops", "dev ops",
+        "site reliability", "cloud engineer", "cloud infrastructure",
+        "internal developer platform",
+        # Body-signal tool names: specific enough that a posting naming them is
+        # an infra posting, and a body hit is worth a tenth of a title hit, so
+        # they cannot outvote a title that names a different discipline.
+        "kubernetes", "terraform", "observability",
+    ],
     "data_analysis": ["data entry", "data analyst", "data input", "data quality", "data validation", "data cleaning", "data processing", "spreadsheet", "excel specialist"],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
@@ -418,6 +440,37 @@ def _cv_root() -> "Path | None":
 _ENTRY_DIRS = (("projects", "project"), ("experience", "employment"))
 
 
+# The reference translation trailing a CV entry. Every source file under
+# career/cv/** carries the same shape — a "## 和訳" heading, a parenthetical
+# note addressed to whoever edits the file, then the translated body — so one
+# splitter serves projects, experience and profiles alike.
+_TRANSLATION_HEADING = re.compile(r"\n##\s*和訳\s*\n")
+# "（参照用。CVには含まれない — …）". Written to the author, never to a reader.
+_TRANSLATION_NOTE = re.compile(r"\A\s*（[^）]*）\s*")
+
+
+def _split_translation(body: str) -> tuple[str, str]:
+    """Split a CV entry body into (English, Japanese).
+
+    The Japanese half was discarded outright until now: it exists so the author
+    can check a translation against the English, and letting it through printed
+    both languages onto one CV. But it is a real second rendering of the same
+    entry — written by hand, and the only one anybody has verified — so the
+    Japanese CV reads it rather than paying a model to translate at generation
+    time. That is the whole reason a ja CV can be assembled and not written.
+
+    Returns "" for Japanese when a file has no 和訳 section. Callers must treat
+    that as "this entry has no Japanese", never as a reason to fall back to the
+    English text: a Japanese CV with one English paragraph in it reads as a
+    mistake, and silently mixing them is how it would happen.
+    """
+    halves = _TRANSLATION_HEADING.split(body, maxsplit=1)
+    english = halves[0].strip()
+    if len(halves) == 1:
+        return english, ""
+    return english, _TRANSLATION_NOTE.sub("", halves[1].lstrip(), count=1).strip()
+
+
 def load_projects_from_md() -> list[dict]:
     """
     Load CV entries from 00_Kazuki/career/cv/{projects,experience}/*.md
@@ -451,17 +504,21 @@ def load_projects_from_md() -> list[dict]:
                 if is_draft:
                     continue  # Skip draft projects
                 
-                # The body IS the CV entry — but a trailing "## 和訳" section
-                # (reference translation for the user) must never reach the CV.
-                import re as _re
-                description = _re.split(r"\n##\s*和訳", parts[2], maxsplit=1)[0].strip()
-                
+                # The body IS the CV entry, in both languages: the English half
+                # and the "## 和訳" half are two renderings of one record, and
+                # neither may leak into a CV written in the other language.
+                description, description_ja = _split_translation(parts[2])
+
                 project = {
                     "id": frontmatter.get("id", fpath.stem),
                     "title": frontmatter.get("title", ""),
                     "role": frontmatter.get("role", ""),
                     "period": str(frontmatter.get("period", "")),
                     "description": description,
+                    # "" when the file carries no 和訳 — _entry_description keeps
+                    # such an entry off the Japanese CV rather than printing the
+                    # English paragraph in its place.
+                    "description_ja": description_ja,
                     "tags": frontmatter.get("tags", []),
                     "skills": frontmatter.get("skills", []),
                     # A live URL is the one claim on a CV a reader can check
@@ -633,6 +690,18 @@ STATIC_EXPERIENCE = {
         "hermes-ai-agent-orchestration-system",
         "taifunome-research-platform",
         "web3-node-ops",
+    ],
+    # web3-node-ops sits SECOND, higher than anywhere else: it is the only entry
+    # that is operations rather than construction — nodes someone else's money
+    # depended on, kept up over SSH and watched with Prometheus — and an infra
+    # reader weighs that above another Python pipeline. It is also the shortest
+    # write-up in the bank, so it is the one the page-fill pass can afford to
+    # promote when the model leaves the CV short.
+    "platform_engineer": [
+        "taifunome-research-platform",
+        "web3-node-ops",
+        "ai-job-scout-system",
+        "hermes-ai-agent-orchestration-system",
     ],
     # The general profile also carries the longest PROFILE text, so its four
     # write-ups have to be the short ones or the CV spills onto a third page.
@@ -837,6 +906,13 @@ INSTRUCTIONS:
 10. For concept-art / illustration / game-art / 3D roles, prioritise Feral
    Bestiary, Arch Viz, and Hive Floral Pod.
 11. If the job involves data/automation, prioritize Independent Development.
+12. For platform / infrastructure / DevOps / SRE roles (role type
+   platform_engineer), Web3 Node Ops MUST be one of the four write-ups and must
+   be ranked SECOND, directly after TAIFUNOME. It is the only entry that is
+   operating someone else's live services rather than building one's own, which
+   is the evidence these readers want; it is short, so it costs little. Do not
+   drop it to the "other projects" line because a larger Python project matches
+   more keywords.
 
 Write ONLY the Experience section content. No "EXPERIENCE" header.
 NEVER open with the job title you are writing for ("{job_title}") or any other
@@ -1127,6 +1203,22 @@ def _split_entries(body: str) -> list[str]:
     return entries
 
 
+def _shorten_entry(entry: str, excess_words: int) -> tuple[str, int]:
+    """Drop trailing bullets from one entry, keeping its title and first bullet.
+
+    Returns the shortened entry and the words still to find.
+    """
+    lines = entry.split("\n")
+    bullet_idx = [i for i, l in enumerate(lines) if l.strip().startswith("•")]
+    # Keep the first bullet: an entry reduced to a bare title line reads as a
+    # project someone forgot to describe, which is worse than not writing it up.
+    while excess_words > 0 and len(bullet_idx) > 1:
+        cut = bullet_idx.pop()
+        excess_words -= len(lines[cut].split())
+        del lines[cut]
+    return "\n".join(lines), excess_words
+
+
 def _trim_experience_body(body: str, excess_words: int, min_entries: int = _CV_MIN_ENTRIES) -> str:
     """Drop write-ups from the end until the CV is back inside the page budget.
 
@@ -1134,11 +1226,23 @@ def _trim_experience_body(body: str, excess_words: int, min_entries: int = _CV_M
     and it is not lost — _other_projects_line rebuilds itself from whatever is
     no longer written up, so the project still appears, just without its
     paragraph.
+
+    Below min_entries the unit of removal changes from the entry to the bullet.
+    Dropping whole write-ups is the right first move and the wrong last one:
+    once three are left there is nothing further to give up, so the CV simply
+    shipped long — 1188 and 1152 words on 2026-08-18, against a 1120 ceiling
+    and a measured spill at 1145. Bullets are the finer instrument. They come
+    off the back of the least relevant entry first, and never off the first
+    entry, which gen_version pins as TAIFUNOME on every CV.
     """
     entries = _split_entries(body)
     while excess_words > 0 and len(entries) > min_entries:
         dropped = entries.pop()
         excess_words -= len(dropped.split()) + _ENTRY_LINE_COST
+    for i in range(len(entries) - 1, 0, -1):
+        if excess_words <= 0:
+            break
+        entries[i], excess_words = _shorten_entry(entries[i], excess_words)
     return "\n\n".join(entries)
 
 
