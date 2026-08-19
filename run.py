@@ -404,9 +404,19 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
     # on the top generation_top_percent of the ranked pool — the same selection
     # every stage uses (selection.py), so generation and review stay in step.
     # A count cap still guards against a huge first run.
-    from selection import select_top
+    from selection import select_top, stretch_jobs
     selected = select_top("generation", config, jobs=passed_jobs)
     eligible_ids: set[int] = {id(j) for j in selected}
+    # Postings the level gate rejected that are still worth judging. They are
+    # not in passed_jobs and never will be, so they cannot come through
+    # select_top — they carry their own small allowance instead, and they do not
+    # count against cv_generation_limit, which governs the ranked pool.
+    from matcher import set_stretch_urls
+    _stretch = stretch_jobs(config, jobs)
+    stretch_ids: set[int] = {id(j) for j in _stretch}
+    # The report writer needs the same answer, and it must come from this run's
+    # jobs rather than from the DB on disk, which is still last night's.
+    set_stretch_urls(j.get("url") for j in _stretch)
     cv_limit = config.get("cv_generation_limit", 0)
     if cv_limit and len(eligible_ids) > cv_limit:
         # The cap counts what this run would WRITE, not where a job sits in the
@@ -466,6 +476,16 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
         within_limit = (not cv_limit) or (id(job) in eligible_ids)
         if not within_limit and composite_score >= cv_threshold and not is_filtered:
             cv_over_limit += 1
+        # A stretch job qualifies on none of those three: it is filtered by
+        # definition, and its composite sits under the threshold because the
+        # level rejection is what put it there. It is admitted on the strength
+        # of its skills overlap alone (selection.stretch_jobs), so that the CV
+        # review — the score actually used to decide whether to apply — exists
+        # for it at all.
+        is_stretch = id(job) in stretch_ids
+        wants_documents = is_stretch or (
+            within_limit and composite_score >= cv_threshold and not is_filtered
+        )
         # A job ticked applied or expired is frozen (see gen_version). Both
         # steps below only write when the file is absent, so what this stops is
         # a FIRST CV/CL — which is the whole point for `expired`: a closed
@@ -475,7 +495,7 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
             cv_locked += 1
             cv_skipped += 1
             letter_skipped += 1
-        elif within_limit and composite_score >= cv_threshold and not match.get("description_missing", False) and not is_filtered:
+        elif wants_documents and not match.get("description_missing", False):
             cv_path = os.path.join(cv_dir, cv_filename_md)
             if not os.path.exists(cv_path):
                 role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
@@ -1301,6 +1321,18 @@ async def main():
         if _drop:
             match_all(_drop, config, label="scored (filtered out, TF-IDF only)",
                       skip_llm_context=True)
+            # The stretch tier is chosen from the rejects and then paid for
+            # properly. It has to run in this order: the ranking is by skills
+            # score, which only exists once a job has been matched at all, so
+            # the cheap pass comes first and the handful it promotes are scored
+            # again with the real context call. Without that second pass a
+            # stretch job carries a TF-IDF context at 64% of the composite
+            # weight and its report reads as a weak match whatever the CV
+            # review later says.
+            from selection import stretch_jobs
+            _stretch = stretch_jobs(config, _drop)
+            if _stretch:
+                match_all(_stretch, config, label="rescored (stretch tier, LLM context)")
     else:
         new_analyzed = []
         print("  ✅ No new jobs — using existing DB")

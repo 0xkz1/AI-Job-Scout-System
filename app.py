@@ -971,7 +971,7 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
             # ATX headings run inline markdown, so ### processes both.
             level = "###" if titles_want_space else "####"
             out_lines.append(f"\n{level} {stripped}")
-        elif stripped.startswith("**Other projects:"):
+        elif stripped.startswith(("**Other projects:", "**その他のプロジェクト:")):
             # Trails the last project's bullet list, so without a break of its
             # own markdown reads it as more of that list and it ends up flush
             # against the bullets. Its own paragraph, with room above.

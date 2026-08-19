@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 
 import yaml
@@ -66,7 +67,7 @@ def max_pages_for(site: str, config: dict | None = None) -> int:
         return default
 
 
-def search_pairs(config: dict | None = None) -> list[tuple[str, str]]:
+def search_pairs(config: dict | None = None, site: str | None = None) -> list[tuple[str, str]]:
     """Every (keyword, location) search a site walks, in order.
 
     The full cross product is not affordable: each pair is one serial search
@@ -85,14 +86,24 @@ def search_pairs(config: dict | None = None) -> list[tuple[str, str]]:
     Every site loops over this rather than nesting its own keywords x locations,
     so a budget decision made in config.yaml applies to all of them — and the
     invariant counts the same pairs the scrapers walk.
+
+    `site_only_locations` is the one exception, for a location only one site can
+    search at all: LinkedIn's guest endpoint takes a country plus its remote
+    workplace filter, so "Remote (Japan)" is a real search there, while reed and
+    guardian are UK boards that would read the same string as a town name and
+    spend a search returning nothing. Those locations stay invisible unless the
+    caller names the site they belong to, so a scraper that does not ask — and
+    the global budget count — keep exactly the pairs they had.
     """
     config = config if config is not None else load_config()
     keywords = config.get("keywords") or []
     locations = config.get("locations") or [""]
     per_keyword = config.get("keyword_locations") or {}
+    extra = list((config.get("site_only_locations") or {}).get(site) or []) if site else []
     pairs: list[tuple[str, str]] = []
     for kw in keywords:
-        locs = per_keyword.get(kw) or locations
+        locs = list(per_keyword.get(kw) or locations)
+        locs += [loc for loc in extra if loc not in locs]
         pairs += [(kw, loc) for loc in locs]
     return pairs
 
@@ -234,6 +245,77 @@ def ranked_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> l
     ]
     passed.sort(key=lambda j: j["match"]["composite_score"], reverse=True)
     return passed
+
+
+# A title that names its own seniority — "Principal UX/UI Designer", "Staff
+# Brand Designer", "Sr. Product Designer" — is senior in the discipline itself,
+# and no document changes that. A title that names none of these was called
+# senior by the analyser reading the requirements list instead, which is a
+# different situation: the Inspired Thinking Group "Creative Technologist/AI
+# Specialist" posting is squarely about AI prototyping with Claude Code, MCP
+# services and agents, and was classified senior on "5 years React, 1 year AWS".
+# Splitting on the title is what makes the stretch pool worth looking at — of
+# 187 senior-filtered postings, 93 have a level-neutral title, and that cut is
+# the difference between a list headed by Principal Designer roles and one that
+# reaches the AI-prototyping post twelfth.
+_INTRINSIC_SENIORITY_RE = re.compile(
+    r"\b(senior|snr|sr\.?|staff|principal|lead|head\s+of|chief|vp|director|architect)\b",
+    re.IGNORECASE,
+)
+
+
+def _skills_score(job: dict) -> float:
+    match = job.get("match") or {}
+    skills = match.get("skills") or {}
+    try:
+        return float(skills.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def stretch_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> list[dict]:
+    """Level-rejected postings still worth a CV, cover letter and review.
+
+    A posting the level gate rejects gets no documents and therefore no CV
+    review — and the review score is the signal actually used to decide whether
+    to apply, so the filter does not just deprioritise these, it makes them
+    unjudgeable. This returns the small set worth judging anyway.
+
+    Ranked by SKILLS score, not composite. For a filtered job the composite is
+    dominated by a context score the LLM never produced — TF-IDF stands in, at
+    64% of the weight — and TF-IDF compares the posting's prose style to the
+    candidate's, which is the wrong question here. Ranked by composite the AI
+    prototyping post came 106th of 203; by skills score, which is direct
+    keyword overlap with the skill inventory and costs nothing, it came 12th.
+
+    `stretch_top_count` in config.yaml caps the set; 0 disables it entirely.
+    """
+    from filter import passes_filter  # local import: avoids a cycle at import time
+    config = config if config is not None else load_config()
+    if jobs is None:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    try:
+        cap = int(config.get("stretch_top_count", 0) or 0)
+    except (TypeError, ValueError):
+        return []
+    if cap <= 0:
+        return []
+
+    candidates = []
+    for job in _dedupe(jobs):
+        if not job.get("match") or is_unscoreable(job):
+            continue
+        passed, reason = passes_filter(job, config)
+        # Only the level gate, and only one step up. "director" is two, and
+        # nothing in the record speaks to it.
+        if passed or not reason.startswith("level ") or "'senior'" not in reason:
+            continue
+        if _INTRINSIC_SENIORITY_RE.search(job.get("title") or ""):
+            continue
+        candidates.append(job)
+
+    candidates.sort(key=_skills_score, reverse=True)
+    return candidates[:cap]
 
 
 def unscoreable_jobs(jobs: list[dict] | None = None) -> list[dict]:

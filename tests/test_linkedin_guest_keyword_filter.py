@@ -32,7 +32,7 @@ def test_postings_survive_the_keyword_filter_instead_of_raising(monkeypatch):
     monkeypatch.setattr(scraper_indeed, "load_description_cache", lambda: {}, raising=False)
     monkeypatch.setattr("scraper_helper.load_description_cache", lambda: {})
     monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
-    monkeypatch.setattr("selection.search_pairs", lambda config: [("Designer", "Edinburgh")])
+    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [("Designer", "Edinburgh")])
 
     config = {"keywords": ["Designer"]}
     out = guest.scrape_linkedin_guest_all(config)
@@ -58,7 +58,7 @@ def test_the_configured_keywords_are_the_ones_applied(monkeypatch):
     monkeypatch.setattr(guest, "fill_descriptions", lambda jobs, cache: None)
     monkeypatch.setattr("scraper_helper.load_description_cache", lambda: {})
     monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
-    monkeypatch.setattr("selection.search_pairs", lambda config: [("Designer", "Edinburgh")])
+    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [("Designer", "Edinburgh")])
     monkeypatch.setattr(scraper_indeed, "filter_jobs_by_keywords", spy)
 
     guest.scrape_linkedin_guest_all({"keywords": ["Designer", "Creative Technologist"]})
@@ -75,6 +75,6 @@ def test_a_config_without_keywords_does_not_raise(monkeypatch):
     monkeypatch.setattr(guest, "fill_descriptions", lambda jobs, cache: None)
     monkeypatch.setattr("scraper_helper.load_description_cache", lambda: {})
     monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
-    monkeypatch.setattr("selection.search_pairs", lambda config: [("Designer", "Edinburgh")])
+    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [("Designer", "Edinburgh")])
 
     guest.scrape_linkedin_guest_all({})

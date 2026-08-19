@@ -42,18 +42,39 @@ SALARY_PATTERNS = [
     re.compile(r"[£€\$]\s*([\d,]+)\s*\+"),
 ]
 
+# The patterns above are two different kinds. The first three anchor the figure
+# to a period word sitting right after it ("per year", "/yr", "per hour"); the
+# last two anchor to nothing — in a thirty-character salary field "Up to
+# £60,000" can only be the salary, but in a seven-thousand-character description
+# it matches the referral bonus, the relocation package, or the Peloton
+# cashback. Eight postings were filtered out on figures like that, including a
+# Creative Technologist role rejected for a "£1,500 salary" that was a referral
+# bonus, and two where the sentence read "Starting salary of £30000 - £33000
+# with a yearly bonus of up to £1,530" and the bonus won. So a description is
+# scanned with the anchored patterns only; the salary field keeps all five.
+DESCRIPTION_SALARY_PATTERNS = SALARY_PATTERNS[:3]
 
-def parse_salary(text: str) -> dict:
+# Which pattern matched says whether the figure is hourly. Asking the whole text
+# instead ("hour" in text.lower()) is fine for a salary field and wrong for a
+# description, where "37.5 hours per week" three paragraphs away turned an
+# annual range into an hourly one — 144 of them.
+_HOURLY_PATTERNS = frozenset({SALARY_PATTERNS[2]})
+
+
+def parse_salary(text: str, patterns: list | None = None) -> dict:
     """
     Extract salary info from text.
     Returns: {min, max, currency, period, raw}
+
+    `patterns` narrows the search; pass DESCRIPTION_SALARY_PATTERNS when the
+    text is prose rather than a salary field.
     """
     result = {"min": None, "max": None, "currency": None, "period": None, "raw": text}
 
     if not text:
         return result
 
-    for pattern in SALARY_PATTERNS:
+    for pattern in (patterns if patterns is not None else SALARY_PATTERNS):
         match = pattern.search(text)
         if match:
             groups = match.groups()
@@ -64,10 +85,7 @@ def parse_salary(text: str) -> dict:
             elif "$" in text:
                 currency = "USD"
 
-            if "hour" in text.lower():
-                period = "hourly"
-            else:
-                period = "annual"
+            period = "hourly" if pattern in _HOURLY_PATTERNS else "annual"
 
             if len(groups) >= 2:
                 # Range: £40,000 - £55,000
@@ -331,17 +349,26 @@ def classify_employment_type(text: str) -> list[str]:
 
 # --- Work style ---
 
+# The Japanese terms are read in the same pass, because a posting written in
+# Japanese states its work style in Japanese and would otherwise fall through to
+# "unknown" and buy an Ollama call to be told the same thing. They are matched at
+# the same precision as the English side: フルリモート/在宅勤務 is remote,
+# リモート可 is permission to work remotely SOMETIMES, which is hybrid, and 出社
+# or 常駐 is an office.
 WORK_STYLE_PATTERNS = {
     "remote": re.compile(
-        r"remote|work from home|wfh|fully remote|100%\s*remote|home[-\s]?based|distributed",
+        r"remote|work from home|wfh|fully remote|100%\s*remote|home[-\s]?based|distributed"
+        r"|フルリモート|完全リモート|フルリモ|全国リモート|リモートワーク|在宅勤務|テレワーク",
         re.IGNORECASE,
     ),
     "hybrid": re.compile(
-        r"hybrid|mix of home|office.*home|home.*office|flexible working|partial remote",
+        r"hybrid|mix of home|office.*home|home.*office|flexible working|partial remote"
+        r"|ハイブリッド|一部リモート|リモート可|リモート勤務可|週[0-9０-９]回出社",
         re.IGNORECASE,
     ),
     "onsite": re.compile(
-        r"on[-\s]?site|in[-\s]?office|office[-\s]?based|on location|office only",
+        r"on[-\s]?site|in[-\s]?office|office[-\s]?based|on location|office only"
+        r"|出社|常駐|オフィス勤務",
         re.IGNORECASE,
     ),
 }
@@ -821,9 +848,10 @@ def analyze_job(job: dict, skip_llm: bool = False) -> dict:
 
     salary_info = parse_salary(salary_text)
 
-    # Also try to find salary in description
+    # Also try to find salary in description — anchored patterns only, or the
+    # benefits list gets read as the salary. See DESCRIPTION_SALARY_PATTERNS.
     if not salary_info.get("min") and not salary_info.get("max"):
-        desc_salary = parse_salary(description)
+        desc_salary = parse_salary(description, DESCRIPTION_SALARY_PATTERNS)
         if desc_salary.get("min") or desc_salary.get("max"):
             salary_info = desc_salary
 

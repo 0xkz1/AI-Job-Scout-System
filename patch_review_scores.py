@@ -25,7 +25,10 @@ from matcher import read_review_scores
 MATCH_DIR = Path(__file__).resolve().parent / "10_output" / "00_matches"
 
 _SCORE_KEYS = ("cv_review_score", "cv_review_current",
-               "cl_review_score", "cl_review_current")
+               "cl_review_score", "cl_review_current",
+               # The CL has no score and never will; these two carry what its
+               # review does know. See _cl_review_flags in matcher.py.
+               "cl_fact_block", "cl_opening_source")
 
 
 def patch(text: str, base: str) -> tuple[str, bool]:

@@ -90,6 +90,19 @@ def _review_chain() -> list[tuple[str, str]]:
         if chain:
             return _drop_quarantined(chain)
     return _drop_quarantined([
+        # The gateway leads, ahead of the keys this project holds itself, because
+        # it holds a SUPERSET of them — the same fifteen plus nine more, 24
+        # mistral-medium deployments as of 2026-08-18 — behind its own cooldown
+        # table and its own model-level fallback (nvidia-nim, groq-fast, zai-glm,
+        # ollama). Walking MISTRAL_KEYS first would spend the chain re-testing
+        # keys the gateway already knows are spent: five of the fifteen were
+        # sitting on multi-day 402s that day, and every review paid for them.
+        # Its model id is the gateway's own `mistral-medium`, not REVIEW_MODEL —
+        # the gateway maps that to mistral-medium-latest internally.
+        # Verified 2026-08-18: a 98,000-char prompt (review-sized) answered in
+        # 45.9s. If the gateway is down the entry simply fails and the chain
+        # falls through to the direct keys below, which is the safe direction.
+        ("litellm-gateway", "mistral-medium"),
         *((provider, REVIEW_MODEL) for provider in MISTRAL_KEYS),
         # mistralai/mistral-medium-3.5-128b does not exist on NIM and never
         # did: all seven keys answered 410 Gone, which reads as a dead account

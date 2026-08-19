@@ -886,6 +886,13 @@ _COUNTRY_ALIASES = {
 _UK_MARKERS = ("united kingdom", "uk", "scotland", "england", "wales", "britain",
                "edinburgh", "glasgow", "london", "manchester", "birmingham",
                "dundee", "aberdeen", "leeds", "bristol")
+# Matched with word boundaries, not as substrings. "uk" is two letters and sits
+# inside ordinary place names — Fukuoka, Tsukuba, Fukushima all contain it, and a
+# substring test read every one of them as the United Kingdom: the posting then
+# skipped the international branch entirely and was scored against the UK city
+# tiers. Found 2026-08-19 while adding the Japan search, on "Tsukuba, Ibaraki,
+# Japan". The same trap is why exclude_description_keywords is word-bounded.
+_UK_RE = re.compile(r"\b(" + "|".join(re.escape(m) for m in _UK_MARKERS) + r")\b")
 
 _AMERICAS_RE = re.compile(
     r"\b(u\.?s\.?a?|united states|americas?|californ\w*|new york|canada|"
@@ -893,6 +900,35 @@ _AMERICAS_RE = re.compile(
     r"boston|chicago|denver|atlanta)\b")
 # US state abbreviations after a comma ("San Francisco, CA").
 _US_STATE_ABBR_RE = re.compile(r",\s*(ca|ny|tx|wa|ma|il|co|ga|or|fl|nc|va|pa|az)\b")
+
+
+# Japan, by the shapes LinkedIn writes: "Tokyo, Tokyo, Japan", "Greater Tokyo
+# Area", "Kanagawa, Japan". The prefecture names carry the ones that never say
+# "Japan" at all.
+_JAPAN_RE = re.compile(
+    r"\b(japan|japanese|tokyo|osaka|kyoto|yokohama|nagoya|fukuoka|sapporo|kobe|"
+    r"kawasaki|saitama|chiba|kanagawa|hyogo|aichi|hokkaido|ibaraki|tochigi|"
+    r"tsukuba|shibuya|shinjuku|minato)\b|日本")
+
+
+def _japan_verdict(is_remote: bool) -> dict:
+    """Japan is the one foreign market that is not foreign to the candidate:
+    citizenship, no visa question, native language, and a CV that exists in
+    Japanese. So remote scores with the target markets rather than as the
+    unknown-but-plausible 0.45 any other non-target country gets.
+
+    It is held just under them because of the clock, not the market — JST runs
+    8-9h ahead of the UK, so a role with synchronous hours is a night shift.
+    That is the same objection the US branch carries, in the other direction.
+
+    On-site is out of scope for exactly the reason every other country's is: the
+    search does not fund a move, and the candidate lives in the UK.
+    """
+    if is_remote:
+        return {"score": 0.82,
+                "notes": ["✅ Remote — Japan (home market, right to work; "
+                          "JST is 8-9h ahead of the UK — verify the overlap)"]}
+    return {"score": 0.10, "notes": ["❌ Japan on-site (relocation out of scope)"]}
 
 
 def _classify_international_location(loc: str, is_remote: bool,
@@ -919,6 +955,8 @@ def _classify_international_location(loc: str, is_remote: bool,
                         "notes": ["⚠️ US/Americas remote — timezone mismatch "
                                   "(night shift from UK/JP)"]}
             return {"score": 0.05, "notes": ["❌ US/Americas on-site (out of scope)"]}
+        if cl == "japan":
+            return _japan_verdict(is_remote)
         if cl in _remote_target_countries():
             if is_remote:
                 return {"score": 0.85,
@@ -942,7 +980,7 @@ def _classify_international_location(loc: str, is_remote: bool,
 
     if not loc:
         return None
-    if any(m in loc for m in _UK_MARKERS):
+    if _UK_RE.search(loc):
         return None  # UK handled by the detailed city tiers below
 
     # Americas / US: timezone mismatch = night shift from UK/JP.
@@ -951,6 +989,11 @@ def _classify_international_location(loc: str, is_remote: bool,
             return {"score": 0.18,
                     "notes": ["⚠️ US/Americas remote — timezone mismatch (night shift from UK/JP)"]}
         return {"score": 0.05, "notes": ["❌ US/Americas on-site (out of scope)"]}
+
+    # Japan before the target list: it is scored on different grounds (see
+    # _japan_verdict) and its prefecture names match nothing else here.
+    if _JAPAN_RE.search(loc):
+        return _japan_verdict(is_remote)
 
     # Target countries (priority markets) — remote in-scope, on-site not.
     for country in _remote_target_countries():
@@ -2377,10 +2420,12 @@ def _infer_country(job: dict) -> str:
     loc = (job.get("location") or "").lower()
     if not loc:
         return ""
-    if any(k in loc for k in _UK_MARKERS):
+    if _UK_RE.search(loc):
         return "UK"
     if _AMERICAS_RE.search(loc) or _US_STATE_ABBR_RE.search(loc):
         return "US"
+    if _JAPAN_RE.search(loc):
+        return "Japan"
     for country in _remote_target_countries():
         forms = [country] + _COUNTRY_ALIASES.get(country, [])
         if any(f in loc for f in forms):
@@ -2390,6 +2435,37 @@ def _infer_country(job: dict) -> str:
     if any(t in loc for t in ("worldwide", "global", "anywhere")):
         return "Worldwide"
     return ""
+
+
+# Postings in the stretch tier, by URL — never by (company, title), which is not
+# unique here. None means "not told yet"; the first lookup then works it out from
+# the stored DB. A run that has the jobs in memory should call set_stretch_urls
+# instead, because what is on disk mid-run is the previous night's answer.
+_STRETCH_URLS: set[str] | None = None
+
+
+def set_stretch_urls(urls) -> None:
+    """Declare which postings the current run promoted into the stretch tier."""
+    global _STRETCH_URLS
+    _STRETCH_URLS = {u for u in urls if u}
+
+
+def _is_stretch_job(job: dict) -> bool:
+    """Whether this posting got documents despite the level gate.
+
+    Memoised: generate_match_report runs once per posting and the selection is a
+    whole-DB scan, so working it out per report would dominate a four-thousand
+    report run.
+    """
+    global _STRETCH_URLS
+    if _STRETCH_URLS is None:
+        try:
+            from selection import stretch_jobs
+            _STRETCH_URLS = {j.get("url") for j in stretch_jobs() if j.get("url")}
+        except Exception:
+            _STRETCH_URLS = set()
+    url = job.get("url")
+    return bool(url) and url in _STRETCH_URLS
 
 
 def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None,
@@ -2463,6 +2539,13 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     if filter_reason:
         clean_reason = str(filter_reason).replace('"', '\\"')
         filter_yaml += f'\nfilter_reason: "{clean_reason}"'
+    # The stretch tier: rejected by the level gate, given documents anyway so the
+    # CV review can be read. The rejection is NOT hidden — filter_status stays
+    # "filtered" and the reason stays on the report — because a stretch job must
+    # never be mistaken for one that passed. This flag says only that the
+    # documents exist and the review score is worth looking at.
+    if filter_reason and _is_stretch_job(job):
+        filter_yaml += "\nstretch: true"
 
     frontmatter = f"""---
 match_score: {score}
@@ -2798,12 +2881,45 @@ def read_review_scores(base: str) -> dict[str, object]:
         review = REVIEWS_DIR / f"{base}_{kind.upper()}_review.md"
         if not review.exists():
             continue
-        m = re.search(r"^submission_score:\s*(\d+)", review.read_text(encoding="utf-8"), re.MULTILINE)
-        if not m:
-            continue
-        out[f"{kind}_review_score"] = int(m.group(1))
-        out[f"{kind}_review_current"] = review_is_current(doc)[0] if doc.exists() else False
+        review_text = review.read_text(encoding="utf-8")
+        m = re.search(r"^submission_score:\s*(\d+)", review_text, re.MULTILINE)
+        if m:
+            out[f"{kind}_review_score"] = int(m.group(1))
+            out[f"{kind}_review_current"] = review_is_current(doc)[0] if doc.exists() else False
+        if kind == "cl":
+            out.update(_cl_review_flags(review_text, doc))
     return out
+
+
+def _cl_review_flags(review_text: str, doc: "Path") -> dict[str, object]:
+    """The two CL signals worth carrying onto the match report.
+
+    A cover letter has no submission_score and is not going to get one: ba8fc9c
+    narrowed CL review to the one paragraph written for the posting and dropped
+    the rubric, because scoring identity paragraphs that are byte-identical in
+    every letter measured nothing. So the CL column in the Base was permanently
+    blank — not because the column was missing, but because there was no number
+    to put in it. These two are what the CL review actually knows:
+
+      cl_fact_block      the reviewer found a fabricated claim in the bridge.
+                         The only signal here that can stop a submission.
+      cl_opening_source  `assembled` means the bridge was written for this
+                         posting; `assembled-static` means the bridge call ran
+                         out of providers and the letter shipped with the
+                         generic fallback. That failure is invisible — the run
+                         exits 0 and the review still passes — and it is worth
+                         seeing in the table rather than discovering by opening
+                         28 letters one at a time.
+    """
+    flags: dict[str, object] = {}
+    m = re.search(r"^fact_block:\s*(\w+)", review_text, re.MULTILINE)
+    if m:
+        flags["cl_fact_block"] = m.group(1).strip().lower() == "true"
+    if doc.exists():
+        m = re.search(r"^opening_source:\s*\"?([\w-]+)", doc.read_text(encoding="utf-8"), re.MULTILINE)
+        if m:
+            flags["cl_opening_source"] = m.group(1)
+    return flags
 
 
 def read_carried_properties(path: Path) -> list[str]:

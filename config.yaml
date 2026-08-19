@@ -146,6 +146,58 @@ keyword_locations:
   QA Analyst: [Edinburgh, Glasgow, Remote]
   Digital Producer: [Edinburgh, Glasgow, Remote]
   Research Software Engineer: [Edinburgh, Glasgow, Remote]
+
+# Locations only ONE site can search, appended to every keyword's location list
+# for that site alone (selection.search_pairs). No other site sees them, so they
+# cost nothing on reed/adzuna/guardian/indeed and do not move the 44-pair budget
+# those sites are rationed by.
+#
+# Japan, remote only. The candidate is a Japanese national and can hold a fully
+# remote Japanese role from the UK; an on-site Tokyo job is out of scope for the
+# same reason on-site EU jobs are — no relocation. LinkedIn's guest endpoint
+# expresses this as a country plus f_WT=2 (see scraper_linkedin_guest.
+# _location_params), which is one ordinary search. reed and guardian are UK job
+# boards and would read "Remote (Japan)" as a town name.
+#
+# Added 2026-08-19 as a MEASUREMENT pass, not a settled part of the budget, and
+# two known gaps ride with it. The keywords are English, so these searches find
+# English-titled postings in Japan and miss a "Webエンジニア" listing entirely.
+# Downstream is English-only too: exclude_title_keywords cannot see シニア, so
+# the level gate does not hold on a Japanese title. Both are decisions for what
+# the first runs actually return, not guesses to encode now.
+site_only_locations:
+  linkedin:
+  - Remote (Japan)
+
+# What each keyword is called in the postings themselves. The relevance filter
+# that runs after a scrape (scraper_indeed.filter_jobs_by_keywords) keeps a job
+# only if a search term appears in its text — and a posting written in Japanese
+# contains none of the English ones.
+#
+# MEASURED 2026-08-19 on one depth-1 pass of the Japan searches: 22 postings
+# survived the full-remote gate and 3 survived the keyword filter. The 19 it cut
+# were テクニカルアーティスト, Webエンジニア, QAエンジニア, ITサポート — the
+# keywords themselves, in Japanese. The filter was doing language, not relevance.
+#
+# Deliberately per keyword, not a free list: an alias is what THAT keyword is
+# called, so the filter stays as narrow as it is in English. Bare エンジニア is
+# left out for the same reason "engineer" is not a keyword — it matches every
+# posting in the market.
+#
+# These cost nothing on the UK sites, where no posting contains them.
+keyword_aliases:
+  Creative Technologist: [クリエイティブテクノロジスト]
+  Technical Artist: [テクニカルアーティスト]
+  Web Developer: [Webエンジニア, Web開発, ウェブ開発, フロントエンドエンジニア, Webアプリ]
+  Web Designer: [Webデザイナー, ウェブデザイナー]
+  Digital Designer: [デジタルデザイナー]
+  Designer: [デザイナー]
+  Implementation Consultant: [導入コンサルタント, 導入支援]
+  Solutions Engineer: [ソリューションエンジニア, ソリューションズエンジニア, セールスエンジニア]
+  Technical Support: [テクニカルサポート, サポートエンジニア, ITサポート]
+  QA Analyst: [QAエンジニア, 品質保証, テストエンジニア]
+  Digital Producer: [デジタルプロデューサー, Webプロデューサー, プロデューサー]
+  Research Software Engineer: [リサーチエンジニア, 研究開発エンジニア]
 max_pages_per_search: 3
 
 # Per-site page depth, read through selection.max_pages_for (falls back to
@@ -286,6 +338,23 @@ generation_top_percent: 30   # top N% get a CV + cover letter (paired)
 # nightly review count tracks the pool instead of spiking on a night that
 # happens to scrape many strong matches.
 review_top_percent: 40       # top N% by composite_score get reviewed
+
+# The stretch tier: postings the LEVEL gate rejected that still get a CV, a
+# cover letter and a review, so the review score can be read instead of guessed.
+# A filtered job otherwise gets no documents and therefore no review — which
+# makes it unjudgeable rather than merely deprioritised.
+#
+# Deliberately a small count, not a percentage. 187 postings are filtered as
+# senior; 93 of those have a level-neutral title (selection.stretch_jobs drops
+# "Principal ...", "Staff ...", "Sr. ..." — seniority in the discipline itself,
+# which no document changes). Generating for all 93 is ~465 model calls for a
+# tier that is a stretch by definition. 15 is roughly 75 calls and reaches far
+# enough down the skills ranking to include the kind of posting this exists for:
+# a Creative Technologist/AI Specialist role built around Claude Code, MCP and
+# agents, called senior on "5 years React, 1 year AWS", ranked 12th.
+#
+# Set to 0 to switch the tier off.
+stretch_top_count: 15
 
 # Quality floor (secondary): a job below this composite score never gets a CV
 # even if it lands inside the top N% of a small pool. It only trims — it never

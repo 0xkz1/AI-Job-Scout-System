@@ -235,11 +235,64 @@ def fetch_one(url: str) -> dict | None:
     return job
 
 
+# Pseudo-locations only this scraper can serve (config: site_only_locations).
+# Each names a real geography for LinkedIn plus the word that asks its index for
+# remote work, because f_WT does not do that job here — see below.
+#
+# MEASURED 2026-08-19, Japan, keyword "Web Developer":
+#   f_WT=2 changes nothing. The same ten postings came back with and without it,
+#   one of them titled "Web Developer onsite Tokyo", and 2 of 10 mentioned remote
+#   work either way. Passing a geoId instead of the location text did not help.
+#   (Comparing job-id SETS is worthless here: the endpoint rotates its results
+#   between requests, so the same probe "proves" the filter works or does not
+#   depending on when it runs. Reading the postings is what settles it.)
+#
+#   Asking in the keyword does work, because the full-text index is the part
+#   LinkedIn actually serves to guests: "Web Developer リモート" returned 8 of 8
+#   remote postings, 6 explicitly full-remote. It costs no extra request and no
+#   description is fetched for an on-site job.
+#
+# The Japanese term is not a translation of the English one — a posting written
+# in Japanese says リモート, and an English keyword finds only the English-language
+# listings, which is a different (smaller) market.
+_SITE_LOCATIONS = {
+    "remote (japan)": {
+        "params": {"location": "Japan"},
+        "keyword_suffix": "リモート",
+        # Only fully remote work is holdable: the candidate lives in the UK and
+        # is not relocating, so "リモート可" (remote permitted, some days in the
+        # office) is an on-site job with a benefit. The search term cannot make
+        # that distinction; _is_full_remote does, after the description arrives.
+        "full_remote_only": True,
+        # Depth 1, against the site's 3. MEASURED on the first full pass: 12
+        # searches at depth 1 returned 106 postings and cost 278s, and 245s of
+        # that was the description fetch — which is paid BEFORE the gate can
+        # read the text, for every card, at ~2.3s each. Depth 3 would return
+        # ~320 and cost ~800s, on top of the UK searches, against a 1500s
+        # per-site cron timeout. 21% of what came back was fully remote, spread
+        # evenly over the pages, so depth buys proportionally more of the same
+        # rather than reaching something new.
+        "max_pages": 1,
+    },
+}
+
+
+def _site_location(location: str) -> dict | None:
+    return _SITE_LOCATIONS.get((location or "").strip().lower())
+
+
 def _location_params(location: str) -> dict:
     """Config locations are bare city names plus the pseudo-location 'Remote'.
     Remote is not a place LinkedIn understands, it is the f_WT=2 workplace-type
     filter over a real geography — passing the word through as a location
-    returns the handful of postings with 'Remote' in their office name."""
+    returns the handful of postings with 'Remote' in their office name.
+
+    A site-only location (see _SITE_LOCATIONS) brings its own parameters, and
+    deliberately no f_WT: the filter is not honoured there, and writing it would
+    claim a guarantee the results do not keep."""
+    spec = _site_location(location)
+    if spec:
+        return dict(spec["params"])
     loc = (location or "").strip()
     if loc.lower() == "remote":
         return {"location": "United Kingdom", "f_WT": "2"}
@@ -248,14 +301,36 @@ def _location_params(location: str) -> dict:
     return {"location": loc}
 
 
+def _search_keyword(keyword: str, location: str) -> str:
+    """The keyword as LinkedIn is asked it. A site-only location appends the term
+    that carries its own filtering — for Japan, the word for remote work."""
+    spec = _site_location(location)
+    suffix = (spec or {}).get("keyword_suffix")
+    return f"{keyword} {suffix}" if suffix else keyword
+
+
+# Full remote, stated. "リモート可" / "リモート勤務可" is permission, not a
+# location, and 週2出社 is an office job — neither is holdable from the UK.
+_FULL_REMOTE_RE = re.compile(
+    r"フルリモート|完全リモート|フルリモ|全国リモート|リモート勤務のみ|"
+    r"fully[-\s]?remote|100%\s*remote|full[-\s]?remote|remote[-\s]?only",
+    re.IGNORECASE,
+)
+
+
+def _is_full_remote(text: str) -> bool:
+    return bool(_FULL_REMOTE_RE.search(text or ""))
+
+
 def search(keyword: str, location: str = "", max_pages: int = 3) -> list[dict]:
     """One keyword x location search, without descriptions."""
     found: list[dict] = []
     seen_ids: set[str] = set()
 
-    print(f"🔍 LinkedIn(guest): searching '{keyword}' in '{location or 'UK'}'...")
+    asked = _search_keyword(keyword, location)
+    print(f"🔍 LinkedIn(guest): searching '{asked}' in '{location or 'UK'}'...")
     for page in range(max_pages):
-        params = {"keywords": keyword, "start": page * PAGE_SIZE}
+        params = {"keywords": asked, "start": page * PAGE_SIZE}
         params.update(_location_params(location))
         html = _get(SEARCH_URL, params)
         _sleep()
@@ -267,6 +342,10 @@ def search(keyword: str, location: str = "", max_pages: int = 3) -> list[dict]:
         new = [c for c in cards if c["job_id"] not in seen_ids]
         for c in new:
             seen_ids.add(c["job_id"])
+            # Which search found it, so the gate that belongs to that search can
+            # be applied once the description exists. Dropped before the jobs are
+            # returned — nothing downstream knows this key.
+            c["search_location"] = location
         found.extend(new)
         # A page that adds nothing new means the endpoint has started repeating
         # itself, which is how it signals the end of the result set.
@@ -321,6 +400,48 @@ def fill_descriptions(jobs: list[dict], cache: dict | None = None) -> None:
           f"{dropped} unavailable (withdrawn/blocked)")
 
 
+def search_terms(config: dict) -> list[str]:
+    """The keywords plus what they are called in the postings themselves.
+
+    The relevance filter keeps a job only if a search term appears in its text,
+    and a posting written in Japanese contains none of the English keywords: on
+    the first Japan pass it cut 19 of the 22 remote postings, every one of them
+    a keyword in Japanese (テクニカルアーティスト, QAエンジニア, ITサポート). It
+    was filtering by language, not by relevance.
+
+    Reading them from `keyword_aliases` keeps that judgement in config next to
+    the keywords, and adds nothing on the UK sites, where no posting contains a
+    Japanese term.
+    """
+    terms = list(config.get("keywords") or [])
+    for kw, aliases in (config.get("keyword_aliases") or {}).items():
+        terms += [a for a in (aliases or []) if a]
+    return terms
+
+
+def _drop_partial_remote(jobs: list[dict]) -> list[dict]:
+    """Enforce the full_remote_only gate of whichever search found each posting.
+
+    This is the cheapest place the distinction can be made: the keyword asked
+    LinkedIn for remote work, and the description is the first text that says
+    whether that means all of it. Everything after this point costs money —
+    filter-passing jobs go on to LLM enrichment — so a "リモート可" posting is
+    dropped here rather than analysed and then scored down for its location.
+    """
+    kept = []
+    dropped: dict[str, int] = {}
+    for job in jobs:
+        loc = job.pop("search_location", "")
+        spec = _site_location(loc)
+        if spec and spec.get("full_remote_only") and not _is_full_remote(job.get("description", "")):
+            dropped[loc] = dropped.get(loc, 0) + 1
+            continue
+        kept.append(job)
+    for loc, n in dropped.items():
+        print(f"  🚫 {n} dropped from '{loc}' — remote is partial or unstated")
+    return kept
+
+
 def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     """Every keyword x location in config, deduped by posting id."""
     from selection import max_pages_for, search_pairs
@@ -331,8 +452,11 @@ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     all_jobs: list[dict] = []
     seen_ids: set[str] = set()
 
-    for kw, loc in search_pairs(config):
-        for job in search(kw, loc, max_pages=max_pages):
+    # site="linkedin": this scraper is the only one that can search a
+    # site_only_locations entry (Remote (Japan)), so it is the only one that asks.
+    for kw, loc in search_pairs(config, site="linkedin"):
+        spec = _site_location(loc) or {}
+        for job in search(kw, loc, max_pages=spec.get("max_pages", max_pages)):
             if job["job_id"] in seen_ids:
                 continue
             seen_ids.add(job["job_id"])
@@ -344,6 +468,7 @@ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     # A posting with no description cannot be scored (review_score treats a
     # missing description as void), so it is dead weight in the pipeline.
     all_jobs = [j for j in all_jobs if j.get("description")]
+    all_jobs = _drop_partial_remote(all_jobs)
 
     # config.get, not a bare `keywords` — that NameError fired here, one line
     # after 502 descriptions had been fetched over the network, and took all
@@ -351,7 +476,7 @@ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     # way (see scraper_linkedin.scrape_linkedin_all); this one never did, so
     # LinkedIn returned nothing on every run that reached this line.
     from scraper_indeed import filter_jobs_by_keywords
-    all_jobs = filter_jobs_by_keywords(all_jobs, config.get("keywords", []))
+    all_jobs = filter_jobs_by_keywords(all_jobs, search_terms(config))
 
     print(f"  ✓ Total: {len(all_jobs)} jobs from LinkedIn (guest)")
     return all_jobs

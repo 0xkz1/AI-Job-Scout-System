@@ -424,10 +424,6 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
     """
     from selection import max_pages_for, search_pairs
 
-    # search_pairs, not keywords x locations: `keyword_locations` narrows some
-    # keywords to a subset of the locations, and counting the full cross product
-    # would bill the run for searches no scraper walks.
-    searches = max(1, len(search_pairs(config)))
     out = []
     for site in (config.get("sites") or []):
         if site == "remote_apis":  # API path, no page walking
@@ -435,6 +431,11 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
         measured = _SECONDS_PER_SEARCH.get(site)
         if measured is None:
             continue  # unmeasured — see _SECONDS_PER_SEARCH
+        # search_pairs, not keywords x locations: `keyword_locations` narrows some
+        # keywords to a subset of the locations, and counting the full cross product
+        # would bill the run for searches no scraper walks. Counted per site, since
+        # `site_only_locations` gives one site searches the others never make.
+        searches = max(1, len(search_pairs(config, site=site)))
         rate, measured_depth = measured
         depth = max_pages_for(site, config)
         per_search = rate * depth / measured_depth

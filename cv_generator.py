@@ -44,6 +44,41 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 **Escuela Falcon, Guanajuato, México | 2016 (3 months)** — Spanish Language School
 **Languages:** Japanese (native) · English (professional working) · Spanish (daily conversation)"""
 
+# The Japanese CV. A twin of MASTER_CV, not a translation of one: every
+# {placeholder} is filled from the same records, reading their "## 和訳" half
+# instead of their English half (see _split_translation). Nothing here is
+# model-written.
+#
+# What deliberately stays in English, because a Japanese technical CV writes it
+# that way too: the role title (it is the posting's own words), project and
+# employer names, the toolkit category headings, and the toolkit itself — a
+# list of proper nouns. Translating "TypeScript, Blender, Sanity headless CMS"
+# would make the CV harder to scan, not easier.
+#
+# The phone number is the international form: this CV answers a Japanese
+# posting, so a reader dialling it is not in the UK.
+MASTER_CV_JA = """# 湯目 和樹
+**{role_title}**
+Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE_INTL
+Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
+
+## プロフィール
+{profile}
+
+## 職務経験
+{employment}
+
+## プロジェクト
+{experience}
+
+## 技術スタック
+{technical_toolkit}
+
+## 学歴・語学
+**北海学園大学（北海道札幌市） | 2013 – 2017** — 人文学部 英米文化学科
+**Escuela Falcon（メキシコ・グアナファト） | 2016（3ヶ月）** — スペイン語語学学校
+**言語:** 日本語（母語） · 英語（ビジネスレベル） · スペイン語（日常会話レベル）"""
+
 # Fallback header if a profile is missing role_title in its frontmatter — keeps
 # generation working rather than rendering "{role_title}" literally into the CV.
 #
@@ -89,10 +124,16 @@ def get_header(role_type: str = "general") -> str:
     return _DEFAULT_ROLE_TITLE
 
 
-def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, str]:
+def load_profile_and_strengths(role_type: str = "general", lang: str = "en") -> tuple[str, str, str]:
     """
     Dynamically load profile text, core strengths, and technical toolkit from:
     00_Kazuki/career/cv/profile/{role_type}.md
+
+    lang="ja" swaps the profile paragraph for the file's "## 和訳" rendering.
+    Only the profile: strengths are unused by the current template, and the
+    toolkit is a list of proper nouns (TypeScript, Blender, Sanity) that reads
+    the same either way — its category headings are the only English left on a
+    Japanese CV, which is how a Japanese technical CV is normally written.
     """
     from pathlib import Path
     
@@ -111,13 +152,17 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, st
                 
     if not profile_path.exists():
         if role_type != "general":
-            return load_profile_and_strengths("general")
+            return load_profile_and_strengths("general", lang)
         return "", "", ""
 
     try:
         content = profile_path.read_text(encoding="utf-8")
         parts = content.split("---")
         body = parts[-1].strip()
+        # The section walker below reads "## Profile"; "## 和訳" falls through it
+        # as an unrecognised heading, which is what kept the translation off an
+        # English CV. Take that half here, before the walker ever sees it.
+        body, profile_ja = _split_translation("\n" + body)
         
         profile_text = ""
         strengths_text = ""
@@ -172,17 +217,20 @@ def load_profile_and_strengths(role_type: str = "general") -> tuple[str, str, st
             
         if not toolkit_text:
             toolkit_text = DEFAULT_TECHNICAL_TOOLKIT
-            
+
+        if lang == "ja":
+            profile_text = profile_ja
+
         return profile_text, strengths_text, toolkit_text
     except Exception as e:
         print(f"  ⚠ Error loading profile/strengths/toolkit for {role_type}: {e}")
         if role_type != "general":
-            return load_profile_and_strengths("general")
+            return load_profile_and_strengths("general", lang)
         return "", "", ""
 
-def get_profile(role_type: str = "general") -> str:
+def get_profile(role_type: str = "general", lang: str = "en") -> str:
     """Get profile text for a role type."""
-    p, _, _ = load_profile_and_strengths(role_type)
+    p, _, _ = load_profile_and_strengths(role_type, lang)
     return p
 
 def get_strengths(role_type: str = "general") -> str:
@@ -264,7 +312,12 @@ def get_toolkit(role_type: str = "general") -> str:
 
 # Role type detection from job title/description
 ROLE_KEYWORDS = {
-    "development_support": ["development support", "dev support", "tools engineer", "pipeline engineer", "build engineer", "internal tools", "production support"],
+    # "development support" as a bare phrase is an HR-boilerplate magnet, not a
+    # role signal: "Career development support", "Learning & Development support
+    # available", "continuous development support" appear in 181 postings in the
+    # corpus, and one of those body hits routed a "Junior Back End Engineer" post
+    # to this profile. Only the forms that name the job survive.
+    "development_support": ["development support engineer", "software development support", "dev support", "tools engineer", "pipeline engineer", "build engineer", "internal tools", "production support"],
     # "platform engineer" used to route here, which answered an infrastructure
     # posting with a "Development Support Engineer" headline — a support title
     # for a build-and-own-it job. Infra/SRE/DevOps postings ask for the stack
@@ -284,7 +337,12 @@ ROLE_KEYWORDS = {
     "data_analysis": ["data entry", "data analyst", "data input", "data quality", "data validation", "data cleaning", "data processing", "spreadsheet", "excel specialist"],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
-    "web_developer": ["web developer", "frontend developer", "backend developer", "full stack", "fullstack", "software engineer", "python developer", "django", "react"],
+    # "Engineer" and spaced/hyphenated spellings are listed explicitly: matching is
+    # anchored, so "backend developer" does not cover "Back End Engineer" — that
+    # gap left the canonical title with zero title evidence and let a body hit
+    # decide. "reactjs" is its own entry because the anchor stops "react" from
+    # firing inside it.
+    "web_developer": ["web developer", "frontend developer", "front end developer", "front-end developer", "backend developer", "back end developer", "back-end developer", "backend engineer", "back end engineer", "back-end engineer", "frontend engineer", "front end engineer", "full stack", "fullstack", "software engineer", "software developer", "python developer", "django", "react", "reactjs"],
     "product_engineer": [
         "product engineer", "product engineering", "product-led", "product ownership",
         "full-stack product", "fullstack product", "product builder",
@@ -354,8 +412,63 @@ ROLE_KEYWORDS = {
     "research_engineer": ["research software engineer", "research software", "research engineer", "research developer", "research computing", "scientific software", "research infrastructure", "computational researcher", "creative informatics", "data science engineer"],
 }
 
-def detect_role_type(job_title: str, job_description: str = "") -> str:
-    """Detect best role type from job title and description.
+# Keyword matching is anchored so a keyword cannot fire from inside a longer
+# word — "rse" used to match "nurse"/"course"/"parser", and "react" matched
+# "reactive maintenance". Two things keep the anchor from being a plain \b:
+#
+#   * the right edge tolerates an English suffix, because "graphic design" must
+#     still hit "Graphic Designer";
+#   * the right edge bans only a LOWERCASE continuation, and matching runs on
+#     the original casing. Scraped descriptions lose the whitespace at HTML
+#     block joins ("Azure DevOpsKnowledge of Power Apps", "interaction
+#     designersContribute to service"), so a capital-letter continuation is a
+#     word boundary in practice. Case-folding the text first would throw that
+#     signal away and drop the real hit.
+_KW_SUFFIX = r"(?i:s|es|er|ers|ing|ed)?(?![a-z])"
+
+
+def _kw_pattern(keyword: str) -> "re.Pattern[str]":
+    """Anchored, case-insensitive matcher for one keyword. Scoped (?i:...)
+    rather than re.IGNORECASE: a global flag would make the [a-z] lookahead
+    match capitals too and undo the run-together handling above."""
+    return re.compile(r"(?<![A-Za-z0-9])(?i:" + re.escape(keyword) + r")" + _KW_SUFFIX)
+
+
+_ROLE_PATTERNS = {role: [(kw, _kw_pattern(kw)) for kw in keywords]
+                  for role, keywords in ROLE_KEYWORDS.items()}
+
+TITLE_WEIGHT = 10  # a title hit outweighs any number of body hits
+# A route with NO title evidence at all is the dangerous one: 38% of generated
+# CVs were picked that way, and the deciding keyword was often boilerplate
+# ("Career development support" sent a Back End Engineer post to the support
+# CV; "Mechanical Design Engineer" got the web-developer CV). Body evidence now
+# has to be corroborated — several distinct keywords AND a clear win over the
+# runner-up — or the route falls back to `general`, which is a real CV that is
+# merely unspecialised rather than a CV written for the wrong discipline.
+MIN_BODY_KEYWORDS = 2
+MIN_BODY_MARGIN = 2
+
+
+def _score_roles(job_title: str, job_description: str) -> dict[str, tuple[int, list[str], list[str]]]:
+    """Score every role, keeping the keywords that fired so the decision can be
+    explained after the fact (see detect_role_type_with_evidence)."""
+    title = job_title or ""
+    body = job_description or ""
+    scored = {}
+    for role, pairs in _ROLE_PATTERNS.items():
+        title_hits = [kw for kw, pat in pairs if pat.search(title)]
+        body_hits = [kw for kw, pat in pairs if pat.search(body)]
+        scored[role] = (TITLE_WEIGHT * len(title_hits) + len(body_hits),
+                        title_hits, body_hits)
+    return scored
+
+
+def detect_role_type_with_evidence(job_title: str, job_description: str = "") -> tuple[str, str]:
+    """Detect the role type and return why, as a short string for the CV
+    frontmatter: "title:back end engineer", "body:figma,ux design",
+    "weak-body:technical_support:it support", "tie:qa_engineer,web_developer"
+    or "none". The evidence is what makes a misroute greppable instead of
+    something you notice by reading a headline.
 
     The title names the role; the description only supports it. Weighting them
     equally let a single incidental word in the body outvote the title — a
@@ -363,19 +476,36 @@ def detect_role_type(job_title: str, job_description: str = "") -> str:
     classified camera_assistant and got a photographer's CV. So a title match is
     worth far more than a body match, and a clear title winner is taken directly.
     """
-    title = (job_title or "").lower()
-    body = (job_description or "").lower()
-    TITLE_WEIGHT = 10  # a title hit outweighs any number of body hits
-    scores = {}
-    for role, keywords in ROLE_KEYWORDS.items():
-        title_hits = sum(1 for kw in keywords if kw in title)
-        body_hits = sum(1 for kw in keywords if kw in body)
-        scores[role] = TITLE_WEIGHT * title_hits + body_hits
-    if scores:
-        best = max(scores, key=scores.get)
-        if scores[best] > 0:
-            return best
-    return "general"
+    scored = _score_roles(job_title, job_description)
+    ranked = sorted(scored.items(), key=lambda item: -item[1][0])
+    best, (score, title_hits, body_hits) = ranked[0]
+    runner_up = ranked[1][1][0] if len(ranked) > 1 else 0
+
+    if score == 0:
+        return "general", "none"
+    if title_hits:
+        # A title tie is left to ROLE_KEYWORDS order: a title naming two
+        # disciplines ("UX & Digital Designer") is a real hybrid, and the dict
+        # order is the declared preference between them.
+        return best, "title:" + ",".join(title_hits)
+    if len(body_hits) < MIN_BODY_KEYWORDS:
+        return "general", f"weak-body:{best}:" + ",".join(body_hits)
+    if score - runner_up < MIN_BODY_MARGIN:
+        # Includes the outright tie that dict order used to settle silently, and
+        # the one-hit-apart case that is no more decided than a tie.
+        contenders = sorted(role for role, value in scored.items()
+                            if value[0] >= runner_up and value[0] > 0)
+        return "general", "thin-margin:" + ",".join(contenders)
+    return best, "body:" + ",".join(body_hits)
+
+
+def detect_role_type(job_title: str, job_description: str = "") -> str:
+    """Detect best role type from job title and description.
+
+    Thin wrapper over detect_role_type_with_evidence — every caller that only
+    needs the route keeps its one-value signature.
+    """
+    return detect_role_type_with_evidence(job_title, job_description)[0]
 
 
 def role_affinity(job_title: str, job_skills: list[str] | None = None,
@@ -578,7 +708,7 @@ EMPLOYMENT = sorted(
 PROJECTS = [p for p in _ALL_ENTRIES if p["type"] != "employment"]
 
 
-def get_employment_section(role_type: str = "") -> str:
+def get_employment_section(role_type: str = "", lang: str = "en") -> str:
     """Fixed employment/freelance history — never LLM-selected. For a
     portfolio-led CV this is the structural proof of work history; omitting
     the one real employer is the last thing this CV can afford.
@@ -589,7 +719,8 @@ def get_employment_section(role_type: str = "") -> str:
     Photography internship is tagged [camera_assistant] only, so it must not
     surface in unrelated CVs like Property Underwriter or Family Solicitor)."""
     entries = [p for p in EMPLOYMENT if not p.get("tags") or role_type in p["tags"]]
-    return "\n\n".join(_format_project_entry(p) for p in entries)
+    return "\n\n".join(_format_project_entry(p, lang) for p in entries
+                       if _entry_description(p, lang))
 
 # ─────────────────────────────────────────────
 # Fallback: Static experience per role type
@@ -803,20 +934,77 @@ def _bold_experience_titles(experience_text: str) -> str:
     return "\n".join(out)
 
 
-def _format_project_entry(project: dict) -> str:
-    """Format a single project dict into a CV Experience entry (bold header line)."""
-    return f"**{project['title']} | {project['role']} | {project['period']}**\n{project['description']}"
+def _entry_description(project: dict, lang: str = "en") -> str:
+    """The entry's body in the requested language, or "" if it has none.
+
+    Empty is a real answer, not a failure to be papered over. Falling back to
+    English here would put one English paragraph in the middle of a Japanese
+    CV — the reader cannot tell that from a mistake, and the caller can drop
+    the entry instead, which is always the better-looking outcome.
+    """
+    return (project.get("description_ja") or "") if lang == "ja" else project["description"]
 
 
-def _get_static_experience(role_type: str) -> str:
-    """Build Experience section from static ordering (no LLM)."""
-    project_ids = STATIC_EXPERIENCE.get(role_type, STATIC_EXPERIENCE["general"])
+def _format_project_entry(project: dict, lang: str = "en") -> str:
+    """Format a single project dict into a CV Experience entry (bold header line).
+
+    The title/role/period header stays as authored in the frontmatter for both
+    languages: they are proper nouns and dates ("TAIFUNOME — Research & Creative
+    Technology Platform | Independent Studio | 2026 – Present"), and a Japanese
+    CV names a project by its own name.
+    """
+    return f"**{project['title']} | {project['role']} | {project['period']}**\n{_entry_description(project, lang)}"
+
+
+def _render_entries(project_ids: list, lang: str = "en") -> str:
+    """Render entries for the given ids, in order, skipping any that have no
+    text in this language."""
     project_map = {p["id"]: p for p in PROJECTS}
     entries = []
     for pid in project_ids:
-        if pid in project_map:
-            entries.append(_format_project_entry(project_map[pid]))
+        p = project_map.get(pid)
+        if p and _entry_description(p, lang):
+            entries.append(_format_project_entry(p, lang))
     return "\n\n".join(entries)
+
+
+def _get_static_experience(role_type: str, lang: str = "en") -> str:
+    """Build Experience section from static ordering (no LLM)."""
+    return _render_entries(
+        STATIC_EXPERIENCE.get(role_type, STATIC_EXPERIENCE["general"]), lang)
+
+
+def _ids_from_experience_body(body: str) -> list[str]:
+    """The project ids the model chose, read back off its own output.
+
+    The experience prompt asks for two things and forbids a third: select four
+    projects, order them, and do not modify their descriptions. So the only
+    part of that answer the model actually authored is the ranking — every
+    paragraph under a title is a copy of text this module already holds.
+
+    Reading the ranking back means the Japanese CV can keep the per-posting
+    relevance ordering while rendering each paragraph from its source file. No
+    model is ever asked to reproduce Japanese verbatim, which is the failure
+    this route exists to avoid: an LLM handed a Japanese paragraph and told to
+    echo it will quietly smooth it, and a hand-verified translation is exactly
+    the thing that must not be smoothed.
+
+    Title lines are identified the same way _bold_experience_titles finds them
+    (2+ " | " separators), and matched back by title because that is all the
+    output carries — an id the model never saw cannot be echoed.
+    """
+    by_title = {p["title"].strip().lower(): p["id"] for p in PROJECTS}
+    ids: list[str] = []
+    for line in (body or "").split("\n"):
+        s = line.strip()
+        if s.count(" | ") < 2 or s.startswith(("•", "-", "#")):
+            continue
+        title = s.split(" | ", 1)[0]
+        title = title.split(" · ", 1)[0].replace("**", "").replace("[", "").replace("]", "").strip()
+        pid = by_title.get(title.lower())
+        if pid and pid not in ids:
+            ids.append(pid)
+    return ids
 
 
 # ─────────────────────────────────────────────
@@ -948,15 +1136,20 @@ def _strip_llm_other_lines(body: str) -> str:
     return "\n".join(kept).strip()
 
 
-def _other_projects_line(included_text: str) -> str:
+def _other_projects_line(included_text: str, lang: str = "en") -> str:
     """One-line list of every project NOT given a full write-up, so the CV
     always shows the complete project breadth (employers see everything;
-    only the depth of description varies)."""
+    only the depth of description varies).
+
+    Project titles stay in English in both languages — they are names. Only the
+    label in front of them is translated; app._md_to_pdf_bytes matches on both
+    spellings to give the line its own paragraph in the PDF."""
     rest = [p for p in PROJECTS if p["title"] not in included_text]
     if not rest:
         return ""
     items = " · ".join(f"{p['title']} ({p['period']})" for p in rest)
-    return f"**Other projects:** {items}"
+    label = "その他のプロジェクト" if lang == "ja" else "Other projects"
+    return f"**{label}:** {items}"
 
 
 def _strip_echoed_job_title(body: str, job_title: str) -> str:
@@ -1079,12 +1272,23 @@ def _strip_fabricated_employment(body: str) -> str:
     return "\n".join(kept).strip("\n")
 
 
-def _experience_body(job_title: str = "", job_description: str = "", role_type: str = "general") -> str:
+def _experience_body(job_title: str = "", job_description: str = "",
+                     role_type: str = "general", lang: str = "en") -> str:
     """The write-up entries alone — LLM-ordered when a description is available,
     static otherwise, with the known bad shapes stripped out."""
     body = None
     if job_description and len(job_description) > 50:
         body = _generate_experience_ollama(job_title, job_description, role_type)
+
+    if lang == "ja":
+        # Keep the model's ranking, discard its prose: every paragraph is
+        # re-read from the entry's own 和訳 (see _ids_from_experience_body). The
+        # three strippers below are not needed on this path and are not run —
+        # they exist to catch things a model wrote into the output, and on this
+        # path nothing in the output was written by one.
+        selected = _ids_from_experience_body(body)[:4] if body else []
+        return _render_entries(selected, "ja") or _get_static_experience(role_type, "ja")
+
     if not body:
         body = _get_static_experience(role_type)
 
@@ -1093,10 +1297,10 @@ def _experience_body(job_title: str = "", job_description: str = "", role_type: 
     return _strip_fabricated_employment(body)
 
 
-def _finish_experience(body: str) -> str:
+def _finish_experience(body: str, lang: str = "en") -> str:
     """Bold the entry titles and append the canonical "Other projects" line."""
     section = _bold_experience_titles(body)
-    other = _other_projects_line(body)
+    other = _other_projects_line(body, lang)
     return f"{section}\n\n{other}" if other else section
 
 
@@ -1115,6 +1319,41 @@ _CV_MAX_WORDS = 1120
 # word count never sees, which is how a CV of 1143 words spilled one line onto
 # a third page while a 1167-word one fitted: it had more entries, not more text.
 _ENTRY_LINE_COST = 20
+
+# The same budget for the Japanese CV, counted in characters because Japanese
+# writes no spaces between words: str.split() reports a full ja CV as ~200
+# "words" no matter how long it is, so the word budget above cannot see it at
+# all and would pad every ja CV to the maximum.
+#
+# Measured the same way, web_developer/ja through the live renderer: 5562
+# characters still lands on two pages, 5607 spills onto a third. Characters are
+# the same kind of proxy words are — a four-entry CV of 5522 spilled while a
+# three-entry one of 5562 did not, because the extra title line costs page
+# space no character count sees — so the ceiling sits below the observed edge
+# and the entry cost is charged separately, exactly as _ENTRY_LINE_COST is.
+_CV_JA_MAX_CHARS = 5450
+# ~45 characters to a rendered line, and a promoted entry costs its title line
+# plus the blank line above it.
+_ENTRY_LINE_COST_JA = 90
+
+
+def _fit_japanese(exp_body: str, cv_body: str) -> str:
+    """Drop write-ups from the end until the ja CV is back inside two pages.
+
+    Only the write-ups are elastic — profile, employment and toolkit are fixed —
+    and the entries are in relevance order, so the last is the cheapest to lose.
+    It is not lost: _other_projects_line rebuilds itself from whatever is no
+    longer written up, so the project still appears, just without its paragraph.
+
+    Trimming only, never padding. The ja route has no measured target to pad
+    towards, and a short CV reads as a short CV, where a third page reads as a
+    CV that was not edited.
+    """
+    entries = _split_entries(exp_body)
+    excess = len(cv_body) - _CV_JA_MAX_CHARS
+    while excess > 0 and len(entries) > _CV_MIN_ENTRIES:
+        excess -= len(entries.pop()) + _ENTRY_LINE_COST_JA
+    return "\n\n".join(entries)
 
 
 def _title_key(title: str) -> str:
@@ -1255,8 +1494,16 @@ def generate_experience(job_title: str = "", job_description: str = "", role_typ
     return _finish_experience(_experience_body(job_title, job_description, role_type))
 
 
-def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "") -> str:
-    """Generate a complete CV for a specific role type and job."""
+def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "", lang: str = "en") -> str:
+    """Generate a complete CV for a specific role type and job.
+
+    lang="ja" assembles the CV from the "## 和訳" half of every source record
+    instead of the English half. Nothing is translated at generation time: the
+    Japanese is read from files a human wrote and checked, and the only thing a
+    model contributes is which four projects to lead with (see
+    _ids_from_experience_body). A record with no 和訳 is omitted rather than
+    printed in English.
+    """
     from pathlib import Path
     base_dir = Path(__file__).resolve().parent.parent
     profile_path = base_dir / "cv" / "profile" / f"{role_type}.md"
@@ -1275,45 +1522,54 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     if not exists:
         resolved_role = "general"
 
-    profile = get_profile(role_type)
+    profile = get_profile(role_type, lang)
     strengths = get_strengths(role_type)
     toolkit = get_toolkit(role_type)
-    exp_body = _experience_body(job_title, job_description, role_type)
+    exp_body = _experience_body(job_title, job_description, role_type, lang)
     role_title = get_header(role_type)
+    template = MASTER_CV_JA if lang == "ja" else MASTER_CV
 
     def _assemble(experience_section: str) -> str:
-        return MASTER_CV.format(
+        return template.format(
             role_title=role_title,
             profile=profile,
-            employment=_bold_experience_titles(get_employment_section(resolved_role)),
+            employment=_bold_experience_titles(get_employment_section(resolved_role, lang)),
             technical_toolkit=_bold_toolkit_headers(toolkit),
             experience=experience_section
         )
 
-    experience = _finish_experience(exp_body)
+    experience = _finish_experience(exp_body, lang)
     cv_body = _assemble(experience)
-    # Only the write-ups are elastic; everything else (profile, employment,
-    # toolkit) is fixed, so the shortfall is measured on the whole CV and paid
-    # for by promoting another project. Re-uses the LLM's own ordering — no
-    # second model call.
-    shortfall = _CV_TARGET_WORDS - len(cv_body.split())
-    if shortfall > 0:
-        padded = _pad_experience_body(exp_body, shortfall, role_type)
-        if padded != exp_body:
-            exp_body = padded
-            experience = _finish_experience(exp_body)
-            cv_body = _assemble(experience)
-    # And the other direction. Padding could only ever add, so when the model
-    # wrote long the CV simply shipped at three pages — six of the last hundred
-    # did. Dropping the least relevant write-up is not a loss of breadth: the
-    # project moves to the "Other projects" line, which is computed from
-    # whatever is not written up.
-    elif len(cv_body.split()) > _CV_MAX_WORDS:
-        trimmed = _trim_experience_body(exp_body, len(cv_body.split()) - _CV_MAX_WORDS)
+    if lang == "ja":
+        # Characters, not words — see _CV_JA_MAX_CHARS.
+        trimmed = _fit_japanese(exp_body, cv_body)
         if trimmed != exp_body:
             exp_body = trimmed
-            experience = _finish_experience(exp_body)
+            experience = _finish_experience(exp_body, lang)
             cv_body = _assemble(experience)
+    else:
+        # Only the write-ups are elastic; everything else (profile, employment,
+        # toolkit) is fixed, so the shortfall is measured on the whole CV and paid
+        # for by promoting another project. Re-uses the LLM's own ordering — no
+        # second model call.
+        shortfall = _CV_TARGET_WORDS - len(cv_body.split())
+        if shortfall > 0:
+            padded = _pad_experience_body(exp_body, shortfall, role_type)
+            if padded != exp_body:
+                exp_body = padded
+                experience = _finish_experience(exp_body, lang)
+                cv_body = _assemble(experience)
+        # And the other direction. Padding could only ever add, so when the model
+        # wrote long the CV simply shipped at three pages — six of the last hundred
+        # did. Dropping the least relevant write-up is not a loss of breadth: the
+        # project moves to the "Other projects" line, which is computed from
+        # whatever is not written up.
+        elif len(cv_body.split()) > _CV_MAX_WORDS:
+            trimmed = _trim_experience_body(exp_body, len(cv_body.split()) - _CV_MAX_WORDS)
+            if trimmed != exp_body:
+                exp_body = trimmed
+                experience = _finish_experience(exp_body, lang)
+                cv_body = _assemble(experience)
 
     # Scan experience text to determine which projects were used
     used_projects = []
@@ -1325,14 +1581,21 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
             
     import json
     source_projects_yaml = f"\nsource_projects: {json.dumps(used_projects, ensure_ascii=False)}" if used_projects else ""
-    
+
+    # Which keywords picked this profile, recorded per CV. A misroute used to be
+    # invisible unless someone read the headline and thought "that is the wrong
+    # job" — with this line, `grep '^role_evidence: "body:' 10_output/10_cvs/*.md`
+    # lists every CV whose discipline was decided without title evidence.
+    _, role_evidence = detect_role_type_with_evidence(job_title, job_description)
+
     frontmatter = f"""---
 title: "{company} - {job_title} (CV)"
 type: "cv"
 company: "{company}"
 match_report: "[[{match_filename}]]"
 cover_letter: "[[{cl_filename}]]"
-source_profile: "[[career/cv/profile/{resolved_role}]]"{source_projects_yaml}
+source_profile: "[[career/cv/profile/{resolved_role}]]"
+role_evidence: "{role_evidence}"{source_projects_yaml}
 ---
 """
     
