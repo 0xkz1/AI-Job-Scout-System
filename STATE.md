@@ -3,7 +3,7 @@
 Human-maintained. Nothing in the pipeline writes this file; a stale date here
 means nobody updated it, **not** that the loop stopped. See [LOOP.md](LOOP.md).
 
-Last verified: 2026-08-18
+Last verified: 2026-08-19
 
 ## Loop health
 
@@ -12,7 +12,8 @@ Last verified: 2026-08-18
 | Scheduler | Hermes cron, archivist profile, job `74bac7a999d0` |
 | Cadence | `0 2 * * *` — **single slot; the two-slot split is written but not yet scheduled, see below** |
 | Runs recorded | 30, from 2026-07-20 to 2026-08-18, no gaps |
-| Last run | 2026-08-18 02:00 → 03:30 JST (90 min), status `ok` |
+| Last run | 2026-08-19 02:00 → 03:52 JST (112 min), status `ok` |
+| Sites that produced | linkedin 390, adzuna 845 — both on a 124 timeout; reed, remote_apis and guardian skipped |
 | Notable | 2026-08-14: Hermes recorded `Script timed out after 7200s`; the script itself finished ~04:58 and its Telegram message went nowhere |
 
 Verify last run:
@@ -36,7 +37,9 @@ grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
   ```
 
   Until both land, the nightly runs `all` in one slot and three sites are still
-  skipped every night.
+  skipped every night. Confirmed again on 2026-08-19: linkedin, adzuna and
+  indeed all hit their timeouts, and reed, remote_apis and guardian recorded
+  exit 125.
 
 ### Why the split, and what the reorder bought
 
