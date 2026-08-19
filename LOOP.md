@@ -38,13 +38,35 @@ simpler budgeting, no Telegram. Its own header explains why it must never be
 scheduled. Anything that belongs in the real nightly belongs in
 `job_scout_nightly.sh`.
 
+### Phases
+
+The script takes a `PHASE` argument, because six browser-scraped sites do not
+fit one scrape window. 5400s against a 1500s per-site cap admits three, so the
+site order only ever chose which three ran.
+
+| Phase | Wrapper | Sites | Then |
+|-------|---------|-------|------|
+| `early` | `job_scout_early.sh` | linkedin, adzuna, indeed | nothing — exits |
+| `late` | `job_scout_late.sh` | reed, remote_apis, guardian | scoring, notify, sweep |
+| `all` | — (default) | all six, early group first | scoring, notify, sweep |
+
+**The split is not scheduled yet.** The cron job still runs the script with no
+argument, so it takes `all` and three sites are skipped every night. The two
+commands that finish it are in [STATE.md](STATE.md) under High Priority.
+
+Two things are split rather than duplicated across the slots. `late` does not
+truncate the run summary or the yield file — truncating there would erase the
+`early` slot's three sites, and `nightly_scout` reads the summary to report
+which sites ran. And `early` exits before `notify()`, because notify diffs
+against `_nightly_state.json` and then writes tonight's URLs into it: an early
+notification would mark this slot's jobs seen and leave the `late` slot
+reporting nothing new.
+
 ### Stages
 
-Scrape, in order, each with its own timeout and a shared wall-clock deadline:
-`linkedin`, `indeed --headless`, `reed`, `guardian`, `adzuna`, `remote_apis`.
-Then: LLM context pass (600s) → persona rescore (1800s) → re-render match
-reports (600s) → **notify** → review backlog sweep → re-render (post-sweep) →
-stamp flag dates.
+After scraping: LLM context pass (600s) → persona rescore (1800s) → re-render
+match reports (600s) → **notify** → review backlog sweep → re-render
+(post-sweep) → stamp flag dates.
 
 The notification fires mid-script, before the sweep. Stages after it run on
 `SWEEP_DEADLINE` rather than the pre-notify budget.
@@ -93,8 +115,13 @@ emails, never edits source, never commits. Every outbound action is human.
 
 Escalation is one channel: the Telegram summary. Three warnings ride it —
 `summarize_sites` (tonight's per-site outcome), `stale_sites` (three consecutive
-nights with no clean scrape), `dry_sites` (two consecutive clean-but-empty
-nights). A night is silent only when every site was ok and nothing is new.
+nights returning nothing), `dry_sites` (two consecutive clean-but-empty nights).
+A night is silent only when every site was ok and nothing is new.
+
+`stale_sites` judges production, not exit codes. A site that times out having
+returned jobs is recorded `partial` and is not called missing: adzuna exits 124
+every night because the budget cuts it off, and returned 845 jobs on 08-19,
+more than any other site here.
 
 ## Known failure modes
 
@@ -106,6 +133,9 @@ nights). A night is silent only when every site was ok and nothing is new.
   records sites that ran — which is why `stale_sites` reads the status history
   instead. guardian, adzuna and remote_apis were skipped every night from
   2026-08-12 to 08-15 without that ever escalating.
+- **A timeout is not a failure to produce.** The two slowest sites hit their
+  caps most nights and still return the bulk of the corpus. Any check that reads
+  the exit code alone will call them broken; read the yield beside it.
 - **Silent coverage failure.** The skill-coverage layer can succeed on every
   call while discarding the verdicts. Its `⚠️` warnings are lifted onto stdout
   so they ride the Telegram message; if a parsing change stops them appearing,
@@ -124,6 +154,10 @@ nights). A night is silent only when every site was ok and nothing is new.
 | `74bac7a999d0` | job-scout-nightly | `0 2 * * *` |
 | `ea108e2cb268` | loop-readiness-daily | `0 9 * * *` |
 | `18bbf240eeff` | taifunome-daily-start | `0 15 * * *` |
+| `2d53bffcd638` | vault-drift-check | `0 10 * * *` |
+
+There is no `job-scout-late` job yet; until there is, `74bac7a999d0` runs the
+whole night in one slot.
 
 `loop-readiness-daily` scores this repo by checking that loop scaffolding files
 exist. It does not verify that any loop ran. A 100/100 from it is a statement
