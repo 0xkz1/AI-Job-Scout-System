@@ -33,7 +33,7 @@ grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
   HERMES_HOME=/home/kz003/.hermes/profiles/archivist hermes cron edit 74bac7a999d0 --script job_scout_early.sh --name job-scout-early
   ```
   ```bash
-  HERMES_HOME=/home/kz003/.hermes/profiles/archivist hermes cron create --name job-scout-late --script job_scout_late.sh --schedule "30 4 * * *" --no-agent --deliver "telegram:5766380505,local"
+  HERMES_HOME=/home/kz003/.hermes/profiles/archivist hermes cron create "30 4 * * *" --name job-scout-late --script job_scout_late.sh --no-agent --deliver "telegram:5766380505,local"
   ```
 
   Until both land, the nightly runs `all` in one slot and three sites are still
@@ -59,12 +59,11 @@ nights, returned more in one night than any site here ever has.
 
 But still three sites, because 5400s of scrape budget against a 1500s per-site
 cap admits three and no more. The order only ever chose which three — which is
-what the split is for. Measured yield per second, used to assign the groups:
-adzuna 0.56, linkedin 0.30, indeed 0.07, remote_apis 0.038, reed 0, guardian ~0.
-
-One assumption was wrong and is worth not repeating: remote_apis was placed
-third on the belief that an HTTP API costs about a minute. It took the full
-1500s and returned 57 jobs — the worst value per second on the list.
+what the split is for. The groups were assigned on jobs-scraped divided by seconds-elapsed — adzuna
+0.56, linkedin 0.30, indeed 0.07, remote_apis 0.038 — and **that ratio does not
+measure what it looks like it measures.** See the note below on what a site's
+elapsed time is actually spent on. The grouping is not therefore wrong, but its
+stated justification is.
 
 ### The finding that prompted it
 
@@ -90,6 +89,24 @@ third on the belief that an HTTP API costs about a minute. It took the full
   behind the two most expensive ones.
 
 ## Watch List
+
+- **A site's elapsed time is not that site's cost.** `run_site X` runs
+  `run.py --site X`, and run.py merges `00_saved/` and then analyses, matches
+  and generates for **every** new job in the pool — not for the jobs that site
+  just scraped. On 2026-08-18 the remote_apis stage scraped its 57 jobs in
+  seconds, then enriched 260 jobs and was killed at 1500s partway through
+  matching them. Five separate merges ran that night, reporting 26, 318, 333,
+  370 and 586 new jobs to analyse as the pool grew.
+
+  So six `run_site` calls means six analysis passes over an accumulating pool,
+  and each site's timeout kills shared work mid-way. The per-site elapsed times
+  measure the backlog, not the scraper. Parsing `00_saved` is 0.2s for 17,727
+  records across 76 files, so the merge itself is not the cost — the LLM work
+  is, against a groq pool that 429s and quarantines on nearly every key.
+
+  The fix is a `--scrape-only` flag on run.py so the nightly stages six cheap
+  scrapes and then analyses once, which is what `--from-saved` already exists
+  to do. Not implemented.
 
 - **`SWEEP_DEADLINE` (7020s) and Hermes `script_timeout_seconds` (7200) are 180s
   apart.** Crossed once already, on 08-14. A run that crosses it completes and
