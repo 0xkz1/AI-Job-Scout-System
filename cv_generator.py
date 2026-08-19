@@ -5,6 +5,8 @@
 
 import re
 
+from contact_details import CONTACT, header_line, links_line
+
 DEFAULT_TECHNICAL_TOOLKIT = """Systems & Infrastructure
 Linux (Ubuntu), tmux (process monitoring and session management), Docker, custom PC build, system configuration
 Workflow & Troubleshooting
@@ -22,10 +24,10 @@ Obsidian (structured note-taking, workflow organisation, Zettelkasten-style deco
 # thin-employment weakness is countered by structure — a continuous
 # 2017→present work timeline), independent work as a named studio practice,
 # keyword lists (toolkit) after the evidence, no separate strengths list.
-MASTER_CV = """# Kazuki Yunome
+MASTER_CV = """# {candidate_name}
 **{role_title}**
-Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE
-Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
+{contact_line}
+{links_line}
 
 ## PROFILE
 {profile}
@@ -57,10 +59,10 @@ Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 |
 #
 # The phone number is the international form: this CV answers a Japanese
 # posting, so a reader dialling it is not in the UK.
-MASTER_CV_JA = """# 湯目 和樹
+MASTER_CV_JA = """# {candidate_name_ja}
 **{role_title}**
-Edinburgh, Scotland, UK | CANDIDATE_EMAIL | CANDIDATE_PHONE_INTL
-Portfolio Website: http://kazukiyunome.com/ | GitHub: https://github.com/0xkz1 | LinkedIn: https://www.linkedin.com/in/kazukiyunome/
+{contact_line_ja}
+{links_line}
 
 ## プロフィール
 {profile}
@@ -1531,6 +1533,11 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
 
     def _assemble(experience_section: str) -> str:
         return template.format(
+            candidate_name=CONTACT["name"],
+            candidate_name_ja=CONTACT["name_ja"],
+            contact_line=header_line("en"),
+            contact_line_ja=header_line("ja"),
+            links_line=links_line(),
             role_title=role_title,
             profile=profile,
             employment=_bold_experience_titles(get_employment_section(resolved_role, lang)),

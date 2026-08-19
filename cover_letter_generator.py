@@ -20,14 +20,19 @@ Dear Hiring Team,
 Yours sincerely,
 {name}"""
 
+# Read from the environment rather than written here — see contact_details. The
+# keys are the ones this module already used, so every {name}/{phone} reference
+# downstream is unchanged.
+from contact_details import CONTACT as _CONTACT
+
 PERSONAL_INFO = {
-    "name": "Kazuki Yunome",
-    "location": "Edinburgh, Scotland, UK",
-    "email": "CANDIDATE_EMAIL",
-    "phone": "CANDIDATE_PHONE",
-    "portfolio": "http://kazukiyunome.com/",
-    "github": "https://github.com/0xkz1",
-    "linkedin": "https://www.linkedin.com/in/kazukiyunome/"
+    "name": _CONTACT["name"],
+    "location": _CONTACT["location"],
+    "email": _CONTACT["email"],
+    "phone": _CONTACT["phone"],
+    "portfolio": _CONTACT["portfolio"],
+    "github": _CONTACT["github"],
+    "linkedin": _CONTACT["linkedin"],
 }
 
 import re

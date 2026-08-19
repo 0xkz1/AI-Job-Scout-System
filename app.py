@@ -2176,13 +2176,13 @@ with tab_watched:
 
     _drafts = sorted(EMAIL_OUT_DIR.glob("*.md")) if EMAIL_OUT_DIR.exists() else []
     if _drafts:
-        from email_outreach import gmail_compose_url
+        from email_outreach import SENDER_ACCOUNT, gmail_compose_url
         st.markdown("**生成済み下書き:**")
         for d in _drafts:
             with st.expander(f"✉️ {d.stem}"):
                 gmail_url = gmail_compose_url(d)
                 if gmail_url:
-                    st.link_button("📧 Gmail で下書きを開く (CANDIDATE_EMAIL)", gmail_url)
+                    st.link_button(f"📧 Gmail で下書きを開く ({SENDER_ACCOUNT})", gmail_url)
                     st.caption("宛先・件名・本文は入力済み。CVの添付だけ手動で行い、内容を確認して送信してください "
                                "(URL経由でのファイル自動添付はブラウザ仕様上できません)。")
                 else:

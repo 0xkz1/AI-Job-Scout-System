@@ -460,7 +460,7 @@ A running record of non-obvious decisions, bugs, and design pivots — written f
 
 #### Email Address Bug
 
-**Problem**: `cv_generator.py` and `cover_letter_generator.py` had an old email (`CANDIDATE_EMAIL_OBSOLETE`) hardcoded, despite `contact.md` and `contact_ja.md` already having the correct address (`CANDIDATE_EMAIL`).
+**Problem**: `cv_generator.py` and `cover_letter_generator.py` each had an address hardcoded, and it had been obsolete for months — while `contact.md` and `contact_ja.md` carried the current one. Three copies, corrected in one.
 
 **Fix**:
 - Updated both generator templates.

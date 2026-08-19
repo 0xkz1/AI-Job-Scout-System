@@ -364,7 +364,12 @@ def link_outputs_into_list(path: Path = EMAIL_TARGETS) -> bool:
     return True
 
 
-SENDER_ACCOUNT = "CANDIDATE_EMAIL"
+# The account the drafts are addressed from. Read rather than written: this
+# repository is public, and an address literal here is published to everyone
+# rather than to the recipient who was actually sent something.
+from contact_details import CONTACT as _CONTACT
+
+SENDER_ACCOUNT = _CONTACT["email"]
 
 
 def gmail_compose_url(draft: Path, sender: str = SENDER_ACCOUNT) -> str | None:
@@ -421,7 +426,7 @@ def save_imap_draft(row: dict, cv_pdf: Path | None = None) -> tuple[bool, str]:
     ready to review and send.
 
     Requires in .env:
-      GMAIL_ADDRESS       the Gmail account (e.g. CANDIDATE_EMAIL)
+      GMAIL_ADDRESS       the Gmail account (e.g. you@gmail.com)
       GMAIL_APP_PASSWORD  16-char app password from myaccount.google.com/apppasswords
     """
     import imaplib

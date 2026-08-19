@@ -23,7 +23,7 @@ See `README.md` for full architecture.
 | `cv_generator.py` | Generates tailored CV markdown. Contains contact info template. |
 | `cover_letter_generator.py` | Generates tailored CL markdown. Contains contact info template. |
 | `profile/skills.md` | Kazuki's canonical skill list with proficiency levels. Source of truth for scoring. |
-| `profile/contact.md` | Correct contact details. Always use `CANDIDATE_EMAIL`. |
+| `contact_details.py` | The only place contact details enter the code. Values come from `.env` (`CV_EMAIL`, `CV_PHONE`, …); never write an address into tracked source — this repository is public. |
 | `config.yaml` | Keywords, locations, filters, scoring weights. |
 
 ---
@@ -32,8 +32,11 @@ See `README.md` for full architecture.
 
 ### 1. Email address
 
-The correct email is **`CANDIDATE_EMAIL`**.
-`CANDIDATE_EMAIL_OBSOLETE` is obsolete. Never use it. Check both generators if in doubt.
+There is one address, and it is set as `CV_EMAIL` in `.env`. Read it through
+`contact_details.CONTACT["email"]` — do not paste a literal into a generator,
+a template or a Streamlit label. Two generators once carried an address that
+had been obsolete for months precisely because it was written in three places
+and corrected in one.
 
 ### 2. Skill keyword matching — use word boundaries
 
