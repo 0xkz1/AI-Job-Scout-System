@@ -104,9 +104,15 @@ stated justification is.
   records across 76 files, so the merge itself is not the cost — the LLM work
   is, against a groq pool that 429s and quarantines on nearly every key.
 
-  The fix is a `--scrape-only` flag on run.py so the nightly stages six cheap
-  scrapes and then analyses once, which is what `--from-saved` already exists
-  to do. Not implemented.
+  Fixed 2026-08-19: `run.py --scrape-only` (repo `98ee314`) stops after staging,
+  and the nightly runs one `run.py --from-saved` stage for the whole night
+  (dotfiles `9e4dd4e`). Verified end to end — `run.py --site remote_apis
+  --scrape-only` staged 58 jobs and exited 0 without entering analysis.
+
+  **The phase groups need reassigning after the first night under this.** They
+  were split on jobs-scraped over seconds-elapsed, and those elapsed times were
+  the analysis, not the scrape. The next run summary is the first one whose
+  per-site numbers mean what they say.
 
 - **`SWEEP_DEADLINE` (7020s) and Hermes `script_timeout_seconds` (7200) are 180s
   apart.** Crossed once already, on 08-14. A run that crosses it completes and
