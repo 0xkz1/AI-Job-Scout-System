@@ -171,16 +171,25 @@ def dry_sites(history: dict[str, list[int]], yields: dict[str, int]) -> list[str
     return flagged
 
 
-def update_status_history(summary: list[dict]) -> dict[str, list[str]]:
+def update_status_history(summary: list[dict],
+                          yields: dict[str, int] | None = None) -> dict[str, list[str]]:
     """Append tonight's per-site outcome to the rolling status history and save.
 
     Unlike the yield history, a skipped or timed-out site is recorded too — that
     is the whole point. The yield history deliberately holds only sites that
     ran, which leaves the ones that never start with no record at all.
 
+    A site that returned jobs is recorded as "partial" rather than by its exit
+    code. adzuna exits 124 every night because the budget cuts it off, and it
+    still returns more jobs than any other site here — 845 on 2026-08-19, the
+    most any site has. Recording that as a plain timeout made it three nights
+    from being reported as 未取得, which would have been false: nothing was
+    missing from it except the tail.
+
     Sites absent from tonight's summary are left untouched, so removing a site
     from the nightly does not accumulate phantom failures against it.
     """
+    yields = yields or {}
     try:
         history = json.loads(STATUS_HISTORY.read_text())
         if not isinstance(history, dict):
@@ -188,11 +197,15 @@ def update_status_history(summary: list[dict]) -> dict[str, list[str]]:
     except Exception:
         history = {}
 
-    for s in summary:
-        past = history.get(s["site"]) or []
+    for row in summary:
+        site = row["site"]
+        past = history.get(site) or []
         if not isinstance(past, list):
             past = []
-        history[s["site"]] = (past + [s["status"]])[-YIELD_HISTORY_KEEP:]
+        outcome = row["status"]
+        if outcome != "ok" and yields.get(site, 0) > 0:
+            outcome = "partial"
+        history[site] = (past + [outcome])[-YIELD_HISTORY_KEEP:]
 
     try:
         STATUS_HISTORY.write_text(json.dumps(history, indent=0))
@@ -214,7 +227,10 @@ def stale_sites(history: dict[str, list[str]], summary: list[dict]) -> list[str]
         recent = (history.get(site) or [])[-STALE_NIGHTS_BEFORE_WARNING:]
         if len(recent) < STALE_NIGHTS_BEFORE_WARNING:
             continue
-        if any(status == "ok" for status in recent):
+        # "partial" counts as productive: the site returned jobs, it was only
+        # cut off. Only a site that produced nothing for the whole window is
+        # missing in the sense this warning means.
+        if any(status in ("ok", "partial") for status in recent):
             continue
         flagged.append(f"{site}({len(recent)}晩連続未取得)")
     return flagged
@@ -338,7 +354,7 @@ def main():
     # they have been going on, which is the part a single night cannot carry: a
     # site skipped once lost a night, a site skipped every night since Tuesday
     # is not in the nightly at all any more and nobody decided that.
-    stale = stale_sites(update_status_history(summary), summary)
+    stale = stale_sites(update_status_history(summary, yields), summary)
     stale_line = (f"🚨 {'・'.join(stale)} — 予算配分かタイムアウトの設定を見直す"
                   if stale else "")
 

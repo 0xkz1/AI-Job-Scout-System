@@ -103,3 +103,48 @@ def test_a_stale_site_always_makes_the_night_non_silent(status_file):
     _, any_failure = nightly_scout.summarize_sites(summary)
     assert nightly_scout.stale_sites(nightly_scout.update_status_history(summary), summary)
     assert any_failure
+
+
+def test_a_timed_out_site_that_returned_jobs_is_not_called_missing(status_file):
+    """adzuna exits 124 every night because the budget cuts it off, and returns
+    more jobs than any other site here — 845 on 2026-08-19. Recording that as a
+    plain timeout put it three nights from being reported as 未取得, which would
+    have been false: nothing was missing from it except the tail."""
+    summary = _summary(adzuna="timeout")
+    for _ in range(3):
+        history = nightly_scout.update_status_history(summary, {"adzuna": 845})
+    assert history["adzuna"] == ["partial", "partial", "partial"]
+    assert nightly_scout.stale_sites(history, summary) == []
+
+
+def test_a_timed_out_site_that_returned_nothing_is_still_reported(status_file):
+    """A timeout with no jobs is the case the warning is for."""
+    summary = _summary(reed="timeout")
+    for _ in range(3):
+        history = nightly_scout.update_status_history(summary, {"reed": 0})
+    assert nightly_scout.stale_sites(history, summary) == ["reed(3晩連続未取得)"]
+
+
+def test_one_productive_night_clears_a_timeout_streak(status_file):
+    summary = _summary(adzuna="timeout")
+    nightly_scout.update_status_history(summary, {"adzuna": 0})
+    nightly_scout.update_status_history(summary, {"adzuna": 845})
+    history = nightly_scout.update_status_history(summary, {"adzuna": 0})
+    assert nightly_scout.stale_sites(history, summary) == []
+
+
+def test_a_skipped_site_cannot_be_partial(status_file):
+    """A site that never started has no yield of its own; a stale count in the
+    yield file from an earlier night must not clear its streak."""
+    summary = _summary(guardian="skipped")
+    for _ in range(3):
+        history = nightly_scout.update_status_history(summary, {})
+    assert history["guardian"] == ["skipped", "skipped", "skipped"]
+    assert nightly_scout.stale_sites(history, summary) == ["guardian(3晩連続未取得)"]
+
+
+def test_yields_argument_is_optional(status_file):
+    """Older callers pass only the summary; that must keep working."""
+    summary = _summary(reed="timeout")
+    history = nightly_scout.update_status_history(summary)
+    assert history["reed"] == ["timeout"]
