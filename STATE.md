@@ -103,12 +103,21 @@ third on the belief that an HTTP API costs about a minute. It took the full
   stdout, which is the message itself, and only stderr reaches
   `_nightly_scout.log`. Confirming it is the first end-to-end test that the
   alarm added on 08-15 actually reaches a human.
-- **`platform_engineer` changes match scores, not just CV templates.**
-  `cv_generator.ROLE_KEYWORDS` is also read by `role_affinity()`, which
-  matcher.py uses, so the new role type affects scoring for every job. Its
-  body-signal keywords (`devops`, `observability`) can also win by default in
-  `detect_role_type`: with no title matching any role, one body hit scores 1
-  against everything else's 0. No test covers role detection at all.
+- **`role_affinity()` matches keywords unanchored, `detect_role_type` does not.**
+  `detect_role_type` routes through `_kw_pattern()`, which stopped `rse` firing
+  inside `nurse`/`course`/`parser`. `role_affinity` still uses plain
+  `kw in title` / `kw in desc`, and matcher.py reads its output. The fix never
+  reached the second caller. Unmeasured.
+
+  Measured and NOT a problem, recorded so it is not re-raised: adding
+  `platform_engineer` routes 20 of 4083 jobs there, 14 by title and 6 by body,
+  and only 3 are wrong (one duplicated Content Designer posting, and an
+  `Infrastructure Engineer / Designer (Data Centre / CAD / Revit)` that is a
+  physical-design job). `MIN_BODY_KEYWORDS = 2` and `MIN_BODY_MARGIN = 2`
+  already stop a single body keyword electing a role — 551 `weak-body` and 93
+  `thin-margin` routes fall back to `general` because of them. An earlier note
+  here claimed 53 misroutes; that came from re-implementing the scoring instead
+  of calling `detect_role_type_with_evidence`, and was wrong.
 
 ## Recently closed
 
