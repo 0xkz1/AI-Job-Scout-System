@@ -9,6 +9,7 @@ Usage:
     python3 run.py --headless          # Headless browser (Indeed only)
     python3 run.py --no-filter         # Skip filtering, show all results
     python3 run.py --from-saved        # Skip scraping, analyze from 00_saved/ staging
+    python3 run.py --site reed --scrape-only   # Scrape into staging, no analysis
 """
 
 
@@ -656,6 +657,9 @@ async def main():
                         help="Limit LLM context matching to top N jobs by score (e.g. 30)")
     parser.add_argument("--watched", action="store_true", default=False,
                         help="Process watched jobs from 00_saved/watched-list/ folder")
+    parser.add_argument("--scrape-only", action="store_true", default=False,
+                        help="Scrape into 00_saved/ staging and stop, before the "
+                             "merge/analyse/match/generate pass")
     parser.add_argument("--from-saved", action="store_true", default=False,
                         help="Skip scraping, read everything from 00_saved/ staging")
     args = parser.parse_args()
@@ -1139,6 +1143,28 @@ async def main():
         # single-site invocation, which is how the nightly calls this.
         if len(sites) == 1 and sites[0] not in scraper_failures:
             record_site_yield(sites[0], len(all_jobs))
+
+        # --scrape-only stops here, having staged what it scraped.
+        #
+        # Everything below this line — the 00_saved merge, analysis, matching,
+        # CV/CL generation — operates on every new job in the pool, not on the
+        # jobs this invocation scraped. So the nightly's six `run.py --site X`
+        # calls were six analysis passes over an accumulating backlog: on
+        # 2026-08-18 they reported 26, 318, 333, 370 and 586 new jobs to analyse
+        # as it grew, and each site's own timeout killed that shared work
+        # part-way. remote_apis scraped its 57 jobs in seconds, then enriched 260
+        # and died at 1500s while matching them — which also made per-site
+        # elapsed times useless as a measure of any scraper.
+        #
+        # Six cheap scrapes and one analysis instead. --from-saved is the other
+        # half and already existed.
+        if args.scrape_only:
+            print(f"\n{'='*60}")
+            print(f"📦 SCRAPE-ONLY: {len(all_jobs)} jobs staged, stopping before analysis")
+            if scraper_failures:
+                print(f"  ⚠ failed: {', '.join(scraper_failures)}")
+            print(f"{'='*60}")
+            return
 
     if not _from_saved_mode:
         # Always ingest staged jobs (url-list.md extracts, raw staging, manual

@@ -72,6 +72,12 @@ def test_only_the_opening_slot_truncates_the_run_summary(text):
     assert guard, "SUMMARY/YIELD truncation must be skipped in the `late` phase"
 
 
+# Only real invocation lines. A comment that mentions "six run_site calls" was
+# being counted as a site named "calls", which turned two of these assertions
+# into assertions about nothing.
+_SITE_CALL = re.compile(r"^[ \t]*run_site (\w+)", re.M)
+
+
 def _site_groups(text: str) -> dict[str, set[str]]:
     """{excluded_phase: sites}, read from the guarded blocks that call run_site.
 
@@ -83,7 +89,7 @@ def _site_groups(text: str) -> dict[str, set[str]]:
     groups: dict[str, set[str]] = {}
     for m in re.finditer(r'if \[ "\$PHASE" != "(\w+)" \]; then\n(.*?)\n  fi',
                          text, re.S):
-        sites = set(re.findall(r"run_site (\w+)", m.group(2)))
+        sites = set(_SITE_CALL.findall(m.group(2)))
         if sites:
             groups[m.group(1)] = sites
     return groups
@@ -103,13 +109,13 @@ def test_every_site_is_scraped_by_one_of_the_two_slots(text):
     """A site dropped from both groups stops being scraped, and nothing reports
     it — stale_sites only judges sites that appear in the run summary."""
     expected = {"linkedin", "adzuna", "indeed", "reed", "remote_apis", "guardian"}
-    assert set(re.findall(r"run_site (\w+)", text)) == expected
+    assert set(_SITE_CALL.findall(text)) == expected
 
 
 def test_linkedin_opens_the_night(text):
     """Whichever site runs first pays the 00_saved staging merge, and
     LINKEDIN_TIMEOUT is the only per-site cap sized for that."""
-    sites = re.findall(r"run_site (\w+)", text)
+    sites = _SITE_CALL.findall(text)
     assert sites[0] == "linkedin", f"first site is {sites[0]}, not linkedin"
 
 
@@ -153,3 +159,33 @@ def test_saved_jobs_are_collected_once_per_night(text):
     that twice for the same staging directory."""
     assert re.search(r'\[ "\$PHASE" != "late" \] && \{ "\$PY" scraper_saved\.py',
                      text), "scraper_saved.py must be guarded to one slot"
+
+
+def test_sites_are_scraped_without_analysing(text):
+    """run.py merges 00_saved and then analyses, matches and generates for every
+    new job in the pool — not for the jobs the invocation scraped. Without
+    --scrape-only, six run_site calls are six analysis passes over a growing
+    backlog, and each site's own timeout kills that shared work part-way."""
+    assert re.search(r'run\.py --site "\$site" --scrape-only', text), (
+        "run_site must pass --scrape-only, or every site pays for the whole "
+        "pool's analysis and dies in the middle of it")
+
+
+def test_the_analysis_runs_exactly_once_and_after_the_scrapes(text):
+    """--from-saved is the other half of the split: one pass over everything
+    staged, rather than one per site."""
+    analyses = re.findall(r'run\.py --from-saved', text)
+    assert len(analyses) == 1, f"expected one analysis pass, found {len(analyses)}"
+    last_site = max(m.start() for m in _SITE_CALL.finditer(text))
+    analysis = text.find("run.py --from-saved")
+    assert last_site < analysis, "the analysis pass must come after every scrape"
+
+
+def test_the_analysis_is_not_in_the_early_slot(text):
+    """The early slot exits before the post-scrape work; the analysis belongs to
+    the slot that closes the night, so it runs once over both slots' staging."""
+    early_exit = text.find('if [ "$PHASE" = "early" ]')
+    analysis = text.find("run.py --from-saved")
+    assert early_exit != -1 and analysis != -1
+    assert early_exit < analysis, (
+        "the early-phase exit must precede the analysis stage")
