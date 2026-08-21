@@ -131,7 +131,13 @@ AGENT_HERMES_HOME = os.environ.get("LOOP_AGENT_HERMES_HOME",
                                    os.path.expanduser("~/.hermes"))
 
 AGENT_KIND = os.environ.get("LOOP_AGENT", "hermes")
-AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "groq-review")
+# deep-review is Gemini 3.1 Pro Preview behind the gateway's nine Gemini keys,
+# rate-capped so it cannot starve the flash callers that share them. Chosen on
+# measurement rather than reputation: against one planted one-line scraper break
+# on 2026-08-21, groq-review (gpt-oss-120b) got it right once in four attempts
+# and twice reported a fix it had not made. This tier is allowed to be slow —
+# the loop runs overnight and nothing waits on it.
+AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "deep-review")
 AGENT_PROVIDER = os.environ.get("LOOP_AGENT_PROVIDER", "custom:litellm-gateway")
 AGENT_PROFILE = os.environ.get("LOOP_AGENT_PROFILE", "")
 AGENT_TOOLSETS = os.environ.get("LOOP_AGENT_TOOLSETS", "file")
