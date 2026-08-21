@@ -83,7 +83,11 @@ OWNER = os.environ.get("LOOP_OWNER", "kz003")
 # handing over a shell.
 MAX_ROUNDS = 3
 
-AGENT_TIMEOUT = 900
+# Measured agent runs against one planted break, 2026-08-21: groq-review 406s,
+# mistral-medium 588s and 768s. 900 left no headroom — a run pointed at the full
+# repo rather than a worktree hit it exactly. Three rounds at this ceiling is an
+# hour, which a 07:00 job can afford.
+AGENT_TIMEOUT = 1200
 VERIFY_TIMEOUT = 900
 TEST_TIMEOUT = 600
 
@@ -115,6 +119,17 @@ ALLOWED_TOOLS = "Read,Edit,Grep,Glob"
 #
 # `-t file` is the safety property. It leaves the agent patch, read_file,
 # search_files and write_file, and no way to run a shell — verified by asking it.
+# Which profile the inner hermes call runs under, independent of which profile's
+# cron scheduled this. They are not the same thing and the difference is fatal:
+# `custom:litellm-gateway` is registered in the DEFAULT profile's providers and
+# nowhere else, while the nightly — and so the natural home for this job — is
+# the archivist profile, whose providers list holds only ollama-local. A job
+# scheduled under archivist inherits HERMES_HOME=<...>/profiles/archivist, and
+# the agent call would die on `Unknown provider 'custom:litellm-gateway'` every
+# night without an agent ever running.
+AGENT_HERMES_HOME = os.environ.get("LOOP_AGENT_HERMES_HOME",
+                                   os.path.expanduser("~/.hermes"))
+
 AGENT_KIND = os.environ.get("LOOP_AGENT", "hermes")
 AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "groq-review")
 AGENT_PROVIDER = os.environ.get("LOOP_AGENT_PROVIDER", "custom:litellm-gateway")
@@ -341,7 +356,8 @@ def run_agent(work: Path, site: str, scraper: str, nights: int,
         prompt = RETRY_PROMPT.format(scraper=scraper, max_rounds=MAX_ROUNDS, **retry)
     else:
         prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
-    result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT)
+    env = {"HERMES_HOME": AGENT_HERMES_HOME} if AGENT_KIND == "hermes" else None
+    result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT, env=env)
     if result.returncode != 0:
         _log(f"  agent exited {result.returncode}: {result.stderr[-400:]}")
     # Both agents report an auth failure on stdout and still exit 0, so the
@@ -352,7 +368,8 @@ def run_agent(work: Path, site: str, scraper: str, nights: int,
     out = (result.stdout or "") + (result.stderr or "")
     for marker in ("Not logged in", "is suspended", "Model not found",
                    "Invalid API key", "authentication",
-                   "No access token found", "No usable credentials"):
+                   "No access token found", "No usable credentials",
+                   "Unknown provider", "Check 'hermes model'"):
         if marker.lower() in out.lower():
             raise RuntimeError(f"agent could not start: {marker}")
     return out[-2000:]

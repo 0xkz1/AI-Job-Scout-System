@@ -472,3 +472,34 @@ def test_an_out_of_scope_edit_is_not_retried(state, monkeypatch, tmp_path):
     ok, _, _, touched, rounds = lr.attempt_repair(
         tmp_path, "reed", "scraper_reed.py", 2, set())
     assert not ok and touched == ["config.yaml"] and len(calls) == 1
+
+
+def test_the_agent_runs_under_the_profile_that_has_the_gateway(state):
+    """Which profile scheduled the job and which profile the agent runs under
+    are different questions. `custom:litellm-gateway` is registered in the
+    default profile only; archivist, where the nightly lives, has just
+    ollama-local. A job scheduled under archivist would inherit its HERMES_HOME
+    and die on `Unknown provider` every night."""
+    assert lr.AGENT_HERMES_HOME.rstrip("/").endswith(".hermes"), (
+        f"expected the default profile home, got {lr.AGENT_HERMES_HOME}")
+    assert "/profiles/" not in lr.AGENT_HERMES_HOME
+
+
+def test_an_unknown_provider_reads_as_could_not_start(state, monkeypatch):
+    """Not as a failed repair. Charging it to the attempt budget would burn both
+    nights on a config problem and then stop trying the scraper."""
+    monkeypatch.setattr(lr, "_run", lambda *a, **k: type("R", (), {
+        "returncode": 0,
+        "stdout": "Unknown provider 'custom:litellm-gateway'. Check 'hermes model'",
+        "stderr": ""})())
+    monkeypatch.setattr(lr, "agent_command", lambda prompt: ["true"])
+    with pytest.raises(RuntimeError, match="could not start"):
+        lr.run_agent(lr.ROOT, "reed", "scraper_reed.py", 2)
+
+
+def test_the_agent_timeout_covers_the_measured_runs(state):
+    """406s, 588s and 768s were the three real agent runs on 2026-08-21. A
+    ceiling at 900 left one of them no headroom."""
+    assert lr.AGENT_TIMEOUT >= 1000
+    assert lr.AGENT_TIMEOUT * lr.MAX_ROUNDS <= 3600, (
+        "three rounds must still fit inside an hour")
