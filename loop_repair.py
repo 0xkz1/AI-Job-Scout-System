@@ -361,24 +361,57 @@ def inspect_staged(work: Path, site: str) -> tuple[int, int, int]:
     return records, len(urls), len(titles)
 
 
-def tests_still_pass(work: Path) -> tuple[bool, str]:
-    """The second half of the quality gate. Verification proves the scraper
-    returns jobs; this proves the change did not break something else on its way
-    there. One gate is not a gate — a scrape that works and a suite that fails
-    is still a regression, and the diff is confined to one file precisely so
-    this stays cheap enough to run every time."""
+def failing_tests(work: Path) -> tuple[set[str], str]:
+    """Which tests are red right now, as a set of node ids.
+
+    Not `-x`: stopping at the first one cannot tell a pre-existing failure from
+    one the agent caused, and there is at least one of the former. Under a fresh
+    worktree `tests/test_pdf_bare_name_stays_frozen.py` errors during collection
+    on `NameError: name 'jobs' is not defined` while the same suite is green in
+    the main tree, because importing app.py picks up state the worktree has not
+    got.
+    """
     try:
-        result = _run([PY, "-m", "pytest", "tests/", "-q", "-x"],
+        result = _run([PY, "-m", "pytest", "tests/", "-q", "--no-header",
+                       "-p", "no:cacheprovider"],
                       cwd=work, timeout=TEST_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, "test suite timed out"
-    if result.returncode != 0:
-        tail = (result.stdout or "").strip().splitlines()
-        return False, f"tests failed: {tail[-1] if tail else 'unknown'}"
+        return {"__timeout__"}, "test suite timed out"
+    out = (result.stdout or "") + (result.stderr or "")
+    red = set()
+    for line in out.splitlines():
+        line = line.strip()
+        for prefix in ("FAILED ", "ERROR "):
+            if line.startswith(prefix):
+                red.add(line[len(prefix):].split(" ")[0])
+    return red, ""
+
+
+def tests_have_no_new_failures(work: Path, baseline: set[str]) -> tuple[bool, str]:
+    """The second half of the quality gate, measured against a baseline rather
+    than against green.
+
+    Demanding an absolutely green suite failed a correct fix on 2026-08-21:
+    mistral-medium repaired the break exactly, the scrape returned 69 distinct
+    URLs against a floor of 16, and the run was thrown away over a collection
+    error that was already there before the agent touched anything.
+
+    So the baseline is taken in the same worktree before the agent runs, and
+    only tests that were passing and are now red count. This is ever-better's
+    freeze: hold the line where it is, and refuse anything that moves it the
+    wrong way.
+    """
+    red, why = failing_tests(work)
+    if why:
+        return False, why
+    new = red - baseline
+    if new:
+        listed = ", ".join(sorted(new)[:3])
+        return False, f"{len(new)} test(s) newly failing: {listed}"
     return True, ""
 
 
-def verify(work: Path, site: str) -> tuple[bool, int, str]:
+def verify(work: Path, site: str, baseline: set[str] | None = None) -> tuple[bool, int, str]:
     """Run the real scraper in the worktree and judge what it brought back.
 
     --scrape-only is what makes this affordable: it stops before the merge and
@@ -417,7 +450,7 @@ def verify(work: Path, site: str) -> tuple[bool, int, str]:
     if titles * 2 < records:
         return False, urls, f"{titles} distinct titles across {records} records"
 
-    ok, why = tests_still_pass(work)
+    ok, why = tests_have_no_new_failures(work, baseline or set())
     if not ok:
         return False, urls, why
     return True, urls, ""
@@ -488,6 +521,14 @@ def main() -> int:
     detail = ""
     count = 0
     try:
+        # Before the agent touches anything, so a failure it did not cause
+        # cannot be charged to it.
+        baseline, base_why = failing_tests(work)
+        if base_why:
+            raise RuntimeError(f"baseline test run: {base_why}")
+        if baseline:
+            _log(f"  baseline: {len(baseline)} test(s) already red")
+
         run_agent(work, site, scraper, nights)
 
         touched = changed_files(work)
@@ -500,7 +541,7 @@ def main() -> int:
         elif source_touched != [scraper]:
             outcome, detail = "rejected", f"touched {', '.join(source_touched)}"
         else:
-            ok, count, why = verify(work, site)
+            ok, count, why = verify(work, site, baseline)
             if ok:
                 _run(["git", "add", scraper], cwd=work, timeout=60)
                 _run(["git", "commit", "-m",

@@ -272,3 +272,50 @@ def test_every_observed_auth_failure_is_recognised(state):
                    ("not logged in", "is suspended", "model not found",
                     "invalid api key", "authentication",
                     "no access token found", "no usable credentials")), line
+
+
+# ── The test gate ────────────────────────────────────────────────────────────
+#
+# Demanding an absolutely green suite failed a correct fix on 2026-08-21:
+# mistral-medium repaired the break exactly, the scrape returned 69 distinct
+# URLs against a floor of 16, and the attempt was discarded over a collection
+# error that predated the agent. A gate that cannot tell "you broke this" from
+# "this was already broken" rejects good work and teaches nobody anything.
+
+def test_a_pre_existing_failure_does_not_sink_a_good_fix(state, monkeypatch):
+    baseline = {"tests/test_pdf_bare_name_stays_frozen.py"}
+    monkeypatch.setattr(lr, "failing_tests", lambda work: (set(baseline), ""))
+    ok, why = lr.tests_have_no_new_failures(None, baseline)
+    assert ok, why
+
+
+def test_a_failure_the_agent_caused_is_still_caught(state, monkeypatch):
+    baseline = {"tests/test_pdf_bare_name_stays_frozen.py"}
+    after = baseline | {"tests/test_site_yield_warning.py::test_history_is_bounded"}
+    monkeypatch.setattr(lr, "failing_tests", lambda work: (set(after), ""))
+    ok, why = lr.tests_have_no_new_failures(None, baseline)
+    assert not ok
+    assert "newly failing" in why
+
+
+def test_a_fixed_test_does_not_count_against_the_agent(state, monkeypatch):
+    """Fewer red than the baseline is an improvement, not a violation."""
+    baseline = {"a", "b"}
+    monkeypatch.setattr(lr, "failing_tests", lambda work: ({"a"}, ""))
+    ok, _ = lr.tests_have_no_new_failures(None, baseline)
+    assert ok
+
+
+def test_a_timed_out_suite_is_not_read_as_green(state, monkeypatch):
+    monkeypatch.setattr(lr, "failing_tests",
+                        lambda work: ({"__timeout__"}, "test suite timed out"))
+    ok, why = lr.tests_have_no_new_failures(None, set())
+    assert not ok and "timed out" in why
+
+
+def test_the_gate_does_not_stop_at_the_first_failure(state):
+    """-x cannot separate a pre-existing failure from a caused one, because it
+    stops before seeing whether the rest moved."""
+    import inspect
+    src = inspect.getsource(lr.failing_tests)
+    assert '"-x"' not in src
