@@ -34,8 +34,11 @@ Usage:
   )
 """
 
+import itertools
 import json
 import os
+import sys
+import threading
 import time
 import requests
 from typing import Optional
@@ -64,6 +67,18 @@ call_llm_counter = 0  # module-level call counter for structured logging
 # to a dozen call sites, and widening that signature to thread one optional field
 # through all of them would be a worse trade.
 last_provider: str | None = None
+
+# The enrichment pass runs several jobs at once, and a bare module global cannot
+# say which provider answered *this* call: two threads finishing a few
+# milliseconds apart would each read the other's provider and stamp the wrong
+# name onto a score. The per-thread value is the truthful one; the global stays
+# for single-threaded callers and for tests that set it directly.
+_provider_tls = threading.local()
+
+
+def current_provider() -> str | None:
+    """The provider that answered the most recent call *on this thread*."""
+    return getattr(_provider_tls, "name", None) or last_provider
 
 # provider name -> env var holding its key. One Mistral account per key, each with
 # its own monthly allowance, so depth here is throughput: a single bulk day (182
@@ -157,6 +172,42 @@ ZAI_PROVIDERS = {
 }
 
 
+# Interchangeable keys are a QUEUE, not a pool: every call walks the chain from
+# the top, so the first provider answers nearly everything and the rest sit idle
+# as standby. Measured on the 2026-08-21 backlog with 8 workers and 12 groq keys:
+# 4138 calls, and the ONLY provider ever rate-limited was chain[0] — twice. The
+# other eleven keys absorbed 7 failures between them because they were barely
+# reached. Adding more keys to a queue like that buys nothing; the load has to
+# move sideways instead.
+#
+# So the leading run of same-family providers is rotated per call. They are the
+# same account family and the same model, so order among them carries no quality
+# meaning — unlike the chain as a whole, where position encodes preference and
+# must not be shuffled.
+_rr_counter = itertools.count()
+
+
+def _provider_family(provider: str) -> str:
+    """groq, groq-back, groq-tertiary -> "groq". Keys of one account family."""
+    return provider.split("-", 1)[0]
+
+
+def _rotate_interchangeable_head(chain: list[str]) -> list[str]:
+    """Start this call at a different key of the leading family."""
+    if len(chain) < 2:
+        return chain
+    family = _provider_family(chain[0])
+    head = 1
+    while head < len(chain) and _provider_family(chain[head]) == family:
+        head += 1
+    if head < 2:
+        return chain
+    # next() on an itertools.count is atomic, so no lock is needed for the
+    # several worker threads sharing it.
+    offset = next(_rr_counter) % head
+    return chain[offset:head] + chain[:offset] + chain[head:]
+
+
 def _quarantine_filter_chain(chain: list[str]) -> list[str]:
     """Skip providers currently sidelined by key_quarantine (import kept lazy so
     llm_client still works if the module is absent)."""
@@ -230,6 +281,51 @@ def _is_transient_error(e: Exception) -> bool:
     return any(m in err_str for m in markers)
 
 
+
+def _calling_stage() -> str:
+    """Which module asked for this call, for the stats file.
+
+    Walks out of llm_client rather than using inspect.stack(), which builds a
+    full FrameInfo for every frame and is far too slow to sit in front of every
+    LLM call in the pipeline.
+    """
+    try:
+        f = sys._getframe(1)
+        while f is not None:
+            name = f.f_globals.get("__name__", "")
+            if name and name != __name__:
+                return name.rsplit(".", 1)[-1]
+            f = f.f_back
+    except Exception:
+        pass
+    return "unknown"
+
+
+def record_llm_call(stage: str, provider: str, elapsed: float, prompt_chars: int,
+                    max_tokens: int, outcome: str) -> None:
+    """Append one line to the file named by JIS_LLM_STATS_FILE, if set.
+
+    Off unless the environment names a file, so an interactive run costs
+    nothing and only the nightly collects. One line per call rather than a
+    running aggregate: the questions worth asking later — which stage is slow,
+    which provider answers it, how often the chain falls through — are all
+    group-bys over the raw rows, and none of them can be recovered from a
+    counter that has already summed them.
+
+    Never raises. A statistics file that can break a scrape is worse than no
+    statistics file.
+    """
+    path = os.environ.get("JIS_LLM_STATS_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a") as fh:
+            fh.write(f"{stage}\t{provider}\t{elapsed:.2f}\t{prompt_chars}"
+                     f"\t{max_tokens}\t{outcome}\n")
+    except Exception:
+        pass
+
+
 def call_llm(
     messages: list[dict],
     system_prompt: str = "",
@@ -277,21 +373,32 @@ def call_llm(
     # key that cannot answer, and deleting it would lose the key once its quota
     # resets. Order is untouched, so it returns to its original position.
     chain = _quarantine_filter_chain(chain)
+    # Spread the load over the interchangeable keys at the head before anything
+    # else looks at the chain, so the pressure does not all land on one account.
+    chain = _rotate_interchangeable_head(chain)
     # Then drop whoever cannot physically accept a body this big, so an
     # oversized prompt never spends a 413 (see _PROVIDER_MAX_PROMPT_CHARS).
     chain = _size_filter_chain(chain, messages, system_prompt)
 
     errors: list[str] = []
+    stage = _calling_stage()
+    prompt_chars = sum(len(str(m.get("content") or "")) for m in messages) + len(system_prompt)
     for i, prov in enumerate(chain):
         is_last = i == len(chain) - 1
+        started = time.time()
         try:
             out = _call_provider(prov, messages, system_prompt, temperature, max_tokens,
                                  retries, model)
             global last_provider
             last_provider = prov
+            _provider_tls.name = prov
+            record_llm_call(stage, prov, time.time() - started, prompt_chars,
+                            max_tokens, "ok")
             return out
         except ValueError as e:
             # Missing API key — skip to the next provider in the chain
+            record_llm_call(stage, prov, time.time() - started, prompt_chars,
+                            max_tokens, "no-key")
             if is_last:
                 raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
             errors.append(f"{prov}: {e}")
@@ -303,6 +410,8 @@ def call_llm(
             # the fallback chain) could repeatedly spend its retry budget on
             # the same bad key without ever placing it in quarantine.
             _maybe_quarantine(prov, str(e))
+            record_llm_call(stage, prov, time.time() - started, prompt_chars, max_tokens,
+                            "transient" if _is_transient_error(e) else "error")
             if not _is_transient_error(e) or is_last:
                 if errors:
                     raise RuntimeError("; ".join(errors + [f"{prov}: {e}"]))
