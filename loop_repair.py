@@ -63,8 +63,14 @@ DRY_NIGHTS = 2
 # login", and the second is not something an agent fixes by editing a file.
 MAX_ATTEMPTS_PER_SITE = 2
 
+# Every entry in the run log names a human. An autonomous change with no owner
+# is one nobody is accountable for reading, and unread agent-written code is how
+# comprehension debt accumulates until the repo stops being understood.
+OWNER = os.environ.get("LOOP_OWNER", "kz003")
+
 AGENT_TIMEOUT = 900
-VERIFY_TIMEOUT = 600
+VERIFY_TIMEOUT = 900
+TEST_TIMEOUT = 600
 
 # No Bash. The agent reads the scraper and edits it; this script runs the only
 # command that decides anything.
@@ -257,14 +263,73 @@ def changed_files(work: Path) -> list[str]:
     return files
 
 
+def expected_floor(site: str) -> int:
+    """How many jobs a restored scraper has to return to count as restored.
+
+    A quarter of this site's best recorded night, never below three. The point
+    is not statistical: it is that "did it return anything at all" is a test the
+    agent can pass without fixing anything. One fabricated record satisfies
+    count > 0, and the cheapest way to make a scraper return something is not to
+    repair it. The gate has to be expensive to fake and cheap to pass honestly,
+    and a real fix returns what the site used to return.
+    """
+    history = [n for n in (load_json(YIELD_HISTORY, {}).get(site) or [])
+               if isinstance(n, int)]
+    best = max(history) if history else 0
+    return max(3, best // 4)
+
+
+def inspect_staged(work: Path, site: str) -> tuple[int, int, int]:
+    """(records, distinct absolute URLs, distinct titles) from what the scrape
+    staged. The worktree has its own 00_saved, so this is only this run."""
+    staged = sorted((work / "00_saved").glob(f"_raw_{site}_*.json"))
+    records, urls, titles = 0, set(), set()
+    for path in staged:
+        try:
+            rows = json.loads(path.read_text())
+        except Exception:
+            continue
+        for row in rows if isinstance(rows, list) else []:
+            records += 1
+            url = str(row.get("url") or "")
+            if url.startswith(("http://", "https://")):
+                urls.add(url)
+            title = str(row.get("title") or "").strip()
+            if title:
+                titles.add(title)
+    return records, len(urls), len(titles)
+
+
+def tests_still_pass(work: Path) -> tuple[bool, str]:
+    """The second half of the quality gate. Verification proves the scraper
+    returns jobs; this proves the change did not break something else on its way
+    there. One gate is not a gate — a scrape that works and a suite that fails
+    is still a regression, and the diff is confined to one file precisely so
+    this stays cheap enough to run every time."""
+    try:
+        result = _run([PY, "-m", "pytest", "tests/", "-q", "-x"],
+                      cwd=work, timeout=TEST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "test suite timed out"
+    if result.returncode != 0:
+        tail = (result.stdout or "").strip().splitlines()
+        return False, f"tests failed: {tail[-1] if tail else 'unknown'}"
+    return True, ""
+
+
 def verify(work: Path, site: str) -> tuple[bool, int, str]:
-    """Run the real scraper in the worktree. Truth is the yield file it writes.
+    """Run the real scraper in the worktree and judge what it brought back.
 
     --scrape-only is what makes this affordable: it stops before the merge and
-    the LLM work, so a check costs the scrape alone — 43s for remote_apis and
-    144s for adzuna, measured 2026-08-21. Before that flag existed, verifying a
-    scraper meant paying for the whole pool's analysis and could not finish
-    inside any sensible timeout.
+    the LLM work, so a check costs the scrape alone — 43s for remote_apis, 144s
+    for adzuna, 638s for guardian, measured 2026-08-21. Before that flag existed,
+    verifying a scraper meant paying for the whole pool's analysis and could not
+    finish inside any sensible timeout.
+
+    Judged on distinct absolute URLs rather than the count the scraper reports,
+    against a floor drawn from the site's own history. Both halves matter: the
+    reported count is a number the edited file chooses, and a floor of one is a
+    test that can be passed by fabricating a record instead of fixing anything.
     """
     yield_file = work / "10_output" / "_verify_yield.tsv"
     try:
@@ -278,18 +343,23 @@ def verify(work: Path, site: str) -> tuple[bool, int, str]:
     except subprocess.TimeoutExpired:
         return False, 0, "verification timed out"
 
-    count = 0
-    try:
-        for line in yield_file.read_text().splitlines():
-            parts = line.split("\t")
-            if len(parts) == 2 and parts[0] == site:
-                count = int(parts[1])
-    except Exception:
-        pass
-
     if result.returncode != 0:
-        return False, count, f"scraper exited {result.returncode}"
-    return count > 0, count, "" if count else "still returns nothing"
+        return False, 0, f"scraper exited {result.returncode}"
+
+    records, urls, titles = inspect_staged(work, site)
+    floor = expected_floor(site)
+    if urls < floor:
+        return False, urls, (f"{urls} distinct URLs, floor is {floor}"
+                             if urls else "still returns nothing")
+    # Filler repeats. A scraper that really parsed a listing page returns as many
+    # distinct titles as postings, give or take genuine duplicates.
+    if titles * 2 < records:
+        return False, urls, f"{titles} distinct titles across {records} records"
+
+    ok, why = tests_still_pass(work)
+    if not ok:
+        return False, urls, why
+    return True, urls, ""
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
@@ -395,6 +465,7 @@ def main() -> int:
     append_run_log({
         "run_id": started.isoformat(timespec="seconds"),
         "pattern": "scraper-repair",
+        "owner": OWNER,
         "site": site,
         "duration_s": int((dt.datetime.now() - started).total_seconds()),
         "attempt": entry["attempts"],

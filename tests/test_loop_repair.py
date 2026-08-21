@@ -135,3 +135,68 @@ def test_the_prompt_names_the_scope_and_the_test(state):
 def test_kill_switch_is_a_file_in_the_repo(state):
     assert lr.KILL_SWITCH.name == ".loop-pause"
     assert lr.KILL_SWITCH.parent == lr.ROOT
+
+
+# ── The verification gate ────────────────────────────────────────────────────
+#
+# "Did it return anything at all" is a test an agent can pass without fixing
+# anything: one fabricated record satisfies count > 0, and inventing a record is
+# cheaper than repairing a parser. ever-better's rule for this is that the tool
+# has to refuse the agent's laziest escape rather than instruct it not to take
+# one. These pin the refusal.
+
+def test_the_floor_is_drawn_from_the_sites_own_history(state):
+    write(state / "yield.json", {"adzuna": [411, 833, 845, 0, 0]})
+    assert lr.expected_floor("adzuna") == 845 // 4
+
+
+def test_an_unknown_site_still_has_a_floor(state):
+    """No history is not permission to pass on one record."""
+    write(state / "yield.json", {})
+    assert lr.expected_floor("nonesuch") == 3
+
+
+def test_a_low_yielding_site_keeps_the_minimum_floor(state):
+    write(state / "yield.json", {"guardian": [2, 0, 0]})
+    assert lr.expected_floor("guardian") == 3
+
+
+def _stage(work, site, rows):
+    (work / "00_saved").mkdir(parents=True, exist_ok=True)
+    (work / "00_saved" / f"_raw_{site}_20260821_000000.json").write_text(
+        json.dumps(rows))
+
+
+def test_staged_jobs_are_counted_by_distinct_absolute_url(tmp_path):
+    """The number the scraper prints is a number the edited file chooses. What
+    it actually staged is not."""
+    _stage(tmp_path, "reed", [
+        {"url": "https://reed.co.uk/1", "title": "A"},
+        {"url": "https://reed.co.uk/1", "title": "A"},   # duplicate
+        {"url": "not-a-url", "title": "B"},              # not absolute
+        {"url": "https://reed.co.uk/2", "title": "C"},
+    ])
+    records, urls, titles = lr.inspect_staged(tmp_path, "reed")
+    assert (records, urls, titles) == (4, 2, 3)
+
+
+def test_missing_staging_reads_as_nothing(tmp_path):
+    (tmp_path / "00_saved").mkdir()
+    assert lr.inspect_staged(tmp_path, "reed") == (0, 0, 0)
+
+
+def test_corrupt_staging_does_not_crash(tmp_path):
+    (tmp_path / "00_saved").mkdir(parents=True)
+    (tmp_path / "00_saved" / "_raw_reed_20260821_000000.json").write_text("{{{")
+    assert lr.inspect_staged(tmp_path, "reed") == (0, 0, 0)
+
+
+def test_repeated_titles_read_as_filler(tmp_path, state):
+    """A parser that really walked a listing page returns about as many distinct
+    titles as postings. Padding to clear the floor does not."""
+    write(state / "yield.json", {"reed": [40, 0, 0]})
+    rows = [{"url": f"https://reed.co.uk/{i}", "title": "Job"} for i in range(20)]
+    _stage(tmp_path, "reed", rows)
+    records, urls, titles = lr.inspect_staged(tmp_path, "reed")
+    assert urls >= lr.expected_floor("reed"), "clears the URL floor"
+    assert titles * 2 < records, "and is still rejected on distinct titles"
