@@ -127,9 +127,27 @@ def test_the_agent_gets_no_shell(state):
 
 
 def test_the_prompt_names_the_scope_and_the_test(state):
-    body = lr.PROMPT.format(scraper="scraper_reed.py", nights=2)
+    body = lr.PROMPT.format(scraper="scraper_reed.py", nights=2, doc=lr.SKILL_DOC)
     assert "ONLY `scraper_reed.py`" in body
     assert "verified by actually running" in body.lower()
+
+
+def test_the_standing_knowledge_lives_in_a_file_the_prompt_points_at(state):
+    """The loop-engineering frameworks call this the Skills element: write the
+    project knowledge down once so the agent stops re-deriving it, and so the
+    prompt stops growing a paragraph every time somebody learns something."""
+    doc = lr.ROOT / lr.SKILL_DOC
+    assert doc.exists(), f"{lr.SKILL_DOC} is missing; the prompt sends the agent to it"
+    body = lr.PROMPT.format(scraper="scraper_reed.py", nights=2, doc=lr.SKILL_DOC)
+    assert lr.SKILL_DOC in body
+
+
+def test_the_skill_doc_states_the_staging_contract(state):
+    """The break that is invisible in the log: a record without `url` is dropped
+    by save_raw_to_saved, so the scraper reports a full count and stages
+    nothing. An agent that does not know this can "fix" a parser into silence."""
+    text = (lr.ROOT / lr.SKILL_DOC).read_text()
+    assert "url" in text and "save_raw_to_saved" in text
 
 
 def test_kill_switch_is_a_file_in_the_repo(state):
@@ -200,3 +218,41 @@ def test_repeated_titles_read_as_filler(tmp_path, state):
     records, urls, titles = lr.inspect_staged(tmp_path, "reed")
     assert urls >= lr.expected_floor("reed"), "clears the URL floor"
     assert titles * 2 < records, "and is still rejected on distinct titles"
+
+
+def test_the_agent_is_pluggable(state):
+    """Neither installed agent worked unattended on 2026-08-21 — claude -p
+    answers "Not logged in" from a subprocess and opencode's default provider
+    account is suspended. Wiring the loop to one vendor would have made a setup
+    problem into a rewrite."""
+    assert lr.agent_command("hi")[0] == "claude"
+
+
+def test_opencode_takes_its_model_from_the_environment(state, monkeypatch):
+    monkeypatch.setattr(lr, "AGENT_KIND", "opencode")
+    monkeypatch.setattr(lr, "AGENT_MODEL", "zai/glm-5.2")
+    cmd = lr.agent_command("hi")
+    assert cmd[:2] == ["opencode", "run"]
+    assert "zai/glm-5.2" in cmd
+
+
+def test_hermes_is_an_option_because_it_is_the_harness_the_cron_uses(state, monkeypatch):
+    monkeypatch.setattr(lr, "AGENT_KIND", "hermes")
+    monkeypatch.setattr(lr, "AGENT_PROFILE", "archivist")
+    cmd = lr.agent_command("hi")
+    assert cmd[0] == "hermes"
+    assert "-z" in cmd and "archivist" in cmd
+
+
+def test_every_observed_auth_failure_is_recognised(state):
+    """All three harnesses report an auth failure on stdout and exit 0, so the
+    return code cannot separate "could not start" from "found nothing to do"."""
+    seen = ["Not logged in",                 # claude -p
+            "Account kazuki001 is suspended",  # opencode default provider
+            "No access token found for Nous Portal login",  # hermes default
+            "No usable credentials found for provider 'zai'"]  # hermes archivist
+    for line in seen:
+        assert any(m.lower() in line.lower() for m in
+                   ("not logged in", "is suspended", "model not found",
+                    "invalid api key", "authentication",
+                    "no access token found", "no usable credentials")), line

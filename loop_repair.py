@@ -76,6 +76,30 @@ TEST_TIMEOUT = 600
 # command that decides anything.
 ALLOWED_TOOLS = "Read,Edit,Grep,Glob"
 
+# Which coding agent does the editing. Configurable because on 2026-08-21
+# neither installed one worked unattended out of the box, and the loop is
+# otherwise complete: `claude -p` answers "Not logged in" from a subprocess even
+# with ANTHROPIC_BASE_URL unset — this harness holds its credentials in-process —
+# and `opencode run` authenticates fine but its default provider account is
+# suspended. Both are one line of setup away, and neither is a reason to wire the
+# loop to one vendor.
+#
+#   LOOP_AGENT=claude    (default)  needs `claude /login` to have been run, or
+#                                   ANTHROPIC_API_KEY in the loop's environment
+#   LOOP_AGENT=opencode             needs LOOP_AGENT_MODEL=<provider>/<model>
+#   LOOP_AGENT=hermes               needs LOOP_AGENT_PROFILE to name a profile
+#                                   whose model has a usable key
+#
+# hermes is the one that ought to fit best — it is the harness the nightly cron
+# already runs under — but its agent path and the nightly's LLM path are not the
+# same system. The nightly reaches groq, mistral and nvidia through this repo's
+# own .env via llm_client; hermes resolves credentials per profile, and on
+# 2026-08-21 the default profile wanted a Nous Portal login and archivist wanted
+# a zai key neither env file carries.
+AGENT_KIND = os.environ.get("LOOP_AGENT", "claude")
+AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "")
+AGENT_PROFILE = os.environ.get("LOOP_AGENT_PROFILE", "")
+
 PY = str(ROOT / ".venv" / "bin" / "python3")
 if not os.access(PY, os.X_OK):
     PY = "python3"
@@ -183,21 +207,25 @@ def pick_site(forced: str | None) -> tuple[str | None, str]:
 
 # ── The attempt ──────────────────────────────────────────────────────────────
 
+# The knowledge that does not change between attempts lives in docs/, not here.
+# A prompt that re-explains the repo every night is one that grows by a
+# paragraph every time somebody learns something, and the agent re-derives the
+# same conclusions from it each run. This says what is wrong tonight; the file
+# says how scrapers here work.
+SKILL_DOC = "docs/scraper-repair.md"
+
 PROMPT = """\
 `{scraper}` in this repository has stopped returning results. It runs to
 completion and exits 0, and has scraped exactly zero jobs on each of the last
 {nights} nightly runs. Every other site is still returning normally, so the
 fault is in this file rather than in the network or the pipeline around it.
 
-That pattern almost always means the site changed its markup and the selectors
-no longer match anything. The scraper finds no elements, produces an empty list,
-and reports success.
+Read `{doc}` first. It covers the shape every scraper here has, the one key a
+returned job must carry, the budget mechanism not to rewrite, the measured time
+each site is allowed, and how your change will be judged. It exists so you do
+not have to work any of that out from the code.
 
-Read the file and fix the selection so it matches the page again. Work from what
-the code tells you: which selectors are used, whether there is a fallback chain,
-whether anything logs what it found. Prefer the smallest change that could
-plausibly restore results, and prefer a selector that is more tolerant of markup
-churn over one tuned to the exact current DOM.
+Then read `{scraper}` and fix the selection so it matches the page again.
 
 Constraints, all of them enforced after you finish:
 
@@ -209,8 +237,7 @@ Constraints, all of them enforced after you finish:
     Comment the code where the reason for a choice is not obvious from it.
 
 Your change is verified by actually running the scraper against the live site.
-If it returns jobs the fix is kept on a branch for a human to review; if it
-returns nothing the work is discarded. So do not describe a fix — make one.
+So do not describe a fix — make one.
 """
 
 
@@ -242,16 +269,42 @@ def discard_worktree(path: Path, branch: str) -> None:
     _run(["git", "branch", "-D", branch], cwd=ROOT, timeout=60)
 
 
+def agent_command(prompt: str) -> list[str]:
+    """The argv for whichever agent LOOP_AGENT names."""
+    if AGENT_KIND == "opencode":
+        cmd = ["opencode", "run"]
+        if AGENT_MODEL:
+            cmd += ["-m", AGENT_MODEL]
+        return cmd + [prompt]
+    if AGENT_KIND == "hermes":
+        cmd = ["hermes"]
+        if AGENT_PROFILE:
+            cmd += ["-p", AGENT_PROFILE]
+        if AGENT_MODEL:
+            cmd += ["-m", AGENT_MODEL]
+        return cmd + ["-z", prompt]
+    return ["claude", "-p", prompt,
+            "--allowedTools", ALLOWED_TOOLS,
+            "--permission-mode", "acceptEdits"]
+
+
 def run_agent(work: Path, site: str, scraper: str, nights: int) -> str:
-    prompt = PROMPT.format(scraper=scraper, nights=nights)
-    result = _run(
-        ["claude", "-p", prompt,
-         "--allowedTools", ALLOWED_TOOLS,
-         "--permission-mode", "acceptEdits"],
-        cwd=work, timeout=AGENT_TIMEOUT)
+    prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
+    result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT)
     if result.returncode != 0:
         _log(f"  agent exited {result.returncode}: {result.stderr[-400:]}")
-    return (result.stdout or "")[-2000:]
+    # Both agents report an auth failure on stdout and still exit 0, so the
+    # return code does not separate "could not start" from "found nothing to
+    # change". Without this the loop would burn an attempt, record a no-op and
+    # count it against MAX_ATTEMPTS_PER_SITE, twice, and then stop trying — all
+    # without an agent ever having run.
+    out = (result.stdout or "") + (result.stderr or "")
+    for marker in ("Not logged in", "is suspended", "Model not found",
+                   "Invalid API key", "authentication",
+                   "No access token found", "No usable credentials"):
+        if marker.lower() in out.lower():
+            raise RuntimeError(f"agent could not start: {marker}")
+    return out[-2000:]
 
 
 def changed_files(work: Path) -> list[str]:
@@ -453,6 +506,12 @@ def main() -> int:
                 outcome, detail = "failed", why
     except subprocess.TimeoutExpired:
         outcome, detail = "failed", "agent timed out"
+    except RuntimeError as e:
+        # The agent never ran. Charging this to the site's attempt budget would
+        # spend both on a setup problem and then stop trying a scraper nobody
+        # ever looked at.
+        outcome, detail = "blocked", str(e)
+        entry["attempts"] -= 1
     except Exception as e:
         outcome, detail = "failed", f"{type(e).__name__}: {e}"
     finally:
@@ -484,6 +543,9 @@ def main() -> int:
     elif outcome == "failed":
         print(f"🔁 loop-repair: {site} の修正に失敗 — {detail}"
               f"({entry['attempts']}/{MAX_ATTEMPTS_PER_SITE}回目)")
+    elif outcome == "blocked":
+        print(f"⚠️ loop-repair: エージェントを起動できず — {detail}\n"
+              f"   {site} は未着手のまま。試行回数は消費していない。")
     return 0
 
 
