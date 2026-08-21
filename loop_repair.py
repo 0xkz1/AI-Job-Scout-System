@@ -68,6 +68,21 @@ MAX_ATTEMPTS_PER_SITE = 2
 # comprehension debt accumulates until the repo stops being understood.
 OWNER = os.environ.get("LOOP_OWNER", "kz003")
 
+# Rounds of edit-then-verify inside one attempt.
+#
+# Three runs against the same planted break on 2026-08-21: groq-review fixed the
+# wrong thing and reported success; mistral-medium fixed it exactly (69 distinct
+# URLs against a floor of 16); mistral-medium again diagnosed it correctly in
+# prose — "the _job() function would create entries without the required url
+# key" — and then edited the callers instead of _job(). Same model, opposite
+# outcomes. The variance is in the agent, and the gate caught every wrong answer.
+#
+# The third agent ended its report with "To verify: run scraper_remote_apis.py
+# and check for non-zero job counts". It wanted the check and had no way to run
+# one, by design. So the loop runs it and hands back the result, rather than
+# handing over a shell.
+MAX_ROUNDS = 3
+
 AGENT_TIMEOUT = 900
 VERIFY_TIMEOUT = 900
 TEST_TIMEOUT = 600
@@ -246,6 +261,30 @@ Your change is verified by actually running the scraper against the live site.
 So do not describe a fix — make one.
 """
 
+RETRY_PROMPT = """\
+Your previous change to `{scraper}` did not work. The scraper was run against
+the live site and the result was:
+
+    {why}
+
+This is your change so far:
+
+```diff
+{diff}
+```
+
+The verification is not a style opinion — it counts the distinct absolute URLs
+that actually reached staging. {floor_note}
+
+Read the file again and reconsider. A correct diagnosis followed by an edit in
+the wrong place is the common failure here: check that the line you are changing
+is the one that produces the value being lost, and follow it all the way to
+where the job dictionary is built.
+
+The same constraints hold: edit ONLY `{scraper}`, no new dependencies, no
+signature changes. Attempt {round} of {max_rounds}.
+"""
+
 
 def prepare_worktree(site: str, branch: str) -> Path:
     """A worktree with the untracked files a scrape needs, and its own staging.
@@ -296,8 +335,12 @@ def agent_command(prompt: str) -> list[str]:
             "--permission-mode", "acceptEdits"]
 
 
-def run_agent(work: Path, site: str, scraper: str, nights: int) -> str:
-    prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
+def run_agent(work: Path, site: str, scraper: str, nights: int,
+              retry: dict | None = None) -> str:
+    if retry:
+        prompt = RETRY_PROMPT.format(scraper=scraper, max_rounds=MAX_ROUNDS, **retry)
+    else:
+        prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
     result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT)
     if result.returncode != 0:
         _log(f"  agent exited {result.returncode}: {result.stderr[-400:]}")
@@ -477,6 +520,52 @@ def append_run_log(entry: dict) -> None:
         _log(f"  could not append to run log: {e}")
 
 
+def attempt_repair(work: Path, site: str, scraper: str, nights: int,
+                   baseline: set[str]) -> tuple[bool, int, str, list[str]]:
+    """Edit, verify, and retry inside one worktree.
+
+    Returns (verified, distinct_urls, why_not, files_touched).
+
+    Extracted from main so the end-to-end harness exercises the retry rounds
+    rather than a single call to run_agent — which is what it was doing, and why
+    the first run with rounds enabled finished in half the time and never
+    retried once.
+    """
+    floor = expected_floor(site)
+    ok, count, why = False, 0, ""
+    source_touched: list[str] = []
+
+    for rnd in range(1, MAX_ROUNDS + 1):
+        if rnd == 1:
+            run_agent(work, site, scraper, nights)
+        else:
+            _log(f"  round {rnd}: {why}")
+            diff = _run(["git", "diff", "--", scraper], cwd=work, timeout=60)
+            run_agent(work, site, scraper, nights, retry={
+                "why": why,
+                "diff": (diff.stdout or "")[:3000],
+                "round": rnd,
+                "floor_note": (f"It needs at least {floor} of them; "
+                               f"the last run produced {count}."),
+            })
+
+        touched = changed_files(work)
+        # Untracked scratch the scrape itself leaves behind is not the agent's
+        # diff; only tracked source counts as scope.
+        source_touched = [f for f in touched
+                          if not f.startswith(("00_saved/", "10_output/", ".env"))]
+        if source_touched and source_touched != [scraper]:
+            break  # out of scope: no point verifying or retrying
+        if not source_touched:
+            why = "agent changed nothing"
+            continue
+        ok, count, why = verify(work, site, baseline)
+        if ok:
+            break
+
+    return ok, count, why, source_touched
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true",
@@ -529,19 +618,14 @@ def main() -> int:
         if baseline:
             _log(f"  baseline: {len(baseline)} test(s) already red")
 
-        run_agent(work, site, scraper, nights)
+        ok, count, why, source_touched = attempt_repair(
+            work, site, scraper, nights, baseline)
 
-        touched = changed_files(work)
-        # Untracked scratch the scrape itself leaves behind is not the agent's
-        # diff; only tracked source counts as scope.
-        source_touched = [f for f in touched
-                          if not f.startswith(("00_saved/", "10_output/", ".env"))]
-        if not source_touched:
-            outcome, detail = "no-op", "agent changed nothing"
-        elif source_touched != [scraper]:
+        if source_touched and source_touched != [scraper]:
             outcome, detail = "rejected", f"touched {', '.join(source_touched)}"
+        elif not source_touched:
+            outcome, detail = "no-op", "agent changed nothing"
         else:
-            ok, count, why = verify(work, site, baseline)
             if ok:
                 _run(["git", "add", scraper], cwd=work, timeout=60)
                 _run(["git", "commit", "-m",
@@ -552,7 +636,7 @@ def main() -> int:
                 outcome, detail = "fix-proposed", f"{count} jobs"
                 entry["branch"] = branch
             else:
-                outcome, detail = "failed", why
+                outcome, detail = "failed", f"{why} (after {MAX_ROUNDS} rounds)"
     except subprocess.TimeoutExpired:
         outcome, detail = "failed", "agent timed out"
     except RuntimeError as e:

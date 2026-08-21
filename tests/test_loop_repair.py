@@ -319,3 +319,54 @@ def test_the_gate_does_not_stop_at_the_first_failure(state):
     import inspect
     src = inspect.getsource(lr.failing_tests)
     assert '"-x"' not in src
+
+
+# ── Retry rounds ─────────────────────────────────────────────────────────────
+#
+# The agent cannot run the scraper, by design, so it cannot see whether its edit
+# worked. Three runs against one planted break on 2026-08-21 produced one correct
+# fix and two wrong ones from the same two models — and the third wrong one had
+# diagnosed the bug correctly in prose before editing the wrong lines. Feeding
+# the verifier's result back is the reflection step; handing over a shell is not.
+
+def test_a_retry_carries_the_failure_and_the_diff(state):
+    body = lr.RETRY_PROMPT.format(
+        scraper="scraper_reed.py", why="still returns nothing",
+        diff="- a\n+ b", round=2, max_rounds=lr.MAX_ROUNDS,
+        floor_note="It needs at least 16 of them; the last run produced 0.")
+    assert "still returns nothing" in body
+    assert "- a" in body and "+ b" in body
+    assert "Attempt 2 of" in body
+
+
+def test_the_retry_names_the_common_failure(state):
+    """A correct diagnosis followed by an edit in the wrong place is what
+    actually happened, twice. Naming it is cheaper than hoping."""
+    body = lr.RETRY_PROMPT.format(
+        scraper="s.py", why="w", diff="d", round=2,
+        max_rounds=lr.MAX_ROUNDS, floor_note="n")
+    assert "wrong place" in body
+
+
+def test_the_retry_keeps_the_same_scope_rule(state):
+    body = lr.RETRY_PROMPT.format(
+        scraper="scraper_reed.py", why="w", diff="d", round=2,
+        max_rounds=lr.MAX_ROUNDS, floor_note="n")
+    assert "ONLY `scraper_reed.py`" in body
+
+
+def test_rounds_are_bounded(state):
+    """Unbounded retry against a scraper that now needs a login is a standing
+    bill. MAX_ATTEMPTS_PER_SITE bounds the nights; this bounds one night."""
+    assert 2 <= lr.MAX_ROUNDS <= 5
+
+
+def test_run_agent_uses_the_first_prompt_without_a_retry(state, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(lr, "_run", lambda cmd, **kw: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(lr, "agent_command",
+                        lambda prompt: seen.setdefault("p", prompt) or ["true"])
+    lr.run_agent(lr.ROOT, "reed", "scraper_reed.py", 2)
+    assert "has stopped returning results" in seen["p"]
+    assert "did not work" not in seen["p"]
