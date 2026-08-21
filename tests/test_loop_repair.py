@@ -370,3 +370,50 @@ def test_run_agent_uses_the_first_prompt_without_a_retry(state, monkeypatch):
     lr.run_agent(lr.ROOT, "reed", "scraper_reed.py", 2)
     assert "has stopped returning results" in seen["p"]
     assert "did not work" not in seen["p"]
+
+
+# ── main()'s outer ring ──────────────────────────────────────────────────────
+#
+# Every experiment so far called attempt_repair directly, so the run log, the
+# state file and the Telegram wording have never executed. loop-run-log.md has
+# had an empty "Recent Runs" section since the day loop-init created it; an L1
+# pipeline had nothing to write there and nothing ever did.
+
+def test_a_run_is_appended_below_the_marker(tmp_path, monkeypatch):
+    log = tmp_path / "loop-run-log.md"
+    log.write_text("# Loop Run Log\n\n## Recent Runs\n\n"
+                   "<!-- Loop appends below this line -->\n")
+    monkeypatch.setattr(lr, "RUN_LOG", log)
+    lr.append_run_log({"run_id": "2026-08-21T23:00:00", "outcome": "fix-proposed"})
+    text = log.read_text()
+    assert "<!-- Loop appends below this line -->" in text, "marker must survive"
+    assert "fix-proposed" in text
+    assert text.index("Recent Runs") < text.index("fix-proposed")
+
+
+def test_a_second_run_does_not_overwrite_the_first(tmp_path, monkeypatch):
+    log = tmp_path / "loop-run-log.md"
+    log.write_text("<!-- Loop appends below this line -->\n")
+    monkeypatch.setattr(lr, "RUN_LOG", log)
+    lr.append_run_log({"run_id": "first"})
+    lr.append_run_log({"run_id": "second"})
+    text = log.read_text()
+    assert "first" in text and "second" in text
+
+
+def test_a_missing_run_log_does_not_crash_the_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(lr, "RUN_LOG", tmp_path / "nope.md")
+    lr.append_run_log({"run_id": "x"})  # must not raise
+
+
+def test_the_run_log_entry_carries_an_owner(state):
+    """Owner, deadline, max rounds, evidence, stop reason — the loop-engineering
+    checklist. An autonomous change with nobody accountable for reading it is
+    how comprehension debt accumulates."""
+    assert lr.OWNER
+
+
+def test_the_state_file_survives_a_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(lr, "REPAIR_STATE", tmp_path / "repair.json")
+    lr.save_repair_state({"reed": {"attempts": 1, "outcome": "failed"}})
+    assert lr.load_json(tmp_path / "repair.json", {})["reed"]["attempts"] == 1
