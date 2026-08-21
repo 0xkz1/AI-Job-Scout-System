@@ -417,3 +417,58 @@ def test_the_state_file_survives_a_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(lr, "REPAIR_STATE", tmp_path / "repair.json")
     lr.save_repair_state({"reed": {"attempts": 1, "outcome": "failed"}})
     assert lr.load_json(tmp_path / "repair.json", {})["reed"]["attempts"] == 1
+
+
+def test_the_retry_payload_reaches_the_second_round(state, monkeypatch, tmp_path):
+    """The plumbing, deterministically: round one fails, round two is told why.
+
+    Confirmed against the live site on 2026-08-21 with a stubbed agent — round
+    one changed the location field, verification reported "still returns
+    nothing", and round two received that reason plus the round-one diff and
+    fixed the url key. This is the fast version of that.
+    """
+    seen = []
+
+    def fake_agent(work, site, scraper, nights, retry=None):
+        seen.append(retry)
+
+    results = iter([(False, 0, "still returns nothing"), (True, 69, "")])
+    monkeypatch.setattr(lr, "run_agent", fake_agent)
+    monkeypatch.setattr(lr, "changed_files", lambda work: ["scraper_reed.py"])
+    monkeypatch.setattr(lr, "verify", lambda work, site, base: next(results))
+    monkeypatch.setattr(lr, "_run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "- old\n+ new", "stderr": ""})())
+
+    ok, count, why, touched, rounds = lr.attempt_repair(
+        tmp_path, "reed", "scraper_reed.py", 2, set())
+
+    assert ok and count == 69 and rounds == 2
+    assert seen[0] is None, "round one must use the first-pass prompt"
+    assert seen[1]["why"] == "still returns nothing"
+    assert seen[1]["round"] == 2
+    assert "- old" in seen[1]["diff"], "the round-one diff must reach round two"
+
+
+def test_rounds_stop_as_soon_as_a_round_verifies(state, monkeypatch, tmp_path):
+    """Paying for a third agent call after the second one worked is waste."""
+    calls = []
+    monkeypatch.setattr(lr, "run_agent",
+                        lambda *a, **k: calls.append(k.get("retry")))
+    monkeypatch.setattr(lr, "changed_files", lambda work: ["scraper_reed.py"])
+    monkeypatch.setattr(lr, "verify", lambda work, site, base: (True, 40, ""))
+    ok, _, _, _, rounds = lr.attempt_repair(
+        tmp_path, "reed", "scraper_reed.py", 2, set())
+    assert ok and rounds == 1 and len(calls) == 1
+
+
+def test_an_out_of_scope_edit_is_not_retried(state, monkeypatch, tmp_path):
+    """Retrying an agent that wandered outside the one file spends a round on a
+    diff that will be discarded either way."""
+    calls = []
+    monkeypatch.setattr(lr, "run_agent",
+                        lambda *a, **k: calls.append(k.get("retry")))
+    monkeypatch.setattr(lr, "changed_files", lambda work: ["config.yaml"])
+    monkeypatch.setattr(lr, "verify", lambda *a: (True, 99, ""))
+    ok, _, _, touched, rounds = lr.attempt_repair(
+        tmp_path, "reed", "scraper_reed.py", 2, set())
+    assert not ok and touched == ["config.yaml"] and len(calls) == 1

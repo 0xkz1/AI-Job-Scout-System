@@ -521,10 +521,18 @@ def append_run_log(entry: dict) -> None:
 
 
 def attempt_repair(work: Path, site: str, scraper: str, nights: int,
-                   baseline: set[str]) -> tuple[bool, int, str, list[str]]:
+                   baseline: set[str]) -> tuple[bool, int, str, list[str], int]:
     """Edit, verify, and retry inside one worktree.
 
-    Returns (verified, distinct_urls, why_not, files_touched).
+    Returns (verified, distinct_urls, why_not, files_touched, rounds_used).
+
+    The worktree is NOT reset between rounds, so a fix that lands on round two
+    arrives on top of whatever round one did. Verified against a two-round run
+    on 2026-08-21: round one changed the location field, round two fixed the url
+    key, and the branch carried both — the scrape returned 69 URLs and the suite
+    was clean, so nothing rejected the leftover. Rounds used is reported for that
+    reason: a branch built in more than one round is one to read for edits that
+    are not the fix.
 
     Extracted from main so the end-to-end harness exercises the retry rounds
     rather than a single call to run_agent — which is what it was doing, and why
@@ -563,7 +571,7 @@ def attempt_repair(work: Path, site: str, scraper: str, nights: int,
         if ok:
             break
 
-    return ok, count, why, source_touched
+    return ok, count, why, source_touched, rnd
 
 
 def main() -> int:
@@ -618,7 +626,7 @@ def main() -> int:
         if baseline:
             _log(f"  baseline: {len(baseline)} test(s) already red")
 
-        ok, count, why, source_touched = attempt_repair(
+        ok, count, why, source_touched, rounds = attempt_repair(
             work, site, scraper, nights, baseline)
 
         if source_touched and source_touched != [scraper]:
@@ -628,12 +636,15 @@ def main() -> int:
         else:
             if ok:
                 _run(["git", "add", scraper], cwd=work, timeout=60)
+                leftover = ("\n\nBuilt over %d rounds — the worktree is not reset "
+                            "between them, so read this diff for edits that are "
+                            "not the fix.\n" % rounds) if rounds > 1 else "\n"
                 _run(["git", "commit", "-m",
                       f"fix({site}): restore selectors after {nights} empty nights\n\n"
-                      f"Verified by scraping the live site: {count} jobs.\n"
-                      f"Written by loop_repair.py. Unreviewed.\n"],
+                      f"Verified by scraping the live site: {count} distinct URLs.\n"
+                      f"Written by loop_repair.py. Unreviewed.{leftover}"],
                      cwd=work, timeout=60)
-                outcome, detail = "fix-proposed", f"{count} jobs"
+                outcome, detail = "fix-proposed", f"{count} jobs in {rounds} round(s)"
                 entry["branch"] = branch
             else:
                 outcome, detail = "failed", f"{why} (after {MAX_ROUNDS} rounds)"
@@ -662,6 +673,7 @@ def main() -> int:
         "duration_s": int((dt.datetime.now() - started).total_seconds()),
         "attempt": entry["attempts"],
         "verified_jobs": count,
+        "rounds": rounds,
         "outcome": outcome,
         "detail": detail,
     })
