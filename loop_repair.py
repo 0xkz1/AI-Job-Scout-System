@@ -84,21 +84,27 @@ ALLOWED_TOOLS = "Read,Edit,Grep,Glob"
 # suspended. Both are one line of setup away, and neither is a reason to wire the
 # loop to one vendor.
 #
-#   LOOP_AGENT=claude    (default)  needs `claude /login` to have been run, or
-#                                   ANTHROPIC_API_KEY in the loop's environment
+#   LOOP_AGENT=hermes    (default)  through the LiteLLM gateway on :4001
+#   LOOP_AGENT=claude               needs `claude /login`, or ANTHROPIC_API_KEY
 #   LOOP_AGENT=opencode             needs LOOP_AGENT_MODEL=<provider>/<model>
-#   LOOP_AGENT=hermes               needs LOOP_AGENT_PROFILE to name a profile
-#                                   whose model has a usable key
 #
-# hermes is the one that ought to fit best — it is the harness the nightly cron
-# already runs under — but its agent path and the nightly's LLM path are not the
-# same system. The nightly reaches groq, mistral and nvidia through this repo's
-# own .env via llm_client; hermes resolves credentials per profile, and on
-# 2026-08-21 the default profile wanted a Nous Portal login and archivist wanted
-# a zai key neither env file carries.
-AGENT_KIND = os.environ.get("LOOP_AGENT", "claude")
-AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "")
+# hermes, because it is the harness the nightly cron already runs under and the
+# one whose sessions accumulate. Getting there took two wrong conclusions worth
+# recording: `hermes -z` fails on a profile whose model has no key AND DOES NOT
+# FALL THROUGH — archivist has a five-deep fallback chain ending at local ollama
+# and still aborted on the first entry, because a missing credential is a config
+# error at startup and the chain only catches API errors at runtime. And the
+# gateway was already wired: `custom:litellm-gateway` on http://localhost:4001/v1
+# has been in the default profile's providers the whole time, serving groq,
+# mistral, nvidia, zai and ollama behind one endpoint.
+#
+# `-t file` is the safety property. It leaves the agent patch, read_file,
+# search_files and write_file, and no way to run a shell — verified by asking it.
+AGENT_KIND = os.environ.get("LOOP_AGENT", "hermes")
+AGENT_MODEL = os.environ.get("LOOP_AGENT_MODEL", "groq-review")
+AGENT_PROVIDER = os.environ.get("LOOP_AGENT_PROVIDER", "custom:litellm-gateway")
 AGENT_PROFILE = os.environ.get("LOOP_AGENT_PROFILE", "")
+AGENT_TOOLSETS = os.environ.get("LOOP_AGENT_TOOLSETS", "file")
 
 PY = str(ROOT / ".venv" / "bin" / "python3")
 if not os.access(PY, os.X_OK):
@@ -277,11 +283,13 @@ def agent_command(prompt: str) -> list[str]:
             cmd += ["-m", AGENT_MODEL]
         return cmd + [prompt]
     if AGENT_KIND == "hermes":
-        cmd = ["hermes"]
+        cmd = ["hermes", "-t", AGENT_TOOLSETS]
         if AGENT_PROFILE:
             cmd += ["-p", AGENT_PROFILE]
         if AGENT_MODEL:
             cmd += ["-m", AGENT_MODEL]
+        if AGENT_PROVIDER:
+            cmd += ["--provider", AGENT_PROVIDER]
         return cmd + ["-z", prompt]
     return ["claude", "-p", prompt,
             "--allowedTools", ALLOWED_TOOLS,

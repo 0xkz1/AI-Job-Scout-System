@@ -221,11 +221,28 @@ def test_repeated_titles_read_as_filler(tmp_path, state):
 
 
 def test_the_agent_is_pluggable(state):
-    """Neither installed agent worked unattended on 2026-08-21 — claude -p
-    answers "Not logged in" from a subprocess and opencode's default provider
-    account is suspended. Wiring the loop to one vendor would have made a setup
-    problem into a rewrite."""
-    assert lr.agent_command("hi")[0] == "claude"
+    """claude -p answers "Not logged in" from a subprocess and opencode's default
+    provider account is suspended. Wiring the loop to one vendor would have made
+    a setup problem into a rewrite."""
+    assert lr.agent_command("hi")[0] == "hermes"
+
+
+def test_the_default_agent_has_no_shell(state):
+    """`-t file` leaves patch, read_file, search_files and write_file, and no way
+    to run a shell — verified by asking the agent directly on 2026-08-21. The
+    diff-scope check is what covers write_file being in that set."""
+    cmd = lr.agent_command("hi")
+    assert "-t" in cmd
+    assert cmd[cmd.index("-t") + 1] == "file"
+    assert "terminal" not in cmd
+
+
+def test_the_default_route_is_the_gateway_not_a_profile_model(state):
+    """archivist's own model needs a zai key nothing carries, and its five-deep
+    fallback chain does not catch that — a missing credential aborts at startup
+    while the chain only handles API errors at runtime."""
+    cmd = lr.agent_command("hi")
+    assert "custom:litellm-gateway" in cmd
 
 
 def test_opencode_takes_its_model_from_the_environment(state, monkeypatch):
@@ -236,12 +253,11 @@ def test_opencode_takes_its_model_from_the_environment(state, monkeypatch):
     assert "zai/glm-5.2" in cmd
 
 
-def test_hermes_is_an_option_because_it_is_the_harness_the_cron_uses(state, monkeypatch):
-    monkeypatch.setattr(lr, "AGENT_KIND", "hermes")
-    monkeypatch.setattr(lr, "AGENT_PROFILE", "archivist")
+def test_claude_remains_available_as_a_fallback_harness(state, monkeypatch):
+    monkeypatch.setattr(lr, "AGENT_KIND", "claude")
     cmd = lr.agent_command("hi")
-    assert cmd[0] == "hermes"
-    assert "-z" in cmd and "archivist" in cmd
+    assert cmd[0] == "claude" and "-p" in cmd
+    assert "Bash" not in " ".join(cmd)
 
 
 def test_every_observed_auth_failure_is_recognised(state):
