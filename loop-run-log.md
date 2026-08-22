@@ -1,6 +1,13 @@
-# Loop Run Log — YOUR_PROJECT
+# Loop Run Log — Job Intelligence System
 
-Append one entry per run. Prune entries older than 30 days.
+Written by `loop_repair.py`, one entry per attempt. Prune entries older than
+30 days.
+
+Only the L2 repair loop writes here. The nightly does not: it produces documents
+and a Telegram summary, and has nothing to say that `_nightly_run_summary.tsv`
+does not already record. This section stayed empty from the day loop-init
+created the file until 2026-08-22, which is most of why a readiness score could
+report 100/100 over a repo where no loop had ever run.
 
 ## Format
 

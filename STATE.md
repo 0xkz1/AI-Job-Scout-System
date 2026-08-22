@@ -1,164 +1,116 @@
 # Loop State — Job Intelligence System
 
 Human-maintained. Nothing in the pipeline writes this file; a stale date here
-means nobody updated it, **not** that the loop stopped. See [LOOP.md](LOOP.md).
+means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
-Last verified: 2026-08-19
+Last verified: 2026-08-22
 
 ## Loop health
 
-| Check | Value |
-|-------|-------|
-| Scheduler | Hermes cron, archivist profile, job `74bac7a999d0` |
-| Cadence | `0 2 * * *` — **single slot; the two-slot split is written but not yet scheduled, see below** |
-| Runs recorded | 30, from 2026-07-20 to 2026-08-18, no gaps |
-| Last run | 2026-08-19 02:00 → 03:52 JST (112 min), status `ok` |
-| Sites that produced | linkedin 390, adzuna 845 — both on a 124 timeout; reed, remote_apis and guardian skipped |
-| Notable | 2026-08-14: Hermes recorded `Script timed out after 7200s`; the script itself finished ~04:58 and its Telegram message went nowhere |
+| Loop | Schedule | Last run | Result |
+|------|----------|----------|--------|
+| job-scout-early | `0 2 * * *` | 2026-08-22 02:00 | ok |
+| job-scout-late | `30 4 * * *` | 2026-08-22 04:30 | ok |
+| loop-repair (L2) | `0 7 * * *` | 2026-08-22 07:00 | ok — no candidate, silent |
 
-Verify last run:
+Verify:
 
 ```bash
+cat 10_output/_nightly_run_summary.tsv
 grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
 ```
 
-## High Priority (loop is waiting on a human)
+### 2026-08-22 — the first night every site completed
 
-- **The two-slot split is committed but not scheduled.** `job_scout_nightly.sh`
-  takes a `PHASE` argument (dotfiles `edde451`) and the two wrappers exist
-  (`a9abbe8`), but the cron jobs still point at the old single-slot script, so
-  nothing has changed on the schedule yet. Two commands finish it:
+```
+linkedin      0  1547s      early slot: 3346s of 6600
+adzuna        0   140s
+indeed        0  1659s
+reed          0  1315s      late slot:  2010s of 3600
+remote_apis   0    49s
+guardian      0   646s
+```
 
-  ```bash
-  HERMES_HOME=/home/kz003/.hermes/profiles/archivist hermes cron edit 74bac7a999d0 --script job_scout_early.sh --name job-scout-early
-  ```
-  ```bash
-  HERMES_HOME=/home/kz003/.hermes/profiles/archivist hermes cron create "30 4 * * *" --name job-scout-late --script job_scout_late.sh --no-agent --deliver "telegram:5766380505,local"
-  ```
+No skips, no timeouts, first time in the recorded history. guardian produced a
+number at all for the first time — 3 jobs, which is what guardian is.
 
-  Until both land, the nightly runs `all` in one slot and three sites are still
-  skipped every night. Confirmed again on 2026-08-19: linkedin, adzuna and
-  indeed all hit their timeouts, and reed, remote_apis and guardian recorded
-  exit 125.
+Two changes did it, and neither was the one tried first. Reordering the sites
+could not work: 5400s against a 1500s per-site cap admits three, so the order
+only ever chose which three. `--scrape-only` was the real fix — a site's elapsed
+time had been dominated by the analysis `run.py` ran afterwards over the whole
+pool, not by its own scrape, so six invocations meant six analysis passes.
+Scraping alone fits; scraping plus six analyses never could.
 
-### Why the split, and what the reorder bought
+Yield history, ten nights:
 
-The 2026-08-18 run, the first under the reordered single slot:
+```
+linkedin     [377, 377, 366, 387, 395, 379, 390, 409, 404, 395]
+adzuna       [411, 833, 845, 830, 824, 832]
+indeed       [0, 168, 168, 167, 169, 151, 150, 0, 167, 163]
+remote_apis  [67, 57, 58, 72]
+reed         [120, 163, 163]
+guardian     [2, 3]
+```
 
-| site | exit | elapsed | jobs |
-|------|------|---------|------|
-| linkedin | 0 | 1261s | 379 |
-| adzuna | 124 (timeout) | 1500s | **833** |
-| remote_apis | 124 (timeout) | 1500s | 57 |
-| reed | 124 (timeout) | 1073s | 0 |
-| guardian | 125 (skipped) | 0s | — |
-| indeed | 125 (skipped) | 0s | — |
+### 2026-08-22 — L2 ran for the first time on a schedule
 
-1269 jobs against the previous night's 545. adzuna, which had not run for four
-nights, returned more in one night than any site here ever has.
+`loop-repair` fired at 07:00:47, found no site dry, wrote nothing and said
+nothing. `last_status: ok`, no run-log entry, no state file, zero bytes on
+stdout. That is the correct outcome and it was the last untested path: every
+earlier experiment called `attempt_repair` directly, so `main`'s own work — the
+kill switch, the nightly-running check, candidate selection, the run log, the
+Telegram wording — had never executed.
 
-But still three sites, because 5400s of scrape budget against a 1500s per-site
-cap admits three and no more. The order only ever chose which three — which is
-what the split is for. The groups were assigned on jobs-scraped divided by seconds-elapsed — adzuna
-0.56, linkedin 0.30, indeed 0.07, remote_apis 0.038 — and **that ratio does not
-measure what it looks like it measures.** See the note below on what a site's
-elapsed time is actually spent on. The grouping is not therefore wrong, but its
-stated justification is.
+## High Priority (loops waiting on a human)
 
-### The finding that prompted it
-
-- **Four of six sites were not being scraped.** The 2026-08-15 run summary:
-
-  | site | exit | elapsed |
-  |------|------|---------|
-  | linkedin | 0 | 1818s |
-  | indeed | 124 (timeout) | 2400s |
-  | reed | 124 (timeout) | 1116s |
-  | guardian | 125 (skipped) | 0s |
-  | adzuna | 125 (skipped) | 0s |
-  | remote_apis | 125 (skipped) | 0s |
-
-  The review backlog sweep also aborted on timeout. Only linkedin completed.
-  This was the standing shape of the run, not one bad night — the yield history
-  for reed, guardian, adzuna and remote_apis had been frozen at one entry each
-  since 08-12.
-
-  A budget question, not a scraper question: 1818 + 2400 + 1116 = 5334s of the
-  5400s scrape `DEADLINE`, leaving 66s against a 180s `MIN_SITE_SECONDS`. The
-  highest-yielding site of all, adzuna at 411 jobs, was sitting fourth in line
-  behind the two most expensive ones.
+- **Nothing.** Both loops are scheduled, both ran, both behaved.
 
 ## Watch List
 
-- **A site's elapsed time is not that site's cost.** `run_site X` runs
-  `run.py --site X`, and run.py merges `00_saved/` and then analyses, matches
-  and generates for **every** new job in the pool — not for the jobs that site
-  just scraped. On 2026-08-18 the remote_apis stage scraped its 57 jobs in
-  seconds, then enriched 260 jobs and was killed at 1500s partway through
-  matching them. Five separate merges ran that night, reporting 26, 318, 333,
-  370 and 586 new jobs to analyse as the pool grew.
-
-  So six `run_site` calls means six analysis passes over an accumulating pool,
-  and each site's timeout kills shared work mid-way. The per-site elapsed times
-  measure the backlog, not the scraper. Parsing `00_saved` is 0.2s for 17,727
-  records across 76 files, so the merge itself is not the cost — the LLM work
-  is, against a groq pool that 429s and quarantines on nearly every key.
-
-  Fixed 2026-08-19: `run.py --scrape-only` (repo `98ee314`) stops after staging,
-  and the nightly runs one `run.py --from-saved` stage for the whole night
-  (dotfiles `9e4dd4e`). Verified end to end — `run.py --site remote_apis
-  --scrape-only` staged 58 jobs and exited 0 without entering analysis.
-
-  **The phase groups need reassigning after the first night under this.** They
-  were split on jobs-scraped over seconds-elapsed, and those elapsed times were
-  the analysis, not the scrape. The next run summary is the first one whose
-  per-site numbers mean what they say.
-
-- **`SWEEP_DEADLINE` (7020s) and Hermes `script_timeout_seconds` (7200) are 180s
-  apart.** Crossed once already, on 08-14. A run that crosses it completes and
-  notifies nobody.
+- **The retry rounds have never run in production.** Verified by forcing them
+  with a stubbed agent — round one failed, round two was told why and fixed it —
+  but no real night has needed a second round. The first one that does is worth
+  reading: the worktree is not reset between rounds, so a two-round branch can
+  carry round one's wrong edit alongside round two's fix, and nothing rejects it
+  when the leftover is merely harmless.
+- **`SWEEP_DEADLINE` (7020s) and the Hermes cap (7200) are 180s apart.** Crossed
+  on 08-14. A run that crosses it completes and notifies nobody.
+- **Per-stage model tiering is not decided yet.** `10_output/_llm_stats.tsv`
+  starts collecting on the 08-23 run. The plan was nearly made from stage names,
+  which would have put url-list extraction on a 20B model — it reads 15,000
+  characters and reproduces a whole job description at max_tokens=4096, and a
+  degraded description is worse than a failed one because it still looks like a
+  description. Decide from the measured rows.
+- **Five profiles still have no working agent path.** archivist, investigator,
+  researcher, visualizer and writer point at `z-ai/glm-5.2` via the built-in
+  `zai` provider, whose keys live in the gateway's `.env` and not in Hermes's
+  secret scope. builder, review-editor and strategist were moved to
+  `custom:litellm-gateway` with `key_env` and work; the same change fixes these.
+  Only archivist matters today, and only because its nightly is `no_agent`.
 - **`00_matches` has no `*_match.md` at any depth** — reports live inside
   per-job directories. Any script globbing `*_match.md` reports 0 and always has.
-- **`stale_sites` reached its threshold on 2026-08-18 and nobody has confirmed
-  the alert arrived.** guardian's status history is `["skipped","skipped",
-  "skipped"]`, so `🚨 guardian(3晩連続未取得)` should have been in that morning's
-  Telegram message. It cannot be checked from the log — the warning goes to
-  stdout, which is the message itself, and only stderr reaches
-  `_nightly_scout.log`. Confirming it is the first end-to-end test that the
-  alarm added on 08-15 actually reaches a human.
-- **`role_affinity()` matches keywords unanchored, `detect_role_type` does not.**
-  `detect_role_type` routes through `_kw_pattern()`, which stopped `rse` firing
-  inside `nurse`/`course`/`parser`. `role_affinity` still uses plain
-  `kw in title` / `kw in desc`, and matcher.py reads its output. The fix never
-  reached the second caller. Unmeasured.
-
-  Measured and NOT a problem, recorded so it is not re-raised: adding
-  `platform_engineer` routes 20 of 4083 jobs there, 14 by title and 6 by body,
-  and only 3 are wrong (one duplicated Content Designer posting, and an
-  `Infrastructure Engineer / Designer (Data Centre / CAD / Revit)` that is a
-  physical-design job). `MIN_BODY_KEYWORDS = 2` and `MIN_BODY_MARGIN = 2`
-  already stop a single body keyword electing a role — 551 `weak-body` and 93
-  `thin-margin` routes fall back to `general` because of them. An earlier note
-  here claimed 53 misroutes; that came from re-implementing the scoring instead
-  of calling `detect_role_type_with_evidence`, and was wrong.
 
 ## Recently closed
 
-- **Delivery path unverified** → resolved 2026-08-14. `deliver:
-  telegram:5766380505,local` resolves to chat "KZ"; `last_delivery_error` is
-  `None` on successful runs.
-- **No escalation for sites that never run** → resolved 2026-08-15 by
-  `stale_sites` in `nightly_scout.py` (commit `8165c5a`). Three consecutive
-  nights without a clean scrape now rides the Telegram message. The status
-  history starts empty, so the first warning can fire three nights after that
-  commit at the earliest.
+- **Delivery path unverified** → 2026-08-14. `telegram:5766380505,local` resolves
+  to chat "KZ"; `last_delivery_error` is `None` on successful runs.
+- **No escalation for sites that never run** → 2026-08-15, `stale_sites`.
+- **A timeout counted as a failure to produce** → 2026-08-19, `partial`.
+- **Six sites in one window** → 2026-08-20, `--scrape-only` and the two-slot
+  split. Confirmed by the 08-22 run above.
+- **`zai-glm` always 429'd** → 2026-08-22. All eleven keys are live; `glm-5.2` is
+  paid and these accounts are free. Repointed at `glm-4.5-flash`, the only free
+  one, with thinking disabled. It sat mid-chain in four fallback chains, so every
+  chain had been burning a retry on a guaranteed failure.
+- **No L2 loop** → 2026-08-22. Scheduled, ran, silent.
 
 ## Stopped / dead automation
 
-| What | Where | Action taken |
-|------|-------|--------------|
-| `agency` scrape, 3×/day | user crontab | **Stopped 2026-08-13** — commented out, not deleted; 322 runs, ~10 useful DB rows after day one |
-| `job-scraper-nightly` | Hermes builder profile, `b84b7835506e` | **Paused 2026-08-13** — `Script not found` since 2026-07-27, duplicate of `74bac7a999d0` |
-| `job-scout-nightly` (old copy) | Hermes default profile, `20e08388d5df` | Already paused 2026-07-20, correctly |
-| `~/.hermes/scripts/job_scout_nightly.sh` | — | Stale duplicate of the profile script; nothing calls it |
+| What | Where | Action |
+|------|-------|--------|
+| `agency` scrape, 3×/day | user crontab | Stopped 08-13 — commented out; 322 runs, ~10 useful rows after day one |
+| `job-scraper-nightly` | builder, `b84b7835506e` | Paused 08-13 — `Script not found` since 07-27 |
+| `job-scout-nightly` (single slot) | archivist, `74bac7a999d0` | Disabled 08-21, superseded by the split |
+| `job-scout-nightly` (old copy) | default, `20e08388d5df` | Paused 07-20 |
+| `~/.hermes/scripts/job_scout_nightly.sh` | — | Stale duplicate; nothing calls it |
 | `~/.hermes/scripts/run_cron.sh` | — | 15-line older version; nothing calls it |
