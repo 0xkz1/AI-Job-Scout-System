@@ -3,11 +3,22 @@
 Two loops run unattended. They are different levels and the difference matters:
 the nightly produces documents and stops, the repair loop changes source code.
 
-| Loop | Schedule | Level | Profile | Job |
-|------|----------|-------|---------|-----|
-| Nightly scout — early | `0 2 * * *` | L1 | archivist | `45feb3a6d61c` |
-| Nightly scout — late | `30 4 * * *` | L1 | archivist | `59283aceccaa` |
-| Scraper repair | `0 7 * * *` | **L2 — edits code, stops at a branch** | builder | `9610debe9fa6` |
+| Loop | Schedule (JST) | In UK terms | Level | Profile | Job |
+|------|----------------|-------------|-------|---------|-----|
+| Nightly scout — early | `0 2 * * *` | 18:00 BST, previous day | L1 | archivist | `45feb3a6d61c` |
+| Nightly scout — late | `30 4 * * *` | 20:30 BST, previous day | L1 | archivist | `59283aceccaa` |
+| Scraper repair | `0 7 * * *` | 23:00 BST, previous day | **L2 — edits code, stops at a branch** | builder | `9610debe9fa6` |
+
+**The machine is `Asia/Tokyo`, so every cron expression here is JST and
+"nightly" means the Japanese night.** The job market is British, which puts the
+scrape at UK early evening — after the working day, with everything posted that
+day already up. Nobody chose it for that reason and it happens to be the right
+end of the day to scrape a UK board from.
+
+The consequence to remember is that a UK-morning posting is picked up the same
+evening, and the Telegram summary lands around 06:30 JST — which is 22:30 the
+previous evening in the UK. Reading "the loop ran overnight" as UK overnight
+gets the day wrong by one.
 
 The scheduler is Hermes, not the system crontab and not systemd. Jobs live in a
 profile, so `crontab -l`, `systemctl --user list-timers` and a bare

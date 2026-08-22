@@ -7,11 +7,14 @@ Last verified: 2026-08-22
 
 ## Loop health
 
+All times JST — the machine is `Asia/Tokyo`. UK equivalents in brackets, since
+the job market is British and the two land on different calendar days.
+
 | Loop | Schedule | Last run | Result |
 |------|----------|----------|--------|
-| job-scout-early | `0 2 * * *` | 2026-08-22 02:00 | ok |
-| job-scout-late | `30 4 * * *` | 2026-08-22 04:30 | ok |
-| loop-repair (L2) | `0 7 * * *` | 2026-08-22 07:00 | ok — no candidate, silent |
+| job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-22 02:00 | ok |
+| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-22 04:30 | ok |
+| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-22 07:00 | ok — no candidate, silent |
 
 Verify:
 
