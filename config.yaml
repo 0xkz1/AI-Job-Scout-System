@@ -348,6 +348,35 @@ weights:
   salary: 0.00
   context: 0.40
 
+# A stored context score is reused forever, which is right when the score means
+# something and wrong when it was one draw of a measurement that does not
+# repeat. The same posting, persona and code scored nine times returned 0.40 to
+# 0.88; skills, measured the same way, reproduced exactly.
+#
+# So reuse is kept, and one case is carved out of it: a LOW stored context under
+# HIGH skills. The two axes contradicting each other is evidence about the noisy
+# one. Such a job is drawn once more and the two draws averaged.
+#
+# Measured on the 4860-job database (2026-08-24):
+#
+#   context_source llm      3888   (reused; frozen at whatever was drawn)
+#   context_source tfidf     972   (not reused — re-scored on the next pass anyway)
+#   of the 3888: ctx <= 0.30                    2186 (56%)
+#                ctx <= 0.30 AND skills >= 0.50  420  <- what this re-draws
+#
+# 420 extra calls, once, then never again for those jobs: max_draws stops the
+# trigger the moment the second draw lands, so the cost does not repeat every
+# night. Jobs the filter rejected are excluded by skip_llm_context and pay
+# nothing, as before.
+#
+# skills_min 0.50 is where the disagreement is real rather than both terms
+# simply reading low — the median skills score in the database is 0.30.
+context_rescore:
+  enabled: true
+  context_max: 0.30
+  skills_min: 0.50
+  max_draws: 2
+
 # Review submission gate: CV/CL scoring >= this is badged 提出可 (badge only)
 review_score_threshold: 85
 

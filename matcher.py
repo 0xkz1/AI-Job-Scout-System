@@ -2092,6 +2092,28 @@ def calculate_title_relevance(
 
     return 1.0
 
+
+def _context_is_contradicted(stored_score, skills_score, draws: int, config: dict) -> bool:
+    """Does a stored context score disagree with the skills score badly enough
+    to be worth measuring again?
+
+    Context is the noisy term and skills is the reproducible one, so the two
+    disagreeing is evidence about the context score, not about the job. Only a
+    disagreement in one direction counts — a low context under strong skills —
+    and only until the job has been drawn `max_draws` times, which caps the
+    extra spend at one call per job for the lifetime of the database.
+    """
+    cfg = config.get("context_rescore") or {}
+    if not cfg.get("enabled"):
+        return False
+    if draws >= int(cfg.get("max_draws", 2)):
+        return False
+    if not isinstance(stored_score, (int, float)) or not isinstance(skills_score, (int, float)):
+        return False
+    return (stored_score <= float(cfg.get("context_max", 0.30))
+            and skills_score >= float(cfg.get("skills_min", 0.50)))
+
+
 def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_summary: bool = False,
                   skip_llm_context: bool = False) -> dict:
     """
@@ -2161,8 +2183,13 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     old_match = job.get("match") or {}
     legacy_ctx = old_match.get("context")
     ctx_source = "llm"
-    if old_match.get("context_source") == "llm" or old_match.get("llm_context_tagged"):
-        ctx_match = {
+    stored_llm = bool(old_match.get("context_source") == "llm"
+                      or old_match.get("llm_context_tagged"))
+    # A score already on the job is one draw unless it says otherwise; anything
+    # measured before this field existed predates the count.
+    ctx_draws = int(old_match.get("context_draws") or (1 if stored_llm else 0))
+    if stored_llm:
+        stored_ctx = {
             "score": old_match.get("context_score", 0),
             "reasoning": old_match.get("context_reasoning", ""),
             "reasoning_en": old_match.get("context_reasoning_en", ""),
@@ -2171,7 +2198,48 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             # Carry the recorded provider forward, or a rerun that reuses the stored
             # score would blank it and lose the only record of what produced it.
             "provider": old_match.get("context_provider"),
+            "ethos": old_match.get("context_ethos"),
+            "role_requirement": old_match.get("context_role_requirement"),
         }
+        redraw = (not skip_llm_context) and _context_is_contradicted(
+            stored_ctx["score"], skill_match["score"], ctx_draws, config
+        )
+    else:
+        stored_ctx = None
+        redraw = False
+
+    if stored_ctx is not None and not redraw:
+        ctx_match = stored_ctx
+    elif stored_ctx is not None:
+        # The stored score is one draw of a measurement that does not repeat:
+        # the same posting, persona and code scored nine times returned 0.40 to
+        # 0.88. Skills, which reproduces exactly, says this job fits. One term
+        # contradicting the other is not a verdict, it is a reason to measure
+        # again — so draw once more and average, which halves the variance on
+        # the term holding 40% of the composite.
+        #
+        # The correction is deliberately one-sided: only a LOW stored score
+        # against HIGH skills is re-drawn, so an unlucky high draw keeps its
+        # luck. Symmetry would cost a second call on every job (measured
+        # trigger population: 420 of 3888). The asymmetry is the right one
+        # here because the two errors are not equal — a false low is a job
+        # that is never seen, a false high is a CV that the review then scores
+        # and rejects for the price of generating it.
+        persona = _load_persona_summary()
+        new_ctx = _ollama_context_score(job_description, persona) if (persona and job_description) else None
+        if new_ctx:
+            # Keep the new draw's prose: it is the read that actually happened.
+            # The score is the mean of both, so text and number describe the
+            # same job from different draws — the number is the estimate, the
+            # reasoning is one sample of the evidence behind it.
+            ctx_match = dict(new_ctx)
+            ctx_match["score"] = round((stored_ctx["score"] + new_ctx["score"]) / 2, 2)
+            ctx_draws += 1
+        else:
+            # A failed call is not a draw. Keep what was measured and leave the
+            # count alone, so the next run tries again instead of banking a
+            # verdict on a call that never returned.
+            ctx_match = stored_ctx
     elif isinstance(legacy_ctx, dict) and "score" in legacy_ctx:
         ctx_match = legacy_ctx
     else:
@@ -2183,6 +2251,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             llm_ctx = _ollama_context_score(job_description, persona)
         if llm_ctx:
             ctx_match = llm_ctx
+            ctx_draws = 1
         elif attempted_llm:
             # Tried and failed. TF-IDF is the right answer when the LLM was
             # never asked (skip_llm_context, below) and the wrong one here:
@@ -2199,9 +2268,11 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             # "unscored" is a source in its own right rather than a zero.
             ctx_match = {"score": 0.0, "reasoning": "", "unscored": True}
             ctx_source = "unscored"
+            ctx_draws = 0
         else:
             ctx_match = calculate_context_match(job_description)  # never asked
             ctx_source = "tfidf"
+            ctx_draws = 0
 
     # Weighted composite — accept custom weights from config or parameter
     w = weights or config.get("weights", DEFAULT_WEIGHTS)
@@ -2293,6 +2364,10 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "context_ethos": ctx_match.get("ethos"),
         "context_role_requirement": ctx_match.get("role_requirement"),
         "context_source": ctx_source,
+        # How many times this score has actually been drawn. Without it a
+        # re-drawn job is indistinguishable from a first-draw one, and the
+        # disagreement trigger would pay for the same job every single run.
+        "context_draws": ctx_draws,
         # context_source only says "llm" vs "tfidf"; this says which model, so a
         # score produced by a fallback after the primary keys ran out can be told
         # apart from one produced by the intended model and refreshed on its own.
