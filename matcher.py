@@ -2178,12 +2178,29 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         # Use LLM for context scoring (or TF-IDF fallback)
         persona = _load_persona_summary()
         llm_ctx = None
-        if persona and job_description and not skip_llm_context:
+        attempted_llm = bool(persona and job_description and not skip_llm_context)
+        if attempted_llm:
             llm_ctx = _ollama_context_score(job_description, persona)
         if llm_ctx:
             ctx_match = llm_ctx
+        elif attempted_llm:
+            # Tried and failed. TF-IDF is the right answer when the LLM was
+            # never asked (skip_llm_context, below) and the wrong one here:
+            # measured over the whole database it reads 0.11 median against
+            # the LLM's 0.30, so substituting it does not record "we could not
+            # tell", it records "this is a poor match" — a claim nothing
+            # measured. At 40% of the composite that decides the job's tier,
+            # and the score is then REUSED forever by the context_source ==
+            # "llm" branch above, so one rate-limited call permanently marks a
+            # good posting weak. Roughly one call in five fails.
+            #
+            # So: score on what was actually measured. The context term drops
+            # out and the remaining weights are renormalised, which is why
+            # "unscored" is a source in its own right rather than a zero.
+            ctx_match = {"score": 0.0, "reasoning": "", "unscored": True}
+            ctx_source = "unscored"
         else:
-            ctx_match = calculate_context_match(job_description)  # TF-IDF fallback if LLM fails
+            ctx_match = calculate_context_match(job_description)  # never asked
             ctx_source = "tfidf"
 
     # Weighted composite — accept custom weights from config or parameter
@@ -2203,6 +2220,14 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         + sal_match["score"] * weights["salary"]
         + ctx_match["score"] * weights["context"]
     )
+
+    # Context could not be measured — renormalise over the terms that could.
+    # Leaving its weight in place would multiply a 0.0 through 40% of the
+    # composite and call that a result; dropping the term says the job was
+    # scored on four axes instead of five, which is what happened.
+    if ctx_source == "unscored":
+        live = sum(v for k, v in weights.items() if k != "context")
+        composite = (composite / live) if live else 0.0
 
     # Title relevance filter
     relevance = calculate_title_relevance(
