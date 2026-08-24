@@ -509,9 +509,36 @@ def _has_digital_design_context(job_skills: list[str]) -> bool:
 # Roles whose "design" vocabulary is digital/creative by definition — a bare
 # "Design" skill inside one of these disciplines is the candidate's actual
 # strength, not a physical-design (gas/automotive/CAD) false friend.
+#
+# web_developer was removed 2026-08-25. Its keyword list is shared with CV
+# routing and mixes genuine front-end terms with "software engineer", "software
+# developer", "backend engineer", "python developer" — and a title hit counts
+# double, so ANY posting titled "Software Engineer" reached this threshold on
+# its title alone and unlocked a bare "Design" requirement. Lloyds Banking
+# Group's insider-risk engineering role did exactly that: skills 0.66, of which
+# the matched terms were Agile, Design, Git, Kanban, Kubernetes, React, Scrum
+# while the two that actually describe the job, Azure and Java, were the
+# misses. Demoting "Design" there takes it to 0.56.
+#
+# Measured by scoring the whole database both ways: 79 postings change, every
+# one of them downward, by a median 0.16 and up to 0.48. That matters more
+# than it would have, because the 2026-08-24 reweighting moved
+# skills from 0.20 to 0.45 of the composite — a reproducible error is still an
+# error, and it now carries more than twice the leverage.
+#
+# The cost is a handful of .NET/PHP "Web Developer" postings losing the unlock.
+# That is the right trade: their skill lists name no HTML, CSS, JavaScript,
+# Figma or UI/UX at all, so "design" in them means software design. A web job
+# whose design work is real names one of those, and _has_digital_design_context
+# catches it directly without going through role affinity.
 _DIGITAL_ROLE_SET = {"product_designer", "graphic_designer", "creative_technologist",
-                     "technical_artist", "web_developer", "camera_assistant"}
+                     "technical_artist", "camera_assistant"}
 # One title keyword hit (2.0) or two skill/description hits (1.0 each) suffice.
+# NOT raised above 2.0: measured on the shipped keyword lists, "Visual
+# Designer", "Interaction Designer", "Motion Designer", "Digital Designer",
+# "Midweight Designer", "Technical Artist" and "Artworker" all score EXACTLY
+# 2.0 from their titles, so any higher bar would drop real design disciplines.
+# The fix for over-firing belongs in the role set above, not in this number.
 _DIGITAL_ROLE_MIN_AFFINITY = 2.0
 
 
@@ -695,6 +722,7 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
     matched = []
     partial = []
     missing = []
+    unattributed = []
     total_weight = 0.0
     matched_weight = 0.0
 
@@ -707,15 +735,22 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
         # terms) must not sit in the denominator as if they were requirements.
         if ((llm_coverage or {}).get(job_skill) or {}).get("verdict") == "not_a_skill":
             continue
-        total_weight += 1.0
-
-        # Bare "design"/"designer" with no accompanying digital-design signal
-        # in this same job's skill list is discipline-ambiguous (see
-        # _AMBIGUOUS_DESIGN_TERMS) — count it unmatched rather than let it
-        # substring/embedding-match the candidate's own Web/UI design skills.
+        # Bare "design"/"designer" with no accompanying digital-design signal in
+        # this same job's skill list is discipline-ambiguous (see
+        # _AMBIGUOUS_DESIGN_TERMS): it covers gas mains and automotive CAD as
+        # readily as UI work, and it is as often the VERB the posting used
+        # ("design and develop detection capabilities") as a requirement at all.
+        #
+        # Neither answer about it is a measurement. Calling it matched hands the
+        # candidate's 90% design skill to a security engineering role; calling it
+        # missing asserts both that the job requires design and that the
+        # candidate lacks it, and the second half is simply false — they are a
+        # designer. So it leaves the denominator entirely, exactly like the two
+        # skips above: the job is scored on the terms that do mean something.
         if normalize_skill_name(job_skill) in _AMBIGUOUS_DESIGN_TERMS and not has_design_context:
-            missing.append(job_skill)
+            unattributed.append(job_skill)
             continue
+        total_weight += 1.0
 
         level = get_user_skill_level(user_skills, job_skill)
 
@@ -791,6 +826,11 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
         "matched": matched,
         "partial": partial,
         "missing": missing,
+        # Named requirements that were scored as neither. Reported rather than
+        # dropped silently, because "Design" vanishing from a posting that lists
+        # it is exactly the kind of thing that looks like a bug when it is a
+        # refusal to guess which discipline the word meant.
+        "unattributed": unattributed,
     }
 
 
@@ -2780,6 +2820,16 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
             lines.append(f"- {s}")
         if len(match["skills"]["missing"]) > 10:
             lines.append(f"- ... and {len(match['skills']['missing']) - 10} more")
+
+    # Neither matched nor a gap: the posting named it, and which discipline it
+    # meant could not be read. Shown so the term does not simply disappear from
+    # a list of the job's own requirements.
+    if match["skills"].get("unattributed"):
+        lines.append("")
+        lines.append("### ⚪ Not scored (ambiguous)")
+        for s in match["skills"]["unattributed"][:10]:
+            lines.append(f"- {s} — the posting does not say which discipline; "
+                         f"counted neither for nor against")
 
     lines.extend([
         f"",
