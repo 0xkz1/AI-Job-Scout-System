@@ -20,7 +20,12 @@ from llm_client import call_llm
 
 # --- Salary parsing ---
 
-SALARY_PATTERNS = [
+# Three families, separated because they can be trusted in different places.
+#
+# PERIOD-ANCHORED: the figure is followed by the period it is paid over, so the
+# text itself says the number is pay. Safe in a seven-thousand-character
+# description.
+_PERIOD_ANCHORED = [
     # "£40,000 - £55,000 per year"
     re.compile(
         r"[£€\$]?\s*([\d,]+)\s*(?:–|-|to)\s*[£€\$]?\s*([\d,]+)\s*(?:per\s*)?(?:year|annum|pa|yr|annual|per\s*annum)",
@@ -36,29 +41,93 @@ SALARY_PATTERNS = [
         r"[£€\$]\s*([\d,.]+)\s*(?:–|-|to)\s*[£€\$]\s*([\d,.]+)\s*per\s*hour",
         re.IGNORECASE,
     ),
+    # "£50,000 per annum" — one figure, not a range. Must come after the range
+    # patterns: in "£40,000 - £55,000 per year" this matches the £55,000 alone,
+    # and first-match-wins would record the top of the range as the whole salary.
+    re.compile(
+        r"[£€\$]\s*([\d,]{4,})\s*(?:per\s*)?(?:year|annum|pa|yr|annual)\b",
+        re.IGNORECASE,
+    ),
+]
+
+# LABEL-ANCHORED: the posting introduces the figure as pay in its own words.
+# Also safe in a description — the label has to come FIRST, which is what
+# separates "SALARY: £42,744" from "a £1,500 salary sacrifice scheme".
+#
+# Added 2026-08-25. Every annual pattern before them required a trailing period
+# word, so the commonest UK phrasing was dropped on the floor —
+#
+#   "£42,744 to £53,000 per annum"  ->  parsed
+#   "SALARY: £42,744 - £53,000"     ->  nothing
+#   "Salary: £45,000"               ->  nothing
+#
+# 523 postings — 34% of every posting stating a figure anywhere in its
+# description — were recorded as "salary not specified" and handed the
+# unknown-salary default. Lloyds Banking Group's Software Engineer states its
+# range on line one and was one of them.
+#
+# The {0,24} gap cannot cross a newline or another currency symbol, so a
+# "salary" heading cannot reach down into an unrelated paragraph's number, and
+# the range pattern is tried before the single so a range is never truncated to
+# its floor.
+_LABEL_ANCHORED = [
+    # "SALARY: £42,744 - £53,000" / "Salary range £42,744 to £53,000"
+    re.compile(
+        r"(?:salary|remuneration|compensation)[^\n£€\$]{0,24}?"
+        r"[£€\$]\s*([\d,]{4,})\s*(?:–|-|to)\s*[£€\$]?\s*([\d,]{4,})",
+        re.IGNORECASE,
+    ),
+    # "Salary: £45,000" / "Starting salary of £45,000"
+    re.compile(
+        r"(?:salary|remuneration|compensation)[^\n£€\$]{0,24}?[£€\$]\s*([\d,]{4,})",
+        re.IGNORECASE,
+    ),
+]
+
+# UNANCHORED: nothing in the text says the number is pay. In a thirty-character
+# salary field "Up to £60,000" can only be the salary; in a description it is
+# the referral bonus, the relocation package, or the Peloton cashback. Eight
+# postings were filtered out on figures like that, including a Creative
+# Technologist role rejected for a "£1,500 salary" that was a referral bonus,
+# and two where the sentence read "Starting salary of £30000 - £33000 with a
+# yearly bonus of up to £1,530" and the bonus won. So these are reachable from
+# the salary FIELD only — they are absent from DESCRIPTION_SALARY_PATTERNS.
+#
+# The bare range is the single biggest win here: of 2756 postings carrying a
+# non-empty salary field, 2150 parsed to nothing, and the top twelve spellings
+# among them were all of this shape ("£45,000 - £45,000" x76, "£30,000 -
+# £30,000" x46, "£50,000 - £60,000" x35).
+#
+# Four digits minimum, so "£25 - £35" — an hourly field with the "per hour"
+# missing — does not become a £25 salary. It stays unparsed, which is the
+# honest answer.
+_FIELD_ONLY = [
     # "Up to £60,000"
     re.compile(r"[Uu]p\s*to\s*[£€\$]\s*([\d,]+)"),
     # "£50,000+"
     re.compile(r"[£€\$]\s*([\d,]+)\s*\+"),
+    # "£45,000 - £55,000"
+    re.compile(r"[£€\$]\s*([\d,]{4,})\s*(?:–|-|to)\s*[£€\$]?\s*([\d,]{4,})"),
+    # "£45,000"
+    re.compile(r"[£€\$]\s*([\d,]{4,})"),
 ]
 
-# The patterns above are two different kinds. The first three anchor the figure
-# to a period word sitting right after it ("per year", "/yr", "per hour"); the
-# last two anchor to nothing — in a thirty-character salary field "Up to
-# £60,000" can only be the salary, but in a seven-thousand-character description
-# it matches the referral bonus, the relocation package, or the Peloton
-# cashback. Eight postings were filtered out on figures like that, including a
-# Creative Technologist role rejected for a "£1,500 salary" that was a referral
-# bonus, and two where the sentence read "Starting salary of £30000 - £33000
-# with a yearly bonus of up to £1,530" and the bonus won. So a description is
-# scanned with the anchored patterns only; the salary field keeps all five.
-DESCRIPTION_SALARY_PATTERNS = SALARY_PATTERNS[:3]
+SALARY_PATTERNS = _PERIOD_ANCHORED + _FIELD_ONLY + _LABEL_ANCHORED
+DESCRIPTION_SALARY_PATTERNS = _PERIOD_ANCHORED + _LABEL_ANCHORED
 
 # Which pattern matched says whether the figure is hourly. Asking the whole text
 # instead ("hour" in text.lower()) is fine for a salary field and wrong for a
 # description, where "37.5 hours per week" three paragraphs away turned an
 # annual range into an hourly one — 144 of them.
-_HOURLY_PATTERNS = frozenset({SALARY_PATTERNS[2]})
+_HOURLY_PATTERNS = frozenset({_PERIOD_ANCHORED[2]})
+
+# A label or a bare figure is a weaker anchor than a period word, so what they
+# match is sanity-checked before it is believed: a figure this small read as a
+# year's pay is a bonus, a weekly rate, or a day rate whose "per day" the
+# pattern did not see. Rejecting it lets the search continue to a later pattern
+# instead of banking the wrong number.
+_MIN_CREDIBLE_ANNUAL = 10_000
+_FLOOR_CHECKED_PATTERNS = frozenset(_LABEL_ANCHORED + _FIELD_ONLY[2:])
 
 
 def parse_salary(text: str, patterns: list | None = None) -> dict:
@@ -87,17 +156,28 @@ def parse_salary(text: str, patterns: list | None = None) -> dict:
 
             period = "hourly" if pattern in _HOURLY_PATTERNS else "annual"
 
+            low = high = None
             if len(groups) >= 2:
                 # Range: £40,000 - £55,000
-                result["min"] = _clean_number(groups[0])
-                result["max"] = _clean_number(groups[1])
+                low, high = _clean_number(groups[0]), _clean_number(groups[1])
             elif "up to" in text.lower():
-                result["max"] = _clean_number(groups[0])
+                high = _clean_number(groups[0])
             elif "+" in text or "plus" in text.lower():
-                result["min"] = _clean_number(groups[0])
+                low = _clean_number(groups[0])
             else:
-                result["min"] = result["max"] = _clean_number(groups[0])
+                low = high = _clean_number(groups[0])
 
+            # A label or a bare figure is a weaker anchor than a period word:
+            # "salary" can head a sentence that goes on to name a signing bonus,
+            # and a bare figure says nothing at all. Anything this small under an
+            # annual reading is not a year's pay, so keep looking rather than
+            # record it.
+            if pattern in _FLOOR_CHECKED_PATTERNS and period == "annual":
+                figures = [v for v in (low, high) if v is not None]
+                if not figures or min(figures) < _MIN_CREDIBLE_ANNUAL:
+                    continue
+
+            result["min"], result["max"] = low, high
             result["currency"] = currency
             result["period"] = period
             break
