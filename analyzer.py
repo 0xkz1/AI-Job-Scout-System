@@ -454,6 +454,16 @@ WORK_STYLE_PATTERNS = {
 }
 
 
+# Wording that could plausibly support an "onsite" reading. Deliberately wide —
+# it is not asked to decide the work style, only whether the posting says
+# anything about where the work happens at all.
+_ONSITE_EVIDENCE = re.compile(
+    r"on[\s-]?site|in[\s-]the[\s-]office|office[\s-]based|in person|on premises"
+    r"|hybrid|days? (?:a|per) week|commut|relocat|based in|attend",
+    re.IGNORECASE,
+)
+
+
 def classify_work_style(title: str, description: str) -> str:
     """Classify as remote, hybrid, onsite, or unknown."""
     text = f"{title} {description}".lower()
@@ -865,8 +875,20 @@ def classify_experience_work_style_ollama(title: str, description: str) -> dict:
 
     text = f"Job title: {title}\nJob description: {description}" if description.strip() else f"Job title: {title}"
 
+    # "unknown" is offered on purpose. Without it the enum forces a guess about
+    # something a great many postings simply do not state, and the guess lands on
+    # "onsite" — which the matcher scores as a severe penalty for a distant
+    # candidate. Measured 2026-08-26: 1704 postings are recorded as onsite, and
+    # 1104 of them contain nothing _ONSITE_EVIDENCE can find — no "on-site",
+    # "office", "hybrid", "in person", "days a week", "relocate", "based in".
+    # Moth's Creative Technologist posting says nothing whatsoever about where
+    # the work happens and was marked onsite, which cost it a tenth of its
+    # location score (0.35 unknown vs 0.25 onsite).
     prompt = f"""Classify this job's experience level and work style.
-Return JSON: {{"experience_level": "internship|entry_level|mid|senior|director", "work_style": "remote|hybrid|onsite"}}
+Use "unknown" for either field when the posting does not state it. Do not infer
+work style from the office location, the industry, or the seniority — only from
+what the posting says about where the work is done.
+Return JSON: {{"experience_level": "internship|entry_level|mid|senior|director|unknown", "work_style": "remote|hybrid|onsite|unknown"}}
 
 {text}"""
 
@@ -962,6 +984,14 @@ def analyze_job(job: dict, skip_llm: bool = False) -> dict:
             experience_level = ollama_class.get("experience_level", "unknown")
         if work_style == "unknown":
             work_style = ollama_class.get("work_style", "unknown")
+            # Belt and braces on the prompt above: an "onsite" verdict is only
+            # believed when the posting contains wording that could support it.
+            # The keyword classifier already said unknown to get here, so a model
+            # answering "onsite" against silent text is inferring from the office
+            # address, and the matcher turns that inference into a severe
+            # location penalty.
+            if work_style == "onsite" and not _ONSITE_EVIDENCE.search(description or ""):
+                work_style = "unknown"
 
     # Recorded, not acted on — see the note in classify_experience_level.
     # (years, is_ceiling) or None; is_ceiling means the posting caps experience
