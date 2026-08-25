@@ -704,6 +704,97 @@ _SKILL_STRENGTH_CEILING = 0.6
 _SKILL_MIN_REQS = 4.0
 
 
+# Where a posting stops stating requirements and starts listing wishes. Matched
+# against the description, so the phrasing is the employer's, not ours.
+_PREFERRED_SECTION = re.compile(
+    r"what will set you apart|nice[\s-]?to[\s-]?have|desirable|preferred qualification"
+    r"|bonus points|advantageous|would be a plus|it'?s a plus|not essential"
+    r"|even better if|you might also",
+    re.IGNORECASE,
+)
+
+# "Programming fluency in at least one language (Python, C++, JavaScript)" is ONE
+# requirement, and the extractor returns it as three.
+_ANY_ONE_OF = re.compile(
+    r"at least one|one or more|any of|either|one of the following|or similar|such as",
+    re.IGNORECASE,
+)
+
+
+def _locate(term: str, haystack_lower: str) -> list[int]:
+    """Every word-boundary position of a skill term in a lowered description.
+
+    Falls back to the term's longest word when the whole phrase is absent: the
+    LLM extractor expands what it reads ("Unreal" comes back as "Unreal
+    Engine"), and a term that cannot be located cannot be placed in a section.
+    """
+    for probe in (term, max(term.split(), key=len, default="") if " " in term else ""):
+        if not probe or len(probe) < 3:
+            continue
+        hits = [m.start() for m in re.finditer(
+            r"(?<![a-z0-9])" + re.escape(probe.lower()) + r"(?![a-z0-9])", haystack_lower)]
+        if hits:
+            return hits
+    return []
+
+
+def _unrequired_skills(job_skills: list[str], job_description: str,
+                       user_skills: dict) -> set[str]:
+    """Skills the posting NAMES but does not REQUIRE, so failing to hold one is
+    not a gap in the candidate.
+
+    The extractor returns one flat list, and it is drawn to concrete tool names
+    — which is exactly where a posting's optional section lives. Moth's Creative
+    Technologist role asks for "programming fluency in at least one language
+    (Python, C++, JavaScript/TypeScript)", generative-AI familiarity and a
+    portfolio; the six skills extracted from it were Arduino, Blender, C++,
+    Python, Unity and Unreal Engine, five of which come from "What will set you
+    apart" or from the unchosen half of that one-language list. Scored as
+    requirements, a candidate who satisfies the stated requirement outright
+    reads as holding one skill in six.
+
+    Two things are recognised, both from the posting's own words:
+
+      - anything whose only mention falls after a "nice to have" heading
+      - the siblings of an "at least one of X, Y, Z" list, once one of them is
+        held. Only DIRECT holdings count as satisfying the list, not the
+        embedding or LLM rescues, so this can never manufacture a match.
+
+    Being unrequired does not remove a skill's credit — holding a nice-to-have
+    still counts for the candidate. It only stops the absence counting against
+    them.
+    """
+    text = job_description or ""
+    if not text:
+        return set()
+    lower = text.lower()
+    unrequired: set[str] = set()
+
+    heading = _PREFERRED_SECTION.search(text)
+    cut = heading.start() if heading else None
+
+    located = {s: _locate(s, lower) for s in job_skills}
+
+    if cut is not None:
+        for skill, hits in located.items():
+            if hits and all(h >= cut for h in hits):
+                unrequired.add(skill)
+
+    # Sentence-level: an "any one of" cue and the skills named beside it.
+    for sentence in re.split(r"(?<=[.!?\n])", text):
+        if not _ANY_ONE_OF.search(sentence):
+            continue
+        s_lower = sentence.lower()
+        here = [s for s in job_skills if _locate(s, s_lower)]
+        if len(here) < 2:
+            continue
+        if any(get_user_skill_level(user_skills, s) >= 0.6 for s in here):
+            unrequired.update(s for s in here
+                              if get_user_skill_level(user_skills, s) < 0.6)
+
+    return unrequired
+
+
 def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: str = "",
                           job_description: str = "", llm_coverage: dict | None = None) -> dict:
     """
@@ -714,6 +805,7 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
         return {"score": 0.3, "matched": [], "missing": [], "partial": []}
 
     user_skill_list = _build_user_skill_embeddings(user_skills)
+    unrequired = _unrequired_skills(job_skills, job_description, user_skills)
     has_design_context = (
         _has_digital_design_context(job_skills)
         or _digital_role_affinity(job_title, job_skills, job_description) >= _DIGITAL_ROLE_MIN_AFFINITY
@@ -785,6 +877,13 @@ def calculate_skill_match(job_skills: list[str], user_skills: dict, job_title: s
                 elif v == "partial" and by_level > 0:
                     partial.append({"skill": job_skill, "level": by_level, "via": by})
                     matched_weight += 0.35
+                elif job_skill in unrequired:
+                    # Named by the posting, not asked for by it — see
+                    # _unrequired_skills. The candidate does not hold it and was
+                    # never required to, so it is neither credit nor gap and
+                    # leaves the denominator it was provisionally counted into.
+                    unattributed.append(job_skill)
+                    total_weight -= 1.0
                 else:
                     missing.append(job_skill)
 
