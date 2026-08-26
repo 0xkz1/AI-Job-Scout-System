@@ -3,7 +3,7 @@
 Human-maintained. Nothing in the pipeline writes this file; a stale date here
 means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
-Last verified: 2026-08-22
+Last verified: 2026-08-27
 
 ## Loop health
 
@@ -12,15 +12,26 @@ the job market is British and the two land on different calendar days.
 
 | Loop | Schedule | Last run | Result |
 |------|----------|----------|--------|
-| job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-22 02:00 | ok |
-| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-22 04:30 | ok |
-| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-22 07:00 | ok — no candidate, silent |
+| job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-27 02:00 → 02:59 | ok |
+| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-27 04:30, running at time of writing | previous 2026-08-26 ok |
+| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-26 07:00 | ok — no candidate, silent |
+| loop-readiness-daily (L3) | `0 9 * * *` | 2026-08-26 09:03 | ok — scores files, not runs |
 
 Verify:
 
 ```bash
 cat 10_output/_nightly_run_summary.tsv
 grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
+```
+
+**Reading `hermes cron list` without misdiagnosing it.** `Next run` advances when
+a run STARTS; `Last run` only moves when it finishes. A long slot therefore shows
+a next run a full day ahead while it is still executing, which reads exactly like
+a skipped night. It cost one wrong diagnosis on 08-27. Check for the process
+before concluding anything from the two dates:
+
+```bash
+pgrep -af job_scout_nightly.sh
 ```
 
 ### 2026-08-22 — the first night every site completed
@@ -78,12 +89,15 @@ Telegram wording — had never executed.
   when the leftover is merely harmless.
 - **`SWEEP_DEADLINE` (7020s) and the Hermes cap (7200) are 180s apart.** Crossed
   on 08-14. A run that crosses it completes and notifies nobody.
-- **Per-stage model tiering is not decided yet.** `10_output/_llm_stats.tsv`
-  starts collecting on the 08-23 run. The plan was nearly made from stage names,
-  which would have put url-list extraction on a 20B model — it reads 15,000
-  characters and reproduces a whole job description at max_tokens=4096, and a
-  degraded description is worse than a failed one because it still looks like a
-  description. Decide from the measured rows.
+- **The analyzer retiering is committed but not yet observed in a night.**
+  `7171a47` routes the analyzer stage to groq. Nothing has run through it yet at
+  the time of writing — tonight's `late` slot is the first. Read
+  `10_output/_llm_stats.tsv` with `llm_stats.py` afterwards and compare against
+  the 614 calls / 16,293s it replaces. A zero-byte stats file before the scoring
+  phase is expected: `early` truncates it and scrapes without scoring.
+- **`vault-drift-check` is failing.** `error: Script exited with code 1`,
+  2026-08-27 04:28. Unrelated to the job loops — listed because it shares the
+  archivist scheduler and nothing else reports it.
 - **Five profiles still have no working agent path.** archivist, investigator,
   researcher, visualizer and writer point at `z-ai/glm-5.2` via the built-in
   `zai` provider, whose keys live in the gateway's `.env` and not in Hermes's
@@ -106,6 +120,14 @@ Telegram wording — had never executed.
   one, with thinking disabled. It sat mid-chain in four fallback chains, so every
   chain had been burning a retry on a guaranteed failure.
 - **No L2 loop** → 2026-08-22. Scheduled, ran, silent.
+- **Per-stage model tiering undecided** → 2026-08-27, `7171a47`. Decided from the
+  measured rows, not from stage names. analyzer was 614 calls and 16,293s in one
+  night — 62% of the night's LLM time — on a median 829-character prompt, at a
+  median 18.5s against groq's 0.9s for the same call. Compared head to head on 12
+  real postings the slow model was also the lossy one: 40 skills against 76, five
+  postings left with none against three, agreeing on experience_level and
+  work_style 11 times out of 12. See `loop-budget.md` for the table and the
+  `JIS_STAGE_PRIMARY` escape hatch.
 
 ## Stopped / dead automation
 

@@ -24,9 +24,25 @@ LLM spend inside it is bounded per stage by `--limit`, not by a token cap:
 `rescore_context --limit 400`. The gate that matters more is upstream — jobs the
 filter already rejected must never reach a model call at all.
 
+Since 2026-08-27 a stage can also choose WHO answers it, which is the other half
+of the same budget: `_STAGE_PRIMARY` in `llm_client.py`, overridable from the
+environment with `JIS_STAGE_PRIMARY`. One entry so far.
+
+| Stage | Leads with | Why |
+|-------|-----------|-----|
+| `analyzer` | `groq` | 614 calls and 16,293s measured in one night — 62% of the night's LLM time — on a median 829-character prompt. The gateway's mistral-medium answers that in a median 18.5s against groq's 0.9s, and on 12 real postings compared head to head it also returned FEWER skills (40 against 76, five postings with none against three). The slow model was also the lossy one. |
+
+Nothing was removed to do it: the configured provider stays in
+`FALLBACK_PROVIDERS`, so a groq failure costs one hop. The large-prompt stages
+need no entry and cannot be given a harmful one — matcher's ~58k and reviewer's
+~98k prompts exceed groq's cap and `_size_filter_chain` drops it from their
+chains whatever the head of the chain says.
+
 What each stage actually costs is now recorded rather than estimated:
 `10_output/_llm_stats.tsv`, read with `llm_stats.py`. Use it before changing any
-of the numbers above.
+of the numbers above. Note that only the `late` slot appends to it — `early`
+truncates it and scrapes without scoring, so a zero-byte file at 03:00 is the
+expected state, not a broken one.
 
 ## L2 — the scraper repair loop
 
