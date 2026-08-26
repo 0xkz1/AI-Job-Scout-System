@@ -40,7 +40,7 @@ from scraper_adzuna import scrape_adzuna_all
 from scraper_remote_apis import scrape_remote_apis_all
 from scraper_url_list import normalize_url
 from analyzer import analyze_job
-from filter import filter_jobs, print_filter_summary
+from filter import filter_jobs, print_filter_summary, passes_filter
 from matcher import (analyze_match, generate_match_report, load_user_skills, load_user_experience,
                      make_safe_name, read_applied_flag, read_expired_flag)
 from cv_generator import generate_cv, detect_role_type
@@ -101,10 +101,35 @@ def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) 
     A failed job keeps an empty match dict rather than none, so downstream code that
     assumes the key exists still works and `--reanalyze` can retry it.
     """
+    # A job the filter has rejected does not buy a context call. The live scrape
+    # path only ever hands this function jobs that already survived the filter,
+    # so the check costs nothing there; --reanalyze hands it the WHOLE database,
+    # where most of what lacks an LLM context lacks it on purpose.
+    #
+    # Measured 2026-08-26 over 5260 stored jobs: 1071 carry a TF-IDF context and
+    # 910 of those are filter rejects — TF-IDF is what skip_llm_context is FOR.
+    # Without this, `--reanalyze` pays for 1504 context calls where 628 is the
+    # honest number, and 885 of them re-score postings already thrown away.
+    #
+    # passes_filter is asked rather than the stored `_filter_reason`, which is
+    # close but not authoritative: 67 of today's rejects carry no reason at all
+    # and 83 jobs that pass today still carry a stale one, and skipping those 83
+    # would silently withhold a real score from jobs that deserve one.
+    skip_ctx = kwargs.pop("skip_llm_context", None)
+
+    def _skips(job) -> bool:
+        if skip_ctx is not None:
+            return skip_ctx
+        try:
+            return not passes_filter(job, config)[0]
+        except Exception:
+            return False  # never let a filter error silence a score
+
     failures = 0
     for i, job in enumerate(jobs, 1):
         try:
-            job["match"] = analyze_match(job, config, **kwargs)
+            job["match"] = analyze_match(job, config,
+                                         skip_llm_context=_skips(job), **kwargs)
         except Exception as e:
             failures += 1
             if failures <= 3:
