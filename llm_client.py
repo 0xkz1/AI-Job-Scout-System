@@ -301,6 +301,53 @@ def _calling_stage() -> str:
     return "unknown"
 
 
+# --- Per-stage primary provider ---------------------------------------------
+
+# ANALYSIS_PROVIDER names one primary for every stage, which is right when the
+# stages want the same thing and wrong here. Measured over one night: analyzer
+# is 614 calls and 16,293s — 62% of the pipeline's LLM time — on a median
+# 829-character prompt. The gateway's mistral-medium answers that in a median
+# 18.5s; groq answers it in 0.9s.
+#
+# Speed alone would not justify the hop. Compared head to head on 12 real
+# postings, through the real extraction functions and the real provider chain
+# with only the model changed, groq was also the better answer: 76 skills
+# against 40, three postings left with no skills against five, and agreement on
+# experience_level and work_style 11 times out of 12. The incumbent was the one
+# dropping skills, and a posting whose skills go missing sinks quietly in the
+# match score.
+#
+# Nothing is removed. The configured provider stays in FALLBACK_PROVIDERS, so a
+# groq failure costs one hop rather than the answer.
+#
+# The large-prompt stages need no entry here and must not be given one casually:
+# matcher's role_fit prompt (~58k chars) and reviewer's (~98k) both exceed groq's
+# cap, and _size_filter_chain drops groq from their chains whatever the order at
+# the head says.
+_STAGE_PRIMARY = {
+    "analyzer": "groq",
+}
+
+
+def _stage_primary(stage: str) -> Optional[str]:
+    """The provider this stage should lead with, or None for the configured one.
+
+    JIS_STAGE_PRIMARY replaces the table outright — "analyzer=groq,reviewer=zai",
+    or "" to route nothing — so a bad hop is undone from the environment without
+    a deploy. It replaces rather than overlays because the failure being guarded
+    against is a stage silently keeping a route the operator meant to drop.
+    """
+    env = os.environ.get("JIS_STAGE_PRIMARY")
+    if env is None:
+        return _STAGE_PRIMARY.get(stage)
+    table = {}
+    for part in env.split(","):
+        key, sep, value = part.partition("=")
+        if sep:
+            table[key.strip()] = value.strip()
+    return table.get(stage) or None
+
+
 def record_llm_call(stage: str, provider: str, elapsed: float, prompt_chars: int,
                     max_tokens: int, outcome: str) -> None:
     """Append one line to the file named by JIS_LLM_STATS_FILE, if set.
@@ -362,7 +409,11 @@ def call_llm(
     call_llm_counter += 1
     cid = call_llm_counter  # short alias for log prefix
 
-    primary = provider or os.environ.get("ANALYSIS_PROVIDER", "ollama")
+    # Resolved before the chain is built, because the stage may choose who leads
+    # it (see _STAGE_PRIMARY). An explicit provider= argument still wins: a
+    # caller naming its own provider has a reason the routing table cannot see.
+    stage = _calling_stage()
+    primary = provider or _stage_primary(stage) or os.environ.get("ANALYSIS_PROVIDER", "ollama")
     fallbacks_env = os.environ.get("FALLBACK_PROVIDERS") or os.environ.get("FALLBACK_PROVIDER", "")
     chain = [primary] + ([
         p.strip() for p in fallbacks_env.split(",")
@@ -381,7 +432,6 @@ def call_llm(
     chain = _size_filter_chain(chain, messages, system_prompt)
 
     errors: list[str] = []
-    stage = _calling_stage()
     prompt_chars = sum(len(str(m.get("content") or "")) for m in messages) + len(system_prompt)
     for i, prov in enumerate(chain):
         is_last = i == len(chain) - 1
