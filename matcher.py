@@ -1806,16 +1806,36 @@ def _repair_json(blob: str) -> str:
 
 
 def _ollama_context_score(job_description: str, persona_summary: str,
-                          brief: bool = False, _retries_left: int = 1) -> dict | None:
+                          brief: bool = True, _retries_left: int = 1) -> dict | None:
     """
     Ask the LLM to rate context/ethos alignment on a 0-100 scale.
     Returns {"score": float (0-1), "reasoning": str, ...} or None on failure.
 
-    brief=True: English-only, 1-2 sentence reasoning, small token budget —
-    for bulk scoring passes where only the score gates filtering. The long
-    bilingual reasoning (brief=False) roughly 6-10x's the latency; reserve it
-    for the few high-match jobs whose reports actually display it. The
-    Japanese translation is added lazily at report time, not here.
+    brief=True (the default since 2026-08-26): English-only reasoning. The long
+    bilingual form asks for the same 3-4 sentences TWICE, in English and in
+    Japanese, and that is what overruns the reply. The completion stops far
+    short of max_tokens — 353 to 1020 characters against a 900-token (~3600
+    character) budget — because the persona alone is 55k characters and the
+    whole request runs to ~61.5k, so what is left to emit is a few hundred
+    tokens whatever max_tokens says. Raising it was tried (300 -> 600/900) and
+    is not the lever.
+
+    Measured over the same six postings, one call each:
+
+      bilingual   2 of 6 replies truncated   scores .20 .75 .65 .15 .35 .15
+      brief       0 of 6 truncated           scores .25 .75 .60 .15 .40 .10
+
+    Identical judgement — every difference is 0.05 or less, far inside the
+    0.48 spread this scorer shows across repeat draws of one posting — and
+    nothing is cut. Shrinking the PERSONA to the same end would be deleting the
+    candidate's own evidence, which has been shipped and reverted here before
+    (see _load_persona_summary): it is the input that must stay whole, and the
+    duplicated output that need not.
+
+    Japanese is not lost, it is deferred: llm_context_backfill translates
+    context_reasoning_en for jobs above its threshold, so the reports a human
+    reads stay bilingual while bulk scoring does not pay for it. Pass
+    brief=False to ask for both languages in one call.
 
     role_fit rewards seniority in the posting and the CV reviews do not agree.
     The measurements, and the fix that was tried and reverted, are recorded on
