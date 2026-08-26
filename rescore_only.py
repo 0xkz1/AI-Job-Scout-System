@@ -3,12 +3,15 @@
 `run.py --reanalyze` is the obvious way to apply a scoring change to jobs
 already on disk, and it does far more than score: it runs the whole downstream
 pipeline, selecting jobs, generating CVs and cover letters and reviewing them.
-On 2026-08-26 that rewrote 70 CVs and 65 letters as a side effect of what was
-meant to be a re-scoring pass, and one letter came back degraded to
-`assembled-static` — the state where the tailored opening has been lost.
-run.py currently has no guard against overwriting a document that already
-exists, so there is nothing between a scoring pass and the application
-documents.
+Applying a scoring change that way on 2026-08-26 queued 88 new document sets —
+work nobody had asked for, at two LLM passes each — and stopping it partway
+left five CVs without their letters, because a pair is written as two writes
+and a killed run lands between them.
+
+It does NOT overwrite existing documents: run.py decides `want_cv = not
+os.path.exists(cv_path)` in the ordered pass before queueing, so a hand-edited
+CV is safe. That guard is why the damage was five half-written pairs rather
+than a corpus rewrite.
 
 So: this scores, and stops. It never reads or writes 10_cvs, 10_cover-letters,
 15_reviews or 00_matches. Re-render the reports afterwards with

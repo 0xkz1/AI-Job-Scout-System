@@ -2,11 +2,13 @@
 
 `run.py --reanalyze` is the obvious way to apply a scoring change to jobs
 already on disk, and it runs the whole downstream pipeline: selecting jobs,
-generating CVs and cover letters, reviewing them. On 2026-08-26 that rewrote 70
-CVs and 65 letters as a side effect of what was meant to be a scoring pass, and
-one letter came back degraded to `assembled-static` — the state where the
-tailored opening has been lost. run.py has no guard against overwriting a
-document that already exists, so nothing stood between the two.
+generating CVs and cover letters, reviewing them. Applying a scoring change
+that way on 2026-08-26 queued 88 new document sets nobody had asked for, at two
+LLM passes each, and stopping it partway left five CVs without their letters.
+
+Existing documents were never at risk — run.py decides `want_cv = not
+os.path.exists(cv_path)` before queueing — but a scoring pass should not be
+writing documents at all.
 
 rescore_only.py exists so that pass has a door that only does the one thing.
 The point of these tests is that it STAYS that way: a later edit that imports a
