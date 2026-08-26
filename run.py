@@ -239,6 +239,39 @@ def load_all_from_saved() -> list[dict]:
     return all_jobs
 
 
+# Words that say which COUNTRY, not which town. A location made only of these
+# carries no evidence about where the work is, and two of them must not be read
+# as disagreeing: the same posting reaches this database as "United Kingdom"
+# from one board and "UK" from another.
+_PLACE_NOISE = {
+    "uk", "u.k", "gb", "united", "kingdom", "england", "scotland", "wales",
+    "northern", "ireland", "great", "britain", "remote", "hybrid", "on",
+    "site", "onsite", "area", "greater", "and", "the", "of",
+}
+
+
+def _place_tokens(job: dict) -> set[str]:
+    import re as _re
+    words = _re.split(r"[^a-z0-9]+", (job.get("location") or "").lower())
+    return {w for w in words if w and w not in _PLACE_NOISE and len(w) > 1}
+
+
+def _different_place(a: dict, b: dict) -> bool:
+    """Do these two postings name places that cannot be the same one?
+
+    Deliberately hard to satisfy. The same vacancy is written differently by
+    every board — "London, England, United Kingdom", "LONDON, UK,", "Newington,
+    South East London" — so any SHARED town word is taken as agreement, and a
+    location that reduces to nothing but a country is taken as no evidence at
+    all rather than as a disagreement. Only two non-empty, entirely disjoint
+    sets of place words count as different places.
+    """
+    ta, tb = _place_tokens(a), _place_tokens(b)
+    if not ta or not tb:
+        return False
+    return ta.isdisjoint(tb)
+
+
 def _same_posting(a: dict, b: dict) -> bool:
     """Are these two same-company+title records the SAME posting?
 
@@ -247,6 +280,17 @@ def _same_posting(a: dict, b: dict) -> bool:
     require the descriptions to actually match. Missing/short descriptions
     can't disprove a duplicate, so they count as matching.
     """
+    # Two towns is two jobs, however identical the wording. A recruitment agency
+    # copy-pastes one advert across its patch, so the text matches at ~1.0 while
+    # the postings are separate vacancies a candidate would apply to separately.
+    # Measured 2026-08-26 over the 5260-job database: of 533 merges, 130 joined
+    # postings in DIFFERENT towns and every one of them came through the
+    # similarity test below, not through the missing-description path — IT
+    # Talent Solutions' Web Developer in Caversham swallowed the ones in
+    # Hadleigh and Basildon, CITRUS CONNECT's Sales Designer in Cardiff took
+    # Newport, Liverpool and East London.
+    if _different_place(a, b):
+        return False
     from difflib import SequenceMatcher
     da = (a.get("description") or "")[:1500]
     db = (b.get("description") or "")[:1500]
