@@ -1728,6 +1728,59 @@ _UNQUOTED_VALUE = _re_framing.compile(
 )
 
 
+def _close_truncated_json(content: str) -> str | None:
+    """Salvage the complete key/value pairs from a reply that was cut off.
+
+    The parser below looks for `{...}`, which needs a closing brace, so a reply
+    truncated mid-sentence matches nothing at all and the whole call is recorded
+    as a failure. That is the wrong loss: this prompt asks for `ethos` and
+    `role_fit` FIRST and the long bilingual reasoning last, so the numbers are
+    complete and only the prose is cut. Moth's Creative Technologist posting
+    came back with ethos 88 and role_fit 72 followed by a sentence that stopped
+    mid-word, and was recorded as unscored.
+
+    Truncation is a property of the prompt, not of the key: the persona summary
+    alone is 55k characters, so the request runs to ~61.5k and the completion
+    budget is what gives. Raising max_tokens was tried for the same symptom
+    (see the note on the call below, 300 -> 600/900) and does not address a
+    prompt that grows.
+
+    Cuts at the last complete pair at depth 1 — never inside a string — and
+    closes the brace. Returns None when nothing complete survives.
+    """
+    start = content.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    cut = -1
+    for i in range(start, len(content)):
+        ch = content[i]
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return None  # not truncated — the ordinary path handles it
+        elif ch == "," and depth == 1:
+            cut = i
+    if cut < 0:
+        return None
+    return content[start:cut] + "}"
+
+
 def _repair_json(blob: str) -> str:
     """Put quotes back on a prose value the model left bare.
 
@@ -1859,10 +1912,16 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
         )
 
         import json, re
-        matches = list(re.finditer(r'\{.*\}', content, re.DOTALL))
-        for match in reversed(matches):
+        candidates = [m.group() for m in re.finditer(r'\{.*\}', content, re.DOTALL)]
+        if not candidates:
+            # No closing brace anywhere: the reply was cut off. The scores come
+            # first and are complete — see _close_truncated_json.
+            salvaged = _close_truncated_json(content)
+            if salvaged:
+                candidates = [salvaged]
+        for match in reversed(candidates):
             try:
-                data = json.loads(_repair_json(match.group()), strict=False)
+                data = json.loads(_repair_json(match), strict=False)
                 # role_fit IS the score. Both axes are asked for and only one is
                 # used, which looks wasteful and is the whole mechanism: asked
                 # for ethos alone the model rated an n8n Billing Specialist 92,
