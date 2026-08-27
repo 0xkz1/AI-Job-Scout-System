@@ -34,6 +34,8 @@ from matcher import (  # noqa: E402
 from scraper_url_list import normalize_url  # noqa: E402
 
 MATCH_DIR = JIS / "10_output" / "00_matches"
+CV_DIR = JIS / "10_output" / "10_cvs"
+CL_DIR = JIS / "10_output" / "10_cover-letters"
 DB_PATH = JIS / "10_output" / "_analyzed.json"
 
 APPLY = "--apply" in sys.argv
@@ -57,6 +59,27 @@ def wikilink_to_filename(val: str) -> str | None:
     # cv: "[[Name]]"  ->  Name.md
     m = re.search(r"\[\[(.+?)\]\]", val or "")
     return (m.group(1) + ".md") if m else None
+
+
+def _document_on_disk(base: str, kind: str) -> str | None:
+    """The CV or cover letter this report should link, when its own frontmatter
+    does not name one.
+
+    The links are otherwise carried forward from the file being rewritten, and
+    nothing ever puts one there after the fact — so a document generated AFTER
+    its match report was last written stays invisible in the only file a human
+    reads. Measured 2026-08-27: 69 reports had a CV on disk and no link to it,
+    70 had a cover letter, several of them carrying a review score for the
+    document they did not link. Lothian Buses' Junior Digital Designer showed
+    `cv_review_score: 58` above no CV at all.
+
+    Only ever ADDS a link, and only to a file that exists under this report's
+    own base name — the same company+title convention every stage uses. An
+    existing link always wins, so a hand-corrected one is never overwritten.
+    """
+    directory, suffix = (CV_DIR, "_CV.md") if kind == "CV" else (CL_DIR, "_CL.md")
+    name = f"{base}{suffix}"
+    return name if (directory / name).exists() else None
 
 
 def main():
@@ -110,8 +133,8 @@ def main():
         if fm.get("type"):
             job["type"] = fm["type"]
 
-        cv = wikilink_to_filename(fm.get("cv", ""))
-        cl = wikilink_to_filename(fm.get("cover_letter", ""))
+        cv = wikilink_to_filename(fm.get("cv", "")) or _document_on_disk(path.stem, "CV")
+        cl = wikilink_to_filename(fm.get("cover_letter", "")) or _document_on_disk(path.stem, "CL")
 
         match = dict(job["match"])
         # Preserve the description-missing banner if the old file had it.
