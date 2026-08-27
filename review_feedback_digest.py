@@ -68,13 +68,24 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+# Superseded copies of the authored files, kept beside them. They share whole
+# sentences with the live version, and rglob walks "archive/" before
+# "product_designer.md", so an unfiltered index answers every lookup with the
+# dead file: the digest pointed at profile/archive/product_designer.md:7 for a
+# sentence that is also line 8 of the live profile, which would have sent the
+# reader to edit a file nothing reads.
+_DEAD = {"archive", "_archive", ".archive", "old", "_old", "backup", "_backup"}
+
+
 def _index_sources() -> list[tuple[Path, int, str]]:
-    """(path, line number, text) for every line of every authored file."""
+    """(path, line number, text) for every line of every LIVE authored file."""
     out = []
     for d in SOURCE_DIRS:
         if not d.exists():
             continue
         for p in sorted(d.rglob("*.md")):
+            if _DEAD & {part.lower() for part in p.relative_to(d).parts[:-1]}:
+                continue
             try:
                 for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
                     if line.strip():

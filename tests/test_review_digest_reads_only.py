@@ -101,3 +101,17 @@ def test_the_report_states_which_roles_raised_it():
 
 def test_the_report_says_nothing_was_applied():
     assert "Nothing below has been applied" in SOURCE
+
+def test_a_superseded_copy_is_not_offered_as_the_place_to_edit(tmp_path, monkeypatch):
+    """profile/archive/product_designer.md shares whole sentences with the live
+    profile, and rglob reaches it first. Pointing there sends the reader to edit
+    a file nothing reads."""
+    root = tmp_path / "cv" / "profile"
+    (root / "archive").mkdir(parents=True)
+    line = "Experienced translating complex ideas into clear, intentional interfaces."
+    (root / "archive" / "product_designer.md").write_text("old\n" + line + "\n", encoding="utf-8")
+    (root / "product_designer.md").write_text("live\n\n" + line + "\n", encoding="utf-8")
+    monkeypatch.setattr(digest, "SOURCE_DIRS", [tmp_path / "cv"])
+    where = digest._locate(line, digest._index_sources())
+    assert where is not None
+    assert "archive" not in where, where
