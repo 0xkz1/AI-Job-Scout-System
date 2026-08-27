@@ -96,10 +96,23 @@ Telegram wording — had never executed.
   not transfer to it.** Measured 2026-08-27: 1404 calls, 12,785s, 54% of the
   night. Its median prompt is 59,069 characters — over groq's 21,000 cap — so
   `_size_filter_chain` drops groq from its chain whatever `_STAGE_PRIMARY` says,
-  and no reordering can help. The lever here is prompt size, not provider, and
-  the 55k-character persona is the obvious place to look. `reviewer` is worse per
-  call (median 42.1s on 96,556 characters) but runs 48 times, so it is 2,092s and
-  not worth touching first.
+  and no reordering can help. `reviewer` is worse per call (median 42.1s on
+  96,556 characters) but runs 48 times, so it is 2,092s and not worth touching
+  first.
+
+  **Prompt size is not the lever, measured 2026-08-27.** The obvious move is to
+  cut or cache the 55k-character persona that leads every one of those calls.
+  The same night's rows say it would not pay: matcher's own small calls average
+  5,275 characters and 7.07s against the big ones' 61,070 characters and 10.08s
+  — 11.6x the prompt for 1.43x the time — and inside the big calls the
+  relationship is absent or inverted, mean time falling 13.26s to 8.95s as the
+  quintiles rise from 57,912 to 64,781 characters. Making the persona free
+  entirely is worth (10.08 - 7.07) x 950 = 2,860s, 22% of matcher and 12% of the
+  night, and only in the limit. Cost here is a fixed per-call floor of roughly
+  7s times 950 calls. The levers are call COUNT and provider latency.
+  Independently, shrinking the persona was shipped and reverted once already for
+  correctness — see the docstring on `_ollama_context_score`. Do not spend the
+  refactor.
 - **All twelve groq keys 429 together.** On the first night of the retiering they
   were quarantined within one second of each other, after about six calls each,
   and the chain fell through to `litellm-gateway` for the 15-minute cooldown.
