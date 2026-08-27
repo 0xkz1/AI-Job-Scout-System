@@ -160,13 +160,40 @@ def _dedupe(jobs: list[dict]) -> list[dict]:
 # that delegates to the code it verifies passes unconditionally), so the two numbers
 # have to be kept equal on purpose.
 #
-# 400 is the floor, not a claim that 400 is enough. Joined against review outcomes
-# on 217 documents, mean submission_score by description length runs 75.2 for
-# 400-999 chars (n=9), 55.6 for 1000-2999 (n=98) and 57.7 for 3000+ (n=110) — the
-# same inflation the truncated API summaries show, for the same reason: what a short
-# posting omits is its requirements, so there is less to fail. Raising the floor
-# past 999 would drop 9 already-reviewed jobs including the current top-scoring one,
-# so it is left as a separate decision rather than folded in here.
+# 400 is the floor, not a claim that 400 is enough — but the case for raising it
+# is much weaker than it looked, and the note that used to sit here overstated it.
+#
+# That note read the short band as 75.2 against 55.6 for 1000-2999 chars, which
+# is a nine-point-wide claim resting on n=9. Re-measured 2026-08-27 against 1096
+# reviewed documents:
+#
+#     400-600   n=151  mean 68.5   >=85: 21%
+#     600-800   n=  5  mean 70.6   >=85: 20%
+#     800-1000  n= 12  mean 78.8   >=85: 42%
+#    1000-2000  n= 95  mean 62.6   >=85:  9%
+#    2000-4000  n=377  mean 64.2   >=85: 15%
+#    4000+      n=451  mean 66.0   >=85: 14%
+#
+# The short band still reads a little high — 68.5 against 64-66 — and its tail is
+# fatter, 21% at submission-ready against 14-15%. But that is four points, not
+# nineteen, and raising the floor to 1000 would drop 151 reviewed jobs to collect
+# it. The 800-1000 band's 78.8 is twelve documents and should not be read as
+# anything.
+#
+# Two narrower rules were measured and rejected on 2026-08-27 rather than left as
+# folklore for someone to re-propose:
+#
+#   - scraper-bait wording ("please mention the word", "and tag <base64>"): 16
+#     postings in the database, 11 reviewed, mean 66.0 — the database average. The
+#     marker says the board is spammy, not that the review is inflated.
+#   - no extracted skills at all: n=66, mean 60.9, BELOW average. A posting the
+#     extractor found nothing in does not review high.
+#
+# One posting does behave the way the whole rule imagines — Super Creative's
+# "Graphic designer", 441 characters of "APPLY NOW ... Please mention the word
+# PLEASANT", reviewed 100. Intersecting short WITH bait finds exactly two jobs in
+# 4750. That is a special case, and writing a guard for it would be recording a
+# rule nothing measured.
 MIN_REVIEWABLE_DESC = 400
 
 
