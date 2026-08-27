@@ -13,9 +13,9 @@ the job market is British and the two land on different calendar days.
 | Loop | Schedule | Last run | Result |
 |------|----------|----------|--------|
 | job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-27 02:00 → 02:59 | ok |
-| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-27 04:30, running at time of writing | previous 2026-08-26 ok |
-| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-26 07:00 | ok — no candidate, silent |
-| loop-readiness-daily (L3) | `0 9 * * *` | 2026-08-26 09:03 | ok — scores files, not runs |
+| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-27 04:30 → 06:03 | ok — 5584s of the 7020s sweep budget |
+| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-27 07:00 | ok — no candidate, silent |
+| loop-readiness-daily (L3) | `0 9 * * *` | 2026-08-27 09:00 | ok — scores files, not runs |
 
 Verify:
 
@@ -28,10 +28,13 @@ grep -a "job-scout-nightly =====" 10_output/_nightly_scout.log | tail -3
 a run STARTS; `Last run` only moves when it finishes. A long slot therefore shows
 a next run a full day ahead while it is still executing, which reads exactly like
 a skipped night. It cost one wrong diagnosis on 08-27. Check for the process
-before concluding anything from the two dates:
+before concluding anything from the two dates — and **exclude your own shell**,
+because the pattern you are grepping for is sitting in its command line. Written
+the naive way this reports the night as still running hours after it finished,
+which cost a second wrong diagnosis the same morning:
 
 ```bash
-pgrep -af job_scout_nightly.sh
+pgrep -af job_scout_nightly | grep -v "shell-snapshots\|eval"
 ```
 
 ### 2026-08-22 — the first night every site completed
@@ -89,12 +92,20 @@ Telegram wording — had never executed.
   when the leftover is merely harmless.
 - **`SWEEP_DEADLINE` (7020s) and the Hermes cap (7200) are 180s apart.** Crossed
   on 08-14. A run that crosses it completes and notifies nobody.
-- **The analyzer retiering is committed but not yet observed in a night.**
-  `7171a47` routes the analyzer stage to groq. Nothing has run through it yet at
-  the time of writing — tonight's `late` slot is the first. Read
-  `10_output/_llm_stats.tsv` with `llm_stats.py` afterwards and compare against
-  the 614 calls / 16,293s it replaces. A zero-byte stats file before the scoring
-  phase is expected: `early` truncates it and scrapes without scoring.
+- **`matcher` is now the night's largest LLM cost, and the analyzer's fix does
+  not transfer to it.** Measured 2026-08-27: 1404 calls, 12,785s, 54% of the
+  night. Its median prompt is 59,069 characters — over groq's 21,000 cap — so
+  `_size_filter_chain` drops groq from its chain whatever `_STAGE_PRIMARY` says,
+  and no reordering can help. The lever here is prompt size, not provider, and
+  the 55k-character persona is the obvious place to look. `reviewer` is worse per
+  call (median 42.1s on 96,556 characters) but runs 48 times, so it is 2,092s and
+  not worth touching first.
+- **All twelve groq keys 429 together.** On the first night of the retiering they
+  were quarantined within one second of each other, after about six calls each,
+  and the chain fell through to `litellm-gateway` for the 15-minute cooldown.
+  Twelve keys are not twelve buckets under `analysis_workers: 8`. The routing
+  still paid for itself; the point is that it buys a burst rather than a night,
+  and `analysis_workers` is the lever to test before adding keys.
 - **`vault-drift-check` is failing.** `error: Script exited with code 1`,
   2026-08-27 04:28. Unrelated to the job loops — listed because it shares the
   archivist scheduler and nothing else reports it.
@@ -120,6 +131,15 @@ Telegram wording — had never executed.
   one, with thinking disabled. It sat mid-chain in four fallback chains, so every
   chain had been burning a retry on a guaranteed failure.
 - **No L2 loop** → 2026-08-22. Scheduled, ran, silent.
+- **The analyzer retiering, unobserved** → 2026-08-27, measured over a full
+  night. 1,661 calls in 5,968s against the 614 calls / 16,293s it replaces: 2.7x
+  the calls on 4.4x larger prompts (829 → 3,611 median characters, from the
+  analyzer rewrites landed in between) for 63% less total time. Per call 26.5s →
+  3.59s, median 18.5s → 1.5s. 119 of the calls failed over to the gateway and
+  cost 76.7s in total, which is the one-hop fallback behaving as designed.
+  Attribution is not clean: the gateway itself answered far faster this night
+  than when the baseline was taken, on the same default `mistral-medium`. The
+  direction is not in doubt; the exact share is.
 - **Per-stage model tiering undecided** → 2026-08-27, `7171a47`. Decided from the
   measured rows, not from stage names. analyzer was 614 calls and 16,293s in one
   night — 62% of the night's LLM time — on a median 829-character prompt, at a
