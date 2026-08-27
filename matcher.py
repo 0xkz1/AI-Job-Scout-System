@@ -2252,6 +2252,39 @@ DEFAULT_WEIGHTS = {
 }
 
 
+def composite_weights(config: dict | None = None, override: dict | None = None) -> dict:
+    """The weights a composite must be computed from: the CONFIG's, not the ones
+    stored on the job.
+
+    Every pass that rewrites a composite used to build this dict for itself off
+    `job["match"]["weights"]` — llm_context_backfill, rescore_context and
+    run.py's --llm-context loop all did. That reads a SNAPSHOT of the weights as
+    they were when the job was last fully scored, so the moment config.yaml
+    changes, those passes keep scoring on the old ones and the database splits
+    into two populations that cannot be compared.
+
+    That is not hypothetical. The reweighting on 2026-08-24 moved skills from
+    0.20 to 0.45 and context from 0.64 to 0.40; Lloyds Banking Group's Software
+    Engineer report still showed "Skills 20% | Role Fit 64%" days later, over a
+    composite computed from them, because nothing had re-scored it through
+    analyze_match. llm_context_backfill's own fallback was a third set again
+    (skills 0.4, experience 0.25), matching neither the config nor
+    DEFAULT_WEIGHTS.
+
+    `override` is for a caller deliberately scoring against something other than
+    the shipped weights — a grid search, a what-if — and is the only way to get
+    anything else.
+    """
+    w = override or (config or {}).get("weights") or DEFAULT_WEIGHTS
+    return {
+        "skills": w.get("skills", 0.40),
+        "experience": w.get("experience", 0.25),
+        "location": w.get("location", 0.10),
+        "salary": w.get("salary", 0.05),
+        "context": w.get("context", 0.20),
+    }
+
+
 def calculate_title_relevance(
     title: str, context_score: float | None = None, context_source: str | None = None
 ) -> float:
@@ -2493,14 +2526,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
             ctx_draws = 0
 
     # Weighted composite — accept custom weights from config or parameter
-    w = weights or config.get("weights", DEFAULT_WEIGHTS)
-    weights = {
-        "skills": w.get("skills", 0.40),
-        "experience": w.get("experience", 0.25),
-        "location": w.get("location", 0.10),
-        "salary": w.get("salary", 0.05),
-        "context": w.get("context", 0.20),
-    }
+    weights = composite_weights(config, override=weights)
 
     composite = (
         skill_match["score"] * weights["skills"]

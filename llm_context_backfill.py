@@ -43,7 +43,7 @@ for k, v in dotenv_values(ROOT / ".env").items():
 import yaml  # noqa: E402
 from matcher import (  # noqa: E402
     _ollama_context_score, _ollama_job_summary, _load_persona_summary,
-    translate_to_ja,
+    composite_weights, translate_to_ja,
 )
 from filter import passes_filter  # noqa: E402
 
@@ -77,13 +77,21 @@ def _pseudo_description(job: dict) -> str:
     return ". ".join(p for p in parts if p)
 
 
-def _recompute(job: dict, ctx_score: float) -> None:
+def _recompute(job: dict, ctx_score: float, config: dict) -> None:
     """Rewrite composite + tier for a freshly LLM-scored job. Mirrors
     matcher.analyze_match: an LLM context source is allowed to reach the top
-    tier (unlike the TF-IDF fallback, which is capped there)."""
+    tier (unlike the TF-IDF fallback, which is capped there).
+
+    Weights come from the CONFIG, via matcher.composite_weights. They used to
+    come off the job — a snapshot of whatever was configured when it was last
+    fully scored — with a hard-coded fallback (skills 0.4, experience 0.25) that
+    matched neither the config nor DEFAULT_WEIGHTS. That is how a nightly pass
+    keeps scoring on superseded weights after config.yaml changes, and it is
+    what left Lloyds Banking Group's Software Engineer showing "Skills 20% |
+    Role Fit 64%" days after the 2026-08-24 reweighting."""
     m = job["match"]
-    w = m.get("weights") or {"skills": 0.4, "experience": 0.25,
-                             "location": 0.1, "salary": 0.05, "context": 0.2}
+    w = composite_weights(config)
+    m["weights"] = w
     composite = (
         m.get("skills", {}).get("score", 0) * w["skills"]
         + m.get("experience", {}).get("score", 0) * w["experience"]
@@ -177,7 +185,7 @@ def main():
         job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
         job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
         job["match"]["context_source"] = "llm"
-        _recompute(job, ctx["score"])
+        _recompute(job, ctx["score"], config)
         after = job["match"]["composite_score"]
         if after - before >= 0.05:
             promoted += 1

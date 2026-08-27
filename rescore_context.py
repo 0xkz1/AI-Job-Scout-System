@@ -41,6 +41,7 @@ from pathlib import Path
 
 import selection
 from filter import passes_filter
+from matcher import composite_weights
 
 ROOT = Path(__file__).resolve().parent
 ANALYZED = ROOT / "10_output" / "_analyzed.json"
@@ -111,8 +112,14 @@ def tier_for(composite: float) -> str:
     return "🔴 Weak Match"
 
 
-def apply(job: dict, ctx: dict, persona_chars: int) -> tuple[float, float]:
-    """Write the new context score and recompute the composite. Returns (before, after)."""
+def apply(job: dict, ctx: dict, persona_chars: int, config: dict) -> tuple[float, float]:
+    """Write the new context score and recompute the composite. Returns (before, after).
+
+    Weights come from the CONFIG, via matcher.composite_weights. They used to
+    come off the job, which is a snapshot of whatever was configured when it was
+    last fully scored — so after config.yaml changes this pass kept rewriting
+    composites with the superseded numbers, and the database split into two
+    populations that could not be compared."""
     m = job["match"]
     before = m["composite_score"]
     m["context_persona_chars"] = persona_chars
@@ -127,7 +134,8 @@ def apply(job: dict, ctx: dict, persona_chars: int) -> tuple[float, float]:
         m["context_ethos"] = ctx["ethos"]
     if ctx.get("role_requirement"):
         m["context_role_requirement"] = ctx["role_requirement"]
-    w = m["weights"]
+    w = composite_weights(config)
+    m["weights"] = w
     composite = (m["skills"]["score"] * w["skills"]
                  + m["experience"]["score"] * w["experience"]
                  + m["location"]["score"] * w["location"]
@@ -207,7 +215,7 @@ def main() -> None:
         if not ctx:
             failed += 1
             continue
-        before, after = apply(job, ctx, persona_chars)
+        before, after = apply(job, ctx, persona_chars, config)
         deltas.append(after - before)
         done += 1
         print(f"  [{n}/{len(todo)}] {str(job['match'].get('detected_role'))[:16]:16s} "
