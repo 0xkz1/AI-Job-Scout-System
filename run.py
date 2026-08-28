@@ -278,8 +278,34 @@ def load_saved_from_index() -> list[dict]:
     return saved
 
 
-def load_all_from_saved() -> list[dict]:
-    """Load ALL jobs from 00_saved/ staging (raw auto JSON + manual saved index)."""
+def load_all_from_saved(config: dict | None = None) -> list[dict]:
+    """Load ALL jobs from 00_saved/ staging (raw auto JSON + manual saved index).
+
+    ALL means all: every _raw_*.json ever written, back to the first scrape.
+    Staging is append-only and nothing prunes it, which is deliberate — it is
+    what let the scrape survive the nights the analysis was killed inside its
+    slot — but it means this function replays a month of scrapes on every
+    --from-saved run.
+
+    So a source dropped from the pipeline has to be dropped HERE too, or it
+    comes straight back. 52 postings from weworkremotely and remoteok were
+    purged from the database on 2026-08-27 and the next nightly restored them:
+    not re-scraped (every row still carried its original scraped_at, between
+    07-28 and 08-21) but re-ingested out of the 15 staging files that still hold
+    them. 19 of the 54 sat inside the generation set, so they were about to be
+    given fresh CVs and letters as well.
+
+    The staging FILES are left alone. They are a record of what a scrape
+    returned, and rewriting history to match a later decision is not something
+    this pipeline should do; the decision belongs on the read side, where it can
+    be changed back by editing one config line.
+    """
+    # `is None`, not truthiness: an explicitly empty config means "drop nothing",
+    # and `config or load_config()` would read the file instead and drop what it
+    # names — silently overriding the caller.
+    if config is None:
+        config = load_config()
+    dropped = {str(s).strip().lower() for s in config.get("dropped_sources", [])}
     all_jobs = []
     if not os.path.isdir(SAVED_DIR):
         return all_jobs
@@ -293,6 +319,8 @@ def load_all_from_saved() -> list[dict]:
                 # Tag the collection route so match reports can be filtered by
                 # how the job was collected (Dataview: WHERE route = "url_list").
                 route = {"url_list_jobs.json": "url_list", "local_html_jobs.json": "local_html"}.get(f, "scraper")
+                batch = [j for j in batch
+                         if str(j.get("source") or "").strip().lower() not in dropped]
                 for job in batch:
                     job.setdefault("route", route)
                 all_jobs.extend(batch)

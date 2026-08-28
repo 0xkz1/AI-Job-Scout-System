@@ -250,6 +250,29 @@ sites:
 - indeed
 - linkedin
 
+# Boards this pipeline no longer wants, by the `source` each posting carries.
+#
+# Separate from `sites` above because they are not the same list. `remote_apis`
+# is ONE site that returns postings tagged arbeitnow, remotive, weworkremotely
+# and remoteok — dropping a board is not the same as dropping the scraper that
+# reaches it, and "source not in sites" would take arbeitnow and remotive with
+# it.
+#
+# Read on the way IN from staging (run.py load_all_from_saved). 00_saved is
+# append-only by design — it is what let the scrape survive the nights the
+# analysis was killed — so every --from-saved run replays a month of scrapes,
+# and a source dropped only from the scraper keeps arriving anyway. 52 postings
+# were purged from the database on 2026-08-27 and the next nightly put all of
+# them back, out of the 15 staging files that still hold them; 19 were inside
+# the generation set and about to be given fresh documents.
+#
+# Dropping a board here does NOT delete what it already produced. The staging
+# files stay (they record what a scrape returned), and rows already in the
+# database stay until something removes them.
+dropped_sources:
+- weworkremotely
+- remoteok
+
 # --- Multi-country / remote expansion (2026-07-25) ---
 # Target countries for REMOTE roles, in priority order. A UK-resident on a YMS
 # visa can hold these remotely; on-site abroad is out of scope (no relocation).
