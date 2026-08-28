@@ -337,6 +337,16 @@ ROLE_KEYWORDS = {
         "kubernetes", "terraform", "observability",
     ],
     "data_analysis": ["data entry", "data analyst", "data input", "data quality", "data validation", "data cleaning", "data processing", "spreadsheet", "excel specialist"],
+    # Job-title forms only. A bare "content" or "editorial" is boilerplate in
+    # postings of every discipline ("editorial calendar", "content management
+    # system"), and the one-word forms would outvote a title naming a different
+    # job. "content designer" is deliberately absent: it reads as a product
+    # design title as often as an editorial one, and product_designer owns it.
+    "content_analyst": [
+        "content analyst", "content strategist", "content operations",
+        "content editor", "content producer", "content marketing",
+        "copywriter", "editorial assistant",
+    ],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
     # "Engineer" and spaced/hyphenated spellings are listed explicitly: matching is
