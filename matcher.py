@@ -2286,6 +2286,54 @@ def composite_weights(config: dict | None = None, override: dict | None = None) 
     }
 
 
+# Japanese titles carry no word boundaries, so the tokeniser below reduces
+# "QAエンジニア" to one unknown token and the English whitelist cannot hit it. Every
+# Japanese-titled posting therefore fell to the 0.1 penalty: measured on the 26
+# Japan postings of 2026-08-21, all 16 written in Japanese scored 0.02-0.05 while
+# their English-titled neighbours scored 0.19-0.73 — with comparable skills (0.45)
+# and LLM context (0.45). The whitelist was rejecting a language, not a role.
+#
+# The role vocabulary comes from config's keyword_aliases, which already maps each
+# searched English keyword onto its Japanese equivalents, so the search terms and
+# the relevance check cannot drift apart. The generic nouns below mirror the
+# English target_words, which are likewise role words rather than exact titles.
+_JA_GENERIC_TARGETS = (
+    "エンジニア", "デザイナー", "デザイン", "開発", "設計", "実装", "制作",
+    "プログラマ", "アーティスト", "テクニカル", "テクノロジ", "クリエイティブ",
+    "品質保証", "テスト", "検証", "データ", "分析", "自動化", "運用", "保守",
+    "インフラ", "クラウド", "システム", "ソフトウェア", "アプリ", "ウェブ",
+    "フロントエンド", "バックエンド", "プロデューサー", "ディレクター",
+    "コンサルタント", "サポート", "ツール", "基盤",
+)
+
+# Mirrors exclusion_words. Without these the fix would open the gate rather than
+# translate it: a Japanese nursing or driving post has no English keyword either,
+# so it would sail through on a generic noun instead of being excluded.
+_JA_EXCLUSIONS = (
+    "看護", "介護", "保育", "医師", "薬剤師", "歯科", "調理", "料理", "接客",
+    "ドライバー", "運転", "配送", "配達", "警備", "清掃", "販売", "店舗",
+    "美容", "セラピスト", "教員", "教師", "講師", "塾", "施工", "土木", "建築士",
+    "大工", "電気工事", "配管",
+)
+
+_ja_target_cache: tuple[str, ...] | None = None
+
+
+def _ja_target_terms() -> tuple[str, ...]:
+    """Japanese role terms: the configured search aliases plus generic nouns."""
+    global _ja_target_cache
+    if _ja_target_cache is None:
+        terms = set(_JA_GENERIC_TARGETS)
+        try:
+            from selection import load_config
+            for aliases in (load_config().get("keyword_aliases") or {}).values():
+                terms.update(a for a in aliases if a)
+        except Exception:
+            pass
+        _ja_target_cache = tuple(terms)
+    return _ja_target_cache
+
+
 def calculate_title_relevance(
     title: str, context_score: float | None = None, context_source: str | None = None
 ) -> float:
@@ -2331,9 +2379,15 @@ def calculate_title_relevance(
     construction_words = {"construction", "site manager", "quantity surveyor", "bricklayer", "plumber", "electrician", "carpenter"}
     
     has_exclusion = any(w in exclusion_words for w in words) or any(cw in title_lower for cw in construction_words)
-    
+    # Substring, not token: Japanese is written without spaces, so there is no
+    # word to look up.
+    has_exclusion = has_exclusion or any(x in title for x in _JA_EXCLUSIONS)
+
     if has_exclusion:
         return 0.0  # Hard exclusion (nurse, driver, etc.) always applies
+
+    if not has_target:
+        has_target = any(t.lower() in title_lower for t in _ja_target_terms())
 
     if not has_target:
         # No keyword hit — let a confident LLM context read rescue it

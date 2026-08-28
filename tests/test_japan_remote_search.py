@@ -344,3 +344,70 @@ def test_the_japan_pairs_are_walked_at_their_own_depth(monkeypatch):
     depths = dict(seen)
     assert depths["Remote (Japan)"] == 1
     assert depths["Edinburgh"] == 3
+
+
+# --- the title whitelist has to read the language it now searches in ---
+#
+# keyword_aliases taught the FILTER to read Japanese. calculate_title_relevance is
+# a separate gate and was left English-only, so it rejected the same postings one
+# stage later: of the 26 Japan postings analysed 2026-08-21, all 16 with Japanese
+# titles landed at 0.1 relevance and 0.02-0.05 composite, while English-titled
+# ones with comparable skills and context scored 0.19-0.73.
+
+import matcher
+
+
+@pytest.mark.parametrize("title", [
+    "QAエンジニア",
+    "テクニカルアーティスト",
+    "Webエンジニア",
+    "Webフロントエンドエンジニア",
+    "ソフトウェアエンジニア(オープンポジション)",
+    "UIデザイナー テクノロジーやAIを活用した次世代型の資産運用サービス",
+    "プラットフォームプロデューサー（デジタル広告領域）",
+    "サポートエンジニア※リーダー候補",
+    "【フルリモート】QAエンジニア◆立ち上げ期に関わる",
+    "＜案件No.197＞【QAエンジニア】建設DX SaaSの品質保証",
+])
+def test_a_japanese_tech_title_is_relevant(title):
+    assert matcher.calculate_title_relevance(title) == 1.0
+
+
+@pytest.mark.parametrize("title", [
+    "看護師（訪問看護）",
+    "大型ドライバー／配送スタッフ",
+    "調理スタッフ",
+    "施工管理",
+    "介護職員",
+])
+def test_a_japanese_non_tech_title_is_still_excluded(title):
+    """Translating the whitelist must not mean opening it: these have no English
+    keyword either, so a generic-noun match would let them through."""
+    assert matcher.calculate_title_relevance(title) == 0.0
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("Frontend Engineer", 1.0),
+    ("Senior Nurse Practitioner", 0.0),
+    ("Quantity Surveyor", 0.0),
+])
+def test_english_titles_are_unchanged(title, expected):
+    assert matcher.calculate_title_relevance(title) == expected
+
+
+def test_the_role_vocabulary_comes_from_the_search_aliases():
+    """Search terms and the relevance check must not drift apart: a keyword added
+    to keyword_aliases has to be recognised here without a second edit."""
+    import selection
+    aliases = selection.load_config().get("keyword_aliases") or {}
+    terms = matcher._ja_target_terms()
+    for alias_list in aliases.values():
+        for alias in alias_list:
+            assert alias in terms, f"{alias} missing from the title vocabulary"
+
+
+def test_a_japanese_title_no_longer_needs_a_confident_llm_read():
+    """The 0.6 context rescue was the only path open to these titles, and the
+    Japan postings scored 0.25-0.45 — below it, every time."""
+    assert matcher.calculate_title_relevance(
+        "QAエンジニア", context_score=0.25, context_source="llm") == 1.0
