@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 STATE_FILE = Path(__file__).resolve().parent / "10_output" / ".key_quarantine.json"
+
+# Every mutation here is read-modify-write on one small file, and the enrichment
+# pass now calls it from several threads at once. Without the lock two providers
+# failing together race, and the second write drops the first one's entry — the
+# key stays in the chain and keeps costing a full round of retries per call.
+_STATE_LOCK = threading.RLock()
 
 # Auth failures usually mean a revoked key, but Mistral also answers 401 once a
 # free-tier allowance is spent — indistinguishable from the outside, so both get
@@ -82,9 +90,14 @@ def _load() -> dict:
 
 
 def _save(state: dict) -> None:
+    # Written via a temp file and renamed: a crash (or a kill) part way through
+    # a direct write leaves unparseable JSON, and _load answers {} to that —
+    # silently releasing every quarantined key at once.
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         print(f"  ⚠ could not write quarantine state: {e}")
 
@@ -97,47 +110,50 @@ def quarantine(provider: str, reason: str = "", cooldown_days: float | None = No
     """
     if cooldown_days is None:
         cooldown_days = cooldown_for(reason)
-    state = _load()
-    now = datetime.now(timezone.utc)
-    state[provider] = {
-        "quarantined_at": now.isoformat(),
-        "until": (now + timedelta(days=cooldown_days)).isoformat(),
-        "reason": (reason or "")[:200],
-    }
-    _save(state)
+    with _STATE_LOCK:
+        state = _load()
+        now = datetime.now(timezone.utc)
+        state[provider] = {
+            "quarantined_at": now.isoformat(),
+            "until": (now + timedelta(days=cooldown_days)).isoformat(),
+            "reason": (reason or "")[:200],
+        }
+        _save(state)
     span = (f"{cooldown_days * 24 * 60:.0f}min" if cooldown_days < 1
             else f"{cooldown_days:g}d")
     print(f"  🔒 {provider} quarantined for {span} ({reason[:60]})")
 
 
 def release(provider: str) -> bool:
-    state = _load()
-    if provider in state:
-        del state[provider]
-        _save(state)
-        return True
-    return False
+    with _STATE_LOCK:
+        state = _load()
+        if provider in state:
+            del state[provider]
+            _save(state)
+            return True
+        return False
 
 
 def is_quarantined(provider: str) -> bool:
     """True while the cooldown is live. Expired entries are dropped on read."""
-    state = _load()
-    entry = state.get(provider)
-    if not entry:
-        return False
-    try:
-        until = datetime.fromisoformat(entry["until"])
-    except Exception:
-        del state[provider]
-        _save(state)
-        return False
-    if datetime.now(timezone.utc) >= until:
-        # Cooldown served — the provider returns to its original chain position.
-        del state[provider]
-        _save(state)
-        print(f"  🔓 {provider} cooldown expired, restored to fallback chain")
-        return False
-    return True
+    with _STATE_LOCK:
+        state = _load()
+        entry = state.get(provider)
+        if not entry:
+            return False
+        try:
+            until = datetime.fromisoformat(entry["until"])
+        except Exception:
+            del state[provider]
+            _save(state)
+            return False
+        if datetime.now(timezone.utc) >= until:
+            # Cooldown served — the provider returns to its chain position.
+            del state[provider]
+            _save(state)
+            print(f"  🔓 {provider} cooldown expired, restored to fallback chain")
+            return False
+        return True
 
 
 def filter_chain(chain: list[str]) -> list[str]:

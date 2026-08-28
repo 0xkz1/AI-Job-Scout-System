@@ -309,6 +309,11 @@ def main():
 
     reviewed, review_failed, reviewed_jobs = [], [], set()
     ready_count = 0
+
+    # Deciding WHAT to review is local file work — existence, the lock marker,
+    # whether a stored review still matches the document's hash. Doing it up
+    # front keeps the loop that spends money down to one flat list.
+    pending: list = []
     for j in new_high:
         if id(j) not in review_set_ids:
             continue
@@ -324,17 +329,48 @@ def main():
             if gen_version.is_locked(base, doc.read_text(encoding="utf-8"), MATCH_DIR):
                 continue
             try:
-                from reviewer import run_review, review_is_current, get_score_threshold, _extract_score
-                if not review_is_current(doc)[0]:
-                    review_path = run_review(kind, doc, j)
-                    reviewed.append(f"{base}_{kind}")
-                    reviewed_jobs.add(base)
-                    score, fact_block, _nits = _extract_score(
-                        review_path.read_text(encoding="utf-8"))
-                    if score is not None and not fact_block and score >= get_score_threshold():
-                        ready_count += 1
+                from reviewer import review_is_current
+                if review_is_current(doc)[0]:
+                    continue
             except Exception as e:
                 review_failed.append(f"{base}_{kind}: {str(e)[:60]}")
+                continue
+            pending.append((base, kind, doc, j))
+
+    def _review_one(task):
+        base, kind, doc, j = task
+        from reviewer import run_review, get_score_threshold, _extract_score
+        try:
+            review_path = run_review(kind, doc, j)
+            score, fact_block, _nits = _extract_score(
+                review_path.read_text(encoding="utf-8"))
+            ready = (score is not None and not fact_block
+                     and score >= get_score_threshold())
+            return base, kind, ready, None
+        except Exception as e:
+            return base, kind, False, str(e)[:60]
+
+    # One review is one LLM call on a long document, and the backlog they come
+    # from is not small: after the 2026-08-21 drain, 341 documents were waiting
+    # with none of them reviewed. Serial, at the measured rate, that is a night
+    # of its own — and reviews are the last stage, so everything behind them
+    # waits too. Each review reads and writes only its own pair of files.
+    workers = max(1, int((config or {}).get("analysis_workers") or 1))
+    if workers > 1 and len(pending) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_review_one, pending))
+    else:
+        results = [_review_one(t) for t in pending]
+
+    for base, kind, ready, err in results:
+        if err:
+            review_failed.append(f"{base}_{kind}: {err}")
+            continue
+        reviewed.append(f"{base}_{kind}")
+        reviewed_jobs.add(base)
+        if ready:
+            ready_count += 1
 
     STATE_FILE.write_text(json.dumps({"seen": sorted(seen | set(current))}, indent=0))
 

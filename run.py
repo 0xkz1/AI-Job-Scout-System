@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import threading
 import os
 import re
 import sys
@@ -83,6 +84,40 @@ def load_config() -> dict:
 SAVED_DIR = os.path.join(os.path.dirname(__file__), "00_saved")
 
 
+def save_analyzed_snapshot(raw_path: str, existing: list[dict],
+                           done: list[dict]) -> list[dict]:
+    """Write the DB with everything processed so far. Returns what was written.
+
+    The analysis used to write once, at the end of the run, so a pass that did
+    not reach that line stored nothing: on 2026-08-20 and 08-21 the nightly was
+    killed at its 1200s slot inside the LLM enrichment of 1543 jobs, and both
+    nights discarded every job they had analysed — ~2400s of model spend — while
+    the staging backlog grew to 1973. The scrape survived those nights only
+    because staging is written separately, and this gives the analysis the same
+    property.
+
+    Merged exactly as the final write merges, so a checkpoint and a completed
+    run produce the same shape: existing jobs keyed by URL, this run's results
+    overwriting them, no-URL jobs appended. Dedupe and duplicate-file archiving
+    are deliberately left to the end of the run — they move files on disk, and a
+    checkpoint has to stay cheap enough to run between chunks.
+
+    Written to a temp file and renamed. The process this exists for is one that
+    gets killed, and a kill part-way through a plain write leaves a truncated
+    _analyzed.json — worse than the timeout it was protecting against.
+    """
+    merged = {j["url"]: j for j in existing if j.get("url")}
+    for j in done:
+        if j.get("url"):
+            merged[j["url"]] = j
+    out = list(merged.values()) + [j for j in done if not j.get("url")]
+    tmp = f"{raw_path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False, default=str)
+    os.replace(tmp, raw_path)
+    return out
+
+
 def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) -> int:
     """Score every job in place. Returns the failure count.
 
@@ -101,6 +136,19 @@ def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) 
     A failed job keeps an empty match dict rather than none, so downstream code that
     assumes the key exists still works and `--reanalyze` can retry it.
     """
+    # Scored several at a time for the same reason the enrichment is: analyze_match
+    # reaches the LLM for the context score, so a job spends its time waiting, not
+    # computing. Measured on the 2026-08-21 backlog, matching a 154-job chunk took
+    # LONGER than enriching it — leaving this serial made the parallel enrichment
+    # pointless, since the chunk could only go as fast as its slower half.
+    #
+    # Bounded by live keys rather than cores: every call walks the fallback chain
+    # from the top, so N workers open N calls on the same first provider, and past
+    # its rate limit that quarantines a working key for 15 minutes.
+    workers = max(1, int((config or {}).get("analysis_workers") or 1))
+    failures = 0
+    lock = threading.Lock()
+
     # A job the filter has rejected does not buy a context call. The live scrape
     # path only ever hands this function jobs that already survived the filter,
     # so the check costs nothing there; --reanalyze hands it the WHOLE database,
@@ -108,7 +156,7 @@ def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) 
     #
     # Measured 2026-08-26 over 5260 stored jobs: 1071 carry a TF-IDF context and
     # 910 of those are filter rejects — TF-IDF is what skip_llm_context is FOR.
-    # Without this, `--reanalyze` pays for 1504 context calls where 628 is the
+    # Without this, `--reanalyze` pays for 1504 context calls where 619 is the
     # honest number, and 885 of them re-score postings already thrown away.
     #
     # passes_filter is asked rather than the stored `_filter_reason`, which is
@@ -125,19 +173,35 @@ def match_all(jobs: list[dict], config: dict, label: str = "matched", **kwargs) 
         except Exception:
             return False  # never let a filter error silence a score
 
-    failures = 0
-    for i, job in enumerate(jobs, 1):
+    def _score(job):
+        nonlocal failures
         try:
-            job["match"] = analyze_match(job, config,
-                                         skip_llm_context=_skips(job), **kwargs)
+            m = analyze_match(job, config, skip_llm_context=_skips(job), **kwargs)
         except Exception as e:
-            failures += 1
-            if failures <= 3:
-                print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
-                      f"{type(e).__name__}: {str(e)[:70]}", flush=True)
+            with lock:
+                failures += 1
+                if failures <= 3:
+                    print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
+                          f"{type(e).__name__}: {str(e)[:70]}", flush=True)
             job.setdefault("match", {})
-        if i % 100 == 0 or i == len(jobs):
-            print(f"  … {i}/{len(jobs)} {label} ({failures} failed)", flush=True)
+            return
+        # Assigned after the call returns, so a job is never left holding a
+        # half-built score if the provider chain dies mid-batch.
+        job["match"] = m
+
+    if workers > 1 and len(jobs) > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_score, j) for j in jobs]
+            for i, fut in enumerate(as_completed(futures), 1):
+                fut.result()
+                if i % 100 == 0 or i == len(jobs):
+                    print(f"  … {i}/{len(jobs)} {label} ({failures} failed)", flush=True)
+    else:
+        for i, job in enumerate(jobs, 1):
+            _score(job)
+            if i % 100 == 0 or i == len(jobs):
+                print(f"  … {i}/{len(jobs)} {label} ({failures} failed)", flush=True)
     if failures:
         print(f"  ⚠ {failures}/{len(jobs)} jobs left without a match score. "
               f"Re-run `run.py --reanalyze` to retry them.")
@@ -453,6 +517,66 @@ PRESERVED_FRONTMATTER_PREFIXES = (
 )
 
 
+def _review_generated(tasks: list[dict], cv_dir: str, letter_dir: str,
+                      workers: int) -> int:
+    """Review the documents this run just wrote. Returns how many were reviewed.
+
+    Contained on purpose: a reviewer that cannot reach a provider must not cost
+    the run its documents or its match reports, which are already on disk by the
+    time this is called. Every failure is counted and named, never raised.
+    """
+    try:
+        from reviewer import run_review, review_is_current
+        import gen_version
+    except Exception as e:
+        print(f"  ⚠ review skipped ({type(e).__name__}: {str(e)[:60]})", flush=True)
+        return 0
+
+    pending = []
+    for t in tasks:
+        for kind, d in (("CV", cv_dir), ("CL", letter_dir)):
+            doc = Path(d) / f"{t['base']}_{kind}.md"
+            if not doc.exists():
+                continue
+            # A hand-edited, applied or expired document is frozen: run_review
+            # writes a backlink into it, and a verdict on a submitted or closed
+            # application is advice that can no longer be taken.
+            try:
+                if gen_version.is_locked(t["base"], doc.read_text(encoding="utf-8"),
+                                         Path(cv_dir).parent / "00_matches"):
+                    continue
+                if review_is_current(doc)[0]:
+                    continue
+            except Exception:
+                continue
+            pending.append((doc, t["job"]))
+
+    if not pending:
+        return 0
+
+    def _one(item):
+        doc, job = item
+        try:
+            run_review("CV" if doc.name.endswith("_CV.md") else "CL", doc, job)
+            return True, None
+        except Exception as e:
+            return False, f"{doc.name}: {str(e)[:60]}"
+
+    if workers > 1 and len(pending) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_one, pending))
+    else:
+        results = [_one(i) for i in pending]
+
+    failed = [msg for ok, msg in results if not ok]
+    for msg in failed[:3]:
+        print(f"  ✗ review {msg}", flush=True)
+    if len(failed) > 3:
+        print(f"  ✗ review: {len(failed) - 3} more failed", flush=True)
+    return sum(1 for ok, _ in results if ok)
+
+
 def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
     """Generate match reports for all jobs, and tailored CVs/cover letters for filter-passed jobs.
 
@@ -511,6 +635,7 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
                        f"{make_safe_name(j.get('company', 'company'), j.get('title', 'job'))}_CV.md"))]
         eligible_ids = {id(j) for j in pending[:cv_limit]}
 
+    _doc_tasks: list[dict] = []
     cv_generated = 0
     cv_skipped = 0
     letter_generated = 0
@@ -566,47 +691,30 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
             cv_skipped += 1
             letter_skipped += 1
         elif wants_documents and not match.get("description_missing", False):
+            # Queued, not written. A CV and its letter are two LLM passes, and
+            # measured on 2026-08-22 the pair took ~5.5 minutes per job — with
+            # the loop serial, a few hundred pending documents is a night of its
+            # own, and the review stage behind them never gets a turn.
+            #
+            # The decision stays HERE, in order: `base` is disambiguated against
+            # seen_bases as the loop walks, so which file a job owns depends on
+            # the jobs before it. Only the two calls that wait on a provider move.
             cv_path = os.path.join(cv_dir, cv_filename_md)
-            if not os.path.exists(cv_path):
-                role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
-                cv = generate_cv(
-                    role_type=role_type,
-                    job_title=job.get('title', ''),
-                    company=job.get('company', ''),
-                    job_description=job.get('description', ''),
-                    match_filename=match_filename,
-                    cl_filename=cl_name
-                )
-                with open(cv_path, "w") as f:
-                    f.write(cv)
-                cv_generated += 1
-            else:
-                cv_skipped += 1
-
-            # Step 2: Generate cover letter (skip if exists)
             cl_path = os.path.join(letter_dir, cl_filename_md)
-            if not os.path.exists(cl_path):
-                # The assembler refuses to build a letter without its authored
-                # assets rather than emitting one with the identity block
-                # missing. That is the right call for one letter and the wrong
-                # one for the run, which still has its CVs and its report to
-                # finish — so the refusal is caught per job and named.
-                try:
-                    save_cover_letter(
-                        job.get('title', ''),
-                        job.get('company', ''),
-                        job.get('location', 'Edinburgh'),
-                        job.get('description', ''),
-                        letter_dir,
-                        match_filename=match_filename,
-                        cv_filename=cv_name
-                    )
-                    letter_generated += 1
-                except Exception as e:
-                    letter_skipped += 1
-                    print(f"  ✗ CL {base[:45]}: {str(e)[:80]}", flush=True)
-            else:
+            want_cv = not os.path.exists(cv_path)
+            want_cl = not os.path.exists(cl_path)
+            if not want_cv:
+                cv_skipped += 1
+            if not want_cl:
                 letter_skipped += 1
+            if want_cv or want_cl:
+                _doc_tasks.append({
+                    "job": job, "base": base,
+                    "cv_path": cv_path if want_cv else None,
+                    "cl_path": cl_path if want_cl else None,
+                    "match_filename": match_filename,
+                    "cv_name": cv_name, "cl_name": cl_name,
+                })
         else:
             cv_skipped += 1
             letter_skipped += 1
@@ -658,6 +766,111 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
                 pass  # never let carry-over break report generation
         with open(report_path, "w") as f:
             f.write(report)
+
+    # --- The expensive half, run several at a time ---
+    #
+    # Every task owns its own two files and shares nothing but the counters, so
+    # the only coordination needed is the lock below. Ordering was already
+    # settled in the loop above; completion order here does not matter.
+    if _doc_tasks:
+        def _write_documents(t):
+            job = t["job"]
+            made_cv = made_cl = False
+            cl_error = None
+            if t["cv_path"]:
+                role_type = detect_role_type(job.get('title', ''), job.get('description', ''))
+                cv = generate_cv(
+                    role_type=role_type,
+                    job_title=job.get('title', ''),
+                    company=job.get('company', ''),
+                    job_description=job.get('description', ''),
+                    match_filename=t["match_filename"],
+                    cl_filename=t["cl_name"],
+                )
+                with open(t["cv_path"], "w") as f:
+                    f.write(cv)
+                made_cv = True
+            if t["cl_path"]:
+                # The assembler refuses to build a letter without its authored
+                # assets rather than emitting one with the identity block
+                # missing. That is the right call for one letter and the wrong
+                # one for the run, which still has its CVs and its report to
+                # finish — so the refusal is caught per job and named.
+                try:
+                    save_cover_letter(
+                        job.get('title', ''),
+                        job.get('company', ''),
+                        job.get('location', 'Edinburgh'),
+                        job.get('description', ''),
+                        letter_dir,
+                        match_filename=t["match_filename"],
+                        cv_filename=t["cv_name"],
+                    )
+                    made_cl = True
+                except Exception as e:
+                    cl_error = str(e)[:80]
+            return t["base"], made_cv, made_cl, cl_error
+
+        _workers = max(1, int(config.get("analysis_workers") or 1))
+        print(f"  ✍ generating {len(_doc_tasks)} document sets "
+              f"({_workers} at a time)", flush=True)
+        if _workers > 1 and len(_doc_tasks) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=_workers) as pool:
+                _results = list(pool.map(_write_documents, _doc_tasks))
+        else:
+            _results = [_write_documents(t) for t in _doc_tasks]
+
+        for _base, _made_cv, _made_cl, _cl_error in _results:
+            if _made_cv:
+                cv_generated += 1
+            if _made_cl:
+                letter_generated += 1
+            elif _cl_error:
+                letter_skipped += 1
+                print(f"  ✗ CL {_base[:45]}: {_cl_error}", flush=True)
+
+        # --- Review what was just written ---
+        #
+        # A CV without a review is not a decision: the review score is what says
+        # whether to apply. Leaving it to nightly_scout means two things go
+        # wrong. It runs at the END of the pipeline, so a top-ranked posting
+        # waits behind every remaining document — Pony Visual Designer sat at
+        # composite 0.82, rank 33 of 4492, with both documents written and no
+        # verdict. And it only looks at jobs that are NEW in that run, so a
+        # document that misses its night is never picked up by it at all; on
+        # 2026-08-22 that backlog was 341 documents.
+        #
+        # Safe against the selection this bypasses, because it does not bypass
+        # one: review_top_percent (40) is a superset of generation_top_percent
+        # (30) over the same ranked pool with the same floor, so anything with a
+        # CV is already inside the review set. nightly_scout still sweeps, and
+        # skips these — review_is_current sees the verdict already stored.
+        if config.get("review_on_generation", True):
+            _min = float(config.get("review_on_generation_min", 0.5) or 0)
+            # The stretch tier ignores the floor. Its composite is depressed by
+            # the very level rejection that put it there — it is admitted on
+            # skills overlap instead — so a floor on composite is the wrong
+            # instrument, and it is chosen by COUNT (stretch_top_count), which
+            # already bounds it. It also has nowhere else to be reviewed:
+            # nightly_scout ranks filter-passed jobs only, and a stretch job is
+            # filtered by definition. Measured 2026-08-22: 15 stretch jobs, 15
+            # CVs, 0 reviews, including one at composite 0.84 — documents bought
+            # for a verdict that never came.
+            _to_review = [
+                t for t in _doc_tasks
+                if id(t["job"]) in stretch_ids
+                or (t["job"].get("match") or {}).get("composite_score", 0) >= _min
+            ]
+            # Best first: if the slot runs out, the ones that ran are the ones
+            # worth reading.
+            _to_review.sort(
+                key=lambda t: (t["job"].get("match") or {}).get("composite_score", 0),
+                reverse=True)
+            if _to_review:
+                _reviewed = _review_generated(_to_review, cv_dir, letter_dir, _workers)
+                if _reviewed:
+                    print(f"  🔍 reviewed {_reviewed} new document(s)", flush=True)
 
     print(f"  📊 Saved {len(passed_jobs)} match reports to {match_dir}/")
     # "deferred", not "outside top N": the cap now counts documents this run
@@ -1325,6 +1538,11 @@ async def main():
         if route_upgraded:
             print(f"  🏷  Re-tagged route on {route_upgraded} already-known jobs")
 
+    def _persist(done: list[dict], label: str) -> None:
+        out = save_analyzed_snapshot(raw_path, existing_analyzed, done)
+        print(f"  💾 checkpoint ({label}): {len(out)} total jobs, "
+              f"{len(done)} done this run", flush=True)
+
     # --- Skip already-known jobs (incremental mode) ---
     new_jobs = [j for j in all_jobs
                 if j.get("url") and normalize_url(j["url"]) not in existing_urls]
@@ -1348,55 +1566,61 @@ async def main():
         # exceptional one. It must cost that job's enrichment, not the whole run.
         _to_analyze = new_jobs + no_url_jobs
 
+        # The enrichment is network-bound, not CPU-bound: a job spends ~15s
+        # waiting on a provider and almost nothing computing, so the pass took
+        # roughly its job count times that latency and could not fit the night.
+        # Jobs are independent, so several can wait at once.
+        #
+        # The ceiling is keys, not cores. The fallback chain is walked in order
+        # by every call, so N workers open with N calls against the SAME first
+        # provider: past that key's rate limit they earn a 429, which sidelines
+        # a working key for 15 minutes and pushes the load onto the next one.
+        # Keep the width well under the number of live keys.
+        _workers = max(1, int(config.get("analysis_workers") or 1))
+
         def _analyze_all(jobs, skip_llm, label):
             """Analyse a batch, containing per-job failures. Returns (results, fails)."""
-            out, fails = [], 0
-            for i, job in enumerate(jobs, 1):
+            import traceback
+            out, fails = [None] * len(jobs), 0
+
+            def _run(idx):
                 try:
-                    out.append(analyze_job(job, skip_llm=skip_llm))
+                    return idx, analyze_job(jobs[idx], skip_llm=skip_llm), None
                 except Exception as e:
+                    # Formatted here, on the thread that raised: the frame is
+                    # what says which field carried the bad value, and it is
+                    # gone by the time the main thread sees the result.
+                    return idx, jobs[idx], (e, traceback.format_exc(limit=4))
+
+            def _record(idx, res, err, seen):
+                nonlocal fails
+                out[idx] = res
+                if err is not None:
                     fails += 1
                     if fails <= 3:
-                        print(f"  ⚠ {label} failed for {(job.get('title') or '?')[:40]}: "
-                              f"{type(e).__name__}: {str(e)[:70]}")
-                        # Location too, not just the message. A bare
-                        # "TypeError: unhashable type: 'list'" is unactionable —
-                        # the frame is what says which field carried the list.
-                        import traceback
+                        exc, tb = err
+                        print(f"  ⚠ {label} failed for "
+                              f"{(jobs[idx].get('title') or '?')[:40]}: "
+                              f"{type(exc).__name__}: {str(exc)[:70]}")
                         print("    " + "    ".join(
-                            traceback.format_exc(limit=4).splitlines(True)[-6:]).rstrip())
-                    out.append(job)  # keep the posting, unenriched
-                if i % 100 == 0 or i == len(jobs):
-                    print(f"  … {i}/{len(jobs)} {label} ({fails} failed)", flush=True)
+                            tb.splitlines(True)[-6:]).rstrip())
+                if seen % 100 == 0 or seen == len(jobs):
+                    print(f"  … {seen}/{len(jobs)} {label} ({fails} failed)", flush=True)
+
+            # The cheap pass touches no network, so widening it buys nothing.
+            workers = 1 if skip_llm else _workers
+            if workers > 1 and len(jobs) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(_run, i) for i in range(len(jobs))]
+                    for seen, fut in enumerate(as_completed(futures), 1):
+                        idx, res, err = fut.result()
+                        _record(idx, res, err, seen)
+            else:
+                for seen, i in enumerate(range(len(jobs)), 1):
+                    idx, res, err = _run(i)
+                    _record(idx, res, err, seen)
             return out, fails
-
-        # Pass 1, no LLM. Everything passes_filter reads (salary, experience_level,
-        # employment_types, work_style) comes from regex and rules, so the filter can
-        # decide on this alone.
-        print(f"  ① regex/rule pass over {len(_to_analyze)} jobs (no LLM)")
-        _cheap, _ = _analyze_all(_to_analyze, True, "scanned")
-
-        # Filter here, before paying for anything. Analysis used to run in full over
-        # every scraped job and the filter came ~60 lines later, so ~35% of the LLM
-        # spend went to postings dropped immediately afterwards — 213 of 890 on a
-        # title keyword alone, which needs no model at all.
-        _keep, _drop = filter_jobs(_cheap, config)
-        print(f"  ② filter: {len(_keep)} kept, {len(_drop)} dropped before any LLM call")
-
-        # Pass 2, LLM top-ups, on survivors only. analyze_job is idempotent, and the
-        # top-ups only fire where the cheap pass fell short (<3 skills, or an
-        # "unknown" level), so this re-run costs just the calls that add something.
-        print(f"  ③ LLM enrichment for {len(_keep)} kept jobs")
-        _enriched, _analyze_failures = _analyze_all(_keep, False, "enriched")
-        if _analyze_failures:
-            print(f"  ⚠ {_analyze_failures}/{len(_keep)} jobs kept without LLM "
-                  f"enrichment (likely every provider rate-limited). Re-run "
-                  f"`run.py --reanalyze` once keys recover.")
-
-        # Dropped jobs stay in the DB with their cheap analysis: _analyzed.json is
-        # deliberately a superset of what passes, so loosening a filter keyword later
-        # does not need a re-scrape.
-        new_analyzed = _enriched + _drop
 
         print(f"\n{'='*60}")
         print("🎯 MATCHING AGAINST YOUR PROFILE...")
@@ -1405,29 +1629,96 @@ async def main():
         user_exp = load_user_experience()
         total_skills = sum(len(s) for s in user_skills.values())
         print(f"  📋 Loaded profile: {total_skills} skills, {user_exp.get('years_python', 0)}y Python, {user_exp.get('years_linux', 0)}y Linux")
-        # Scored separately, because the two groups are not worth the same spend.
-        # analyze_match calls the LLM once per job for context scoring, and it was
-        # doing so for the filter's rejects too: on 2026-08-05 that was 181 of 677
-        # jobs — 27% of the pass — spent on postings already excluded by title,
-        # level or salary. They still get a TF-IDF context score, so every job in
-        # the DB keeps a composite and nothing downstream sees a hole; `run.py
-        # --reanalyze` upgrades them for real if a filter is ever loosened.
-        match_all(_enriched, config)
+
+        # Analysed in chunks, each written to the DB before the next begins.
+        #
+        # The whole backlog does not fit the nightly's slot, and the run had no
+        # way to keep part of a pass: 2026-08-20 and 08-21 were both killed at
+        # 1200s inside the enrichment of 1543 jobs and stored nothing at all.
+        # A chunk that finishes is analysed AND matched, so the next run sees it
+        # as known, skips it, and starts where this one stopped — a timeout now
+        # costs one chunk instead of the night.
+        #
+        # A chunk is persisted only after its jobs carry a match score. Writing
+        # after the cheap pass would be worse than not writing: the incremental
+        # skip works on "is this URL in the DB", so a half-processed job would be
+        # skipped forever, unmatched and unscored, and no stage downstream would
+        # report the hole.
+        chunk_size = int(config.get("analysis_chunk_size") or 0) or len(_to_analyze) or 1
+        _chunks = [_to_analyze[i:i + chunk_size]
+                   for i in range(0, len(_to_analyze), chunk_size)]
+        _enriched: list[dict] = []
+        _drop: list[dict] = []
+        _analyze_failures = 0
+
+        for _n, _chunk in enumerate(_chunks, 1):
+            if len(_chunks) > 1:
+                print(f"\n  ── chunk {_n}/{len(_chunks)} ({len(_chunk)} jobs) "
+                      f"── {len(_enriched) + len(_drop)} done so far")
+            # Pass 1, no LLM. Everything passes_filter reads (salary,
+            # experience_level, employment_types, work_style) comes from regex and
+            # rules, so the filter can decide on this alone.
+            print(f"  ① regex/rule pass over {len(_chunk)} jobs (no LLM)")
+            _cheap, _ = _analyze_all(_chunk, True, "scanned")
+
+            # Filter here, before paying for anything. Analysis used to run in full
+            # over every scraped job and the filter came ~60 lines later, so ~35% of
+            # the LLM spend went to postings dropped immediately afterwards — 213 of
+            # 890 on a title keyword alone, which needs no model at all.
+            _keep, _dropped = filter_jobs(_cheap, config)
+            print(f"  ② filter: {len(_keep)} kept, {len(_dropped)} dropped before any LLM call")
+
+            # Pass 2, LLM top-ups, on survivors only. analyze_job is idempotent, and
+            # the top-ups only fire where the cheap pass fell short (<3 skills, or an
+            # "unknown" level), so this re-run costs just the calls that add something.
+            print(f"  ③ LLM enrichment for {len(_keep)} kept jobs")
+            _chunk_enriched, _fails = _analyze_all(_keep, False, "enriched")
+            _analyze_failures += _fails
+
+            # Scored separately, because the two groups are not worth the same spend.
+            # analyze_match calls the LLM once per job for context scoring, and it was
+            # doing so for the filter's rejects too: on 2026-08-05 that was 181 of 677
+            # jobs — 27% of the pass — spent on postings already excluded by title,
+            # level or salary. They still get a TF-IDF context score, so every job in
+            # the DB keeps a composite and nothing downstream sees a hole; `run.py
+            # --reanalyze` upgrades them for real if a filter is ever loosened.
+            match_all(_chunk_enriched, config)
+            if _dropped:
+                match_all(_dropped, config, label="scored (filtered out, TF-IDF only)",
+                          skip_llm_context=True)
+
+            # Dropped jobs stay in the DB with their cheap analysis: _analyzed.json is
+            # deliberately a superset of what passes, so loosening a filter keyword
+            # later does not need a re-scrape.
+            _enriched += _chunk_enriched
+            _drop += _dropped
+            _persist(_enriched + _drop, f"chunk {_n}/{len(_chunks)}")
+
+        if _analyze_failures:
+            print(f"  ⚠ {_analyze_failures}/{len(_enriched)} jobs kept without LLM "
+                  f"enrichment (likely every provider rate-limited). Re-run "
+                  f"`run.py --reanalyze` once keys recover.")
+
+        # The stretch tier is chosen from the rejects and then paid for properly.
+        # It has to run in this order: the ranking is by skills score, which only
+        # exists once a job has been matched at all, so the cheap pass comes first
+        # and the handful it promotes are scored again with the real context call.
+        # Without that second pass a stretch job carries a TF-IDF context at 64% of
+        # the composite weight and its report reads as a weak match whatever the CV
+        # review later says.
+        #
+        # Once, over every chunk's rejects — not per chunk. stretch_top_count is a
+        # count, not a share, so promoting 15 out of each chunk would multiply the
+        # tier by the number of chunks and quietly buy documents for the whole
+        # senior backlog.
         if _drop:
-            match_all(_drop, config, label="scored (filtered out, TF-IDF only)",
-                      skip_llm_context=True)
-            # The stretch tier is chosen from the rejects and then paid for
-            # properly. It has to run in this order: the ranking is by skills
-            # score, which only exists once a job has been matched at all, so
-            # the cheap pass comes first and the handful it promotes are scored
-            # again with the real context call. Without that second pass a
-            # stretch job carries a TF-IDF context at 64% of the composite
-            # weight and its report reads as a weak match whatever the CV
-            # review later says.
             from selection import stretch_jobs
             _stretch = stretch_jobs(config, _drop)
             if _stretch:
                 match_all(_stretch, config, label="rescored (stretch tier, LLM context)")
+                _persist(_enriched + _drop, "stretch tier")
+
+        new_analyzed = _enriched + _drop
     else:
         new_analyzed = []
         print("  ✅ No new jobs — using existing DB")

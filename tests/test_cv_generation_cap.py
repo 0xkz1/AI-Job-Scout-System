@@ -54,10 +54,19 @@ def test_the_cap_is_not_a_bare_slice_of_the_ranked_list():
 
 def test_run_py_still_refuses_to_overwrite_an_existing_document():
     """The reason the change above is safe. If this ever stops being true, the
-    cap change would start silently regenerating hand-edited CVs."""
+    cap change would start silently regenerating hand-edited CVs.
+
+    The check moved when generation became concurrent: it now decides whether to
+    QUEUE the job, in the ordered pass, rather than guarding the write inside the
+    worker. Same guarantee, and it has to stay on the ordered side — two workers
+    testing the same absent path would both write it."""
     text = (ROOT / "run.py").read_text(encoding="utf-8")
-    assert "if not os.path.exists(cv_path):" in text
-    assert "if not os.path.exists(cl_path):" in text
+    assert "want_cv = not os.path.exists(cv_path)" in text
+    assert "want_cl = not os.path.exists(cl_path)" in text
+    worker = text[text.index("def _write_documents"):text.index("_workers = max(")]
+    assert "os.path.exists" not in worker, (
+        "the existence check is inside the pool; two workers can race the same file"
+    )
 
 
 def test_regeneration_has_its_own_tool():

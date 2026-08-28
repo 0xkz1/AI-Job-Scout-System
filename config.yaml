@@ -439,6 +439,59 @@ review_top_percent: 40       # top N% by composite_score get reviewed
 # Set to 0 to switch the tier off.
 stretch_top_count: 15
 
+# Jobs analysed and matched per checkpoint. The DB is written after each chunk,
+# so a run that is killed keeps every chunk it finished — see run.py's _persist.
+#
+# 200 comes from what the nightly can actually do: the analysis stage is left
+# ~1200s after the scrapes, and on 2026-08-21 that bought under 100 enrichments,
+# all of them discarded because the only write was at the end of the run. A
+# smaller chunk checkpoints sooner; a larger one wastes less time on the write
+# itself (~37MB of JSON, under a second). 200 keeps a lost chunk cheap while the
+# 1973-job backlog drains over a few nights.
+#
+# 0 restores the old single-pass behaviour — everything or nothing.
+analysis_chunk_size: 200
+
+# How many jobs are enriched at once. The pass waits on providers rather than
+# computing, so one job at a time left the CPU idle for ~15s per posting and made
+# the backlog an overnight job on its own.
+#
+# The limit is live keys, not cores. Every call walks the fallback chain from the
+# top, so N workers open N simultaneous calls against the same first provider;
+# exceed its requests-per-second and it answers 429, which quarantines a WORKING
+# key for 15 minutes (see key_quarantine's RATE_LIMIT_COOLDOWN_MINUTES) and moves
+# the same crowd onto the next key. 4 against 16 Mistral plus 12 groq keys leaves
+# the chain room to absorb a throttled provider without cascading.
+#
+# Measured on the 2026-08-21 backlog: at 4 workers a 154-job chunk enriched in
+# 31 minutes (~5 jobs/min) against ~3 serial, and NOTHING was rate-limited — no
+# 429, no quarantine — so the chain was nowhere near its ceiling and the width
+# was the limit, not the keys.
+#
+# 1 restores the old serial pass.
+analysis_workers: 8
+
+# Review a document as soon as it is written, instead of leaving every review to
+# nightly_scout at the end of the pipeline.
+#
+# Two problems it fixes, not one. Reviews are the LAST stage, so a top-ranked
+# posting waited behind every remaining document — Pony Visual Designer sat at
+# composite 0.82, rank 33 of 4492, with a CV and a letter and no verdict, which
+# is the number that actually decides whether to apply. And nightly_scout only
+# looks at jobs that are NEW in that run, so a document that misses its night is
+# never reviewed by it at all: that backlog was 341 documents on 2026-08-22.
+#
+# It bypasses no selection. review_top_percent (40) is a superset of
+# generation_top_percent (30) over the same ranked pool with the same floor, so
+# a job holding a CV is already inside the review set. nightly_scout still
+# sweeps and skips what is already reviewed.
+review_on_generation: true
+
+# Absolute composite, not a rank: at this point in the run every job is scored,
+# so the rank is known and this is only a floor under it. Documents are reviewed
+# best-first, so a slot that runs out has done the ones worth reading.
+review_on_generation_min: 0.5
+
 # Quality floor (secondary): a job below this composite score never gets a CV
 # even if it lands inside the top N% of a small pool. It only trims — it never
 # widens the selection. Set to 0 to disable.

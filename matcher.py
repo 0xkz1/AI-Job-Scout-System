@@ -6,6 +6,7 @@ to calculate a match score and generate a detailed match report.
 """
 
 import math
+import threading
 import re
 from datetime import datetime
 from pathlib import Path
@@ -1989,7 +1990,7 @@ BANNED: neither language may contain "local-first" / "ローカルファース�
                 import llm_client as _lc
                 out = {"score": round(score, 2), "reasoning": reasoning,
                        "reasoning_en": reasoning_en, "reasoning_ja": reasoning_ja,
-                       "provider": _lc.last_provider}
+                       "provider": _lc.current_provider()}
                 # The axis that did not become the score, and the requirement it
                 # was judged against — the reader's evidence for a number that
                 # is now mostly low. Absent on a reply that predates the
@@ -2663,6 +2664,12 @@ _COMPANY_CASING_PATH = Path(
 )
 _company_casing: dict[str, str] | None = None
 
+# Matching runs several jobs at once, and this registry is read-modify-write over
+# one shared dict and one shared temp path. Two threads registering new companies
+# together can publish a half-written file, and sorting the dict while another
+# thread inserts into it raises outright.
+_casing_lock = threading.Lock()
+
 
 def _load_company_casing() -> dict[str, str]:
     """Registry of the canonical spelling to use for each company.
@@ -2693,22 +2700,24 @@ def canonical_company(company: str) -> str:
     name = (company or "").strip()
     if not name:
         return name
-    registry = _load_company_casing()
-    key = name.lower()
-    known = registry.get(key)
-    if known is not None:
-        return known
-    registry[key] = name
-    try:
-        import json
-        _COMPANY_CASING_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _COMPANY_CASING_PATH.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(dict(sorted(registry.items())), fh, ensure_ascii=False, indent=2)
-        tmp.replace(_COMPANY_CASING_PATH)
-    except OSError:
-        pass  # in-memory registry still keeps this run internally consistent
-    return name
+    with _casing_lock:
+        registry = _load_company_casing()
+        key = name.lower()
+        known = registry.get(key)
+        if known is not None:
+            return known
+        registry[key] = name
+        try:
+            import json
+            _COMPANY_CASING_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _COMPANY_CASING_PATH.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(dict(sorted(registry.items())), fh,
+                          ensure_ascii=False, indent=2)
+            tmp.replace(_COMPANY_CASING_PATH)
+        except OSError:
+            pass  # in-memory registry still keeps this run consistent
+        return name
 
 
 def make_safe_name(company: str, title: str) -> str:
