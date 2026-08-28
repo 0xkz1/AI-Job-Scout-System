@@ -3,7 +3,7 @@
 Human-maintained. Nothing in the pipeline writes this file; a stale date here
 means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
-Last verified: 2026-08-27
+Last verified: 2026-08-28
 
 ## Loop health
 
@@ -12,10 +12,14 @@ the job market is British and the two land on different calendar days.
 
 | Loop | Schedule | Last run | Result |
 |------|----------|----------|--------|
-| job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-27 02:00 → 02:59 | ok |
-| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-27 04:30 → 06:03 | ok — 5584s of the 7020s sweep budget |
-| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-27 07:00 | ok — no candidate, silent |
-| loop-readiness-daily (L3) | `0 9 * * *` | 2026-08-27 09:00 | ok — scores files, not runs |
+| job-scout-early | `0 2 * * *` (18:00 BST prev. day) | 2026-08-28 02:00 | ok |
+| job-scout-late | `30 4 * * *` (20:30 BST prev. day) | 2026-08-28 04:30 → 06:01 | ok — 5484s of the 7020s sweep budget |
+| loop-repair (L2) | `0 7 * * *` (23:00 BST prev. day) | 2026-08-28 07:00 | ok — no candidate, silent |
+| loop-readiness-daily (L3) | `0 9 * * *` | 2026-08-28 09:00 | ok — scores files, not runs |
+
+L2 has still never produced a branch. `git branch --list 'loop/*'` is empty, which
+is the correct outcome of a trigger that fires only on a scraper that ran clean
+and returned nothing. Dormant is not broken.
 
 Verify:
 
@@ -113,15 +117,37 @@ Telegram wording — had never executed.
   Independently, shrinking the persona was shipped and reverted once already for
   correctness — see the docstring on `_ollama_context_score`. Do not spend the
   refactor.
+
+  **The call count is not a lever either, measured 2026-08-28.** The obvious
+  suspect was the `context_rescore` second draw. It is not: `context_draws` over
+  the database reads 3736 at one draw, 402 at two, 923 never asked, and only 22
+  gate hits are still waiting for a second. The rescore was a one-time backlog
+  drain and it is essentially finished, so tightening `context_max`, `skills_min`
+  or `max_draws` now saves 22 calls in total. (402 spent against 157 that still
+  match the gate is the mechanism working — averaging the second draw lifted the
+  rest above 0.30 and out of it.) What remains is roughly 950 FIRST draws a night
+  on newly scraped postings, which scales with how much is scraped, not with any
+  parameter. Reducing it means collecting fewer jobs, which is a smaller system
+  rather than a cheaper one.
+
+  So matcher has no cheap lever left, and it does not currently need one: the
+  night finishes in 5484s against a 7020s budget. Revisit if the sweep starts
+  crossing its deadline, not before.
 - **All twelve groq keys 429 together.** On the first night of the retiering they
   were quarantined within one second of each other, after about six calls each,
   and the chain fell through to `litellm-gateway` for the 15-minute cooldown.
   Twelve keys are not twelve buckets under `analysis_workers: 8`. The routing
   still paid for itself; the point is that it buys a burst rather than a night,
   and `analysis_workers` is the lever to test before adding keys.
-- **`vault-drift-check` is failing.** `error: Script exited with code 1`,
-  2026-08-27 04:28. Unrelated to the job loops — listed because it shares the
-  archivist scheduler and nothing else reports it.
+- **`vault-drift-check` reports drift in the taifunome vault.** Its cron line
+  reads `error: Script exited with code 1` and that is NOT a failure — the script
+  is silent and exits 0 when every vault is clean, and exits 1 with a report when
+  one is not, so that a `--no-agent` job only speaks when something is wrong.
+  Hermes renders the deliberate signal as an error. Running it by hand shows the
+  content: `taifunome: provenance_errors: 1`,
+  `wiki/meta/ledgers/source-ledger.json does not match current file bytes`. It
+  belongs to the taifunome repo, not this one, and the script is explicit that
+  re-ingest is a reviewed transaction and never unattended.
 - **Five profiles still have no working agent path.** archivist, investigator,
   researcher, visualizer and writer point at `z-ai/glm-5.2` via the built-in
   `zai` provider, whose keys live in the gateway's `.env` and not in Hermes's
