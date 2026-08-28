@@ -217,7 +217,10 @@ def scrape_remote_apis_all(config: dict) -> list[dict]:
     # min(max_pages_per_search, 5) examined ~300 of 895 jobs and found 3 matches
     # where a full walk finds 13.
     _add(scrape_arbeitnow(keywords))
-    _add(scrape_weworkremotely(keywords))
+    # WeWorkRemotely dropped from the run 2026-08-22 at the user's request. The
+    # scraper below is kept, not deleted: the board still works and the decision
+    # is about what this pipeline should spend its budget on, not about broken
+    # code. Re-adding it is one line.
 
     # Final keyword gate (title-level) reusing the shared filter.
     from scraper_indeed import filter_jobs_by_keywords
