@@ -1170,6 +1170,89 @@ def _is_remote_friendly(job_loc: str, work_style: str) -> bool:
     return False
 
 
+# What a posting SAYS about where a remote worker may sit, as opposed to what its
+# location field happens to contain. Ordered most specific first: "remote —
+# anywhere in Europe" must read as Europe, not as worldwide.
+#
+# MEASURED 2026-08-29: 76 of 5148 postings state a scope in prose at all (46 of
+# them remote). That is the whole population the `stated` confidence can ever
+# have, which is why remote_scope is a DERIVED field carrying its confidence
+# rather than an extracted one.
+_SCOPE_STATED = (
+    ("remote_uk", re.compile(
+        r"remote (?:within|in|across|from) (?:the )?(?:uk|united kingdom)"
+        r"|must be (?:based|located) in the (?:uk|united kingdom)"
+        r"|uk[-\s]based (?:only|remote)|uk residents only", re.IGNORECASE)),
+    ("remote_eu", re.compile(
+        r"remote (?:within|in|across|from) (?:the )?(?:eu|europe)"
+        r"|must be (?:based|located) in (?:the )?(?:eu|europe)"
+        r"|eu[-\s]based (?:only|remote)|anywhere in europe|europe[-\s]wide", re.IGNORECASE)),
+    ("remote_worldwide", re.compile(
+        r"work from anywhere|anywhere in the world|remote[^.\n]{0,12}anywhere",
+        re.IGNORECASE)),
+)
+
+
+def classify_remote_scope(job_location: str, work_style: str, country: str | None,
+                          description: str | None = None) -> tuple[str, str]:
+    """(scope, confidence) — how far this arrangement travels, and how sure.
+
+    scope:      onsite | hybrid | remote_uk | remote_country | remote_eu
+                | remote_worldwide | remote_americas | remote_unscoped | unknown
+    confidence: stated | inferred | unknown
+
+    This exists because "remote" is a boolean the strategy cannot use. A role that
+    is remote-within-the-UK stops working the day the visa does; a role that is
+    remote-across-Europe does not. Both are `work_style: remote`, and the
+    difference between them decides which one is worth taking in 2027.
+
+    `inferred` is the normal case and NOTHING may gate on it. Measured over the
+    1294 remote postings in the corpus, the location text resolves 769 to the UK,
+    187 to Europe and 55 to Japan, leaves 258 unresolved and 23 empty — so a
+    quarter of them are a guess dressed as a field, and the confidence is the
+    only thing standing between that guess and a decision.
+
+    A note on `remote_worldwide`: it is nearly extinct here. The two boards that
+    supplied "anywhere in the world" postings (remoteok, weworkremotely) were
+    dropped from `sources` and purged on 2026-08-29, taking 54 postings with
+    them. The live distinction is UK versus Europe, not "work from anywhere".
+    """
+    style = (work_style or "").lower()
+    loc = (job_location or "").lower()
+    is_remote = _is_remote_friendly(loc, style)
+
+    if style == "onsite":
+        return "onsite", "inferred"
+    if style == "hybrid":
+        return "hybrid", "inferred"
+    if not is_remote:
+        return "unknown", "unknown"
+
+    for scope, rx in _SCOPE_STATED:
+        if rx.search(description or ""):
+            return scope, "stated"
+
+    cl = (country or "").strip().lower()
+    if cl == "uk" or (not cl and _UK_RE.search(loc)):
+        return "remote_uk", "inferred"
+    if cl == "us" or (not cl and (_AMERICAS_RE.search(loc) or _US_STATE_ABBR_RE.search(loc))):
+        return "remote_americas", "inferred"
+    if cl == "worldwide" or any(t in loc for t in ("worldwide", "global", "anywhere")):
+        return "remote_worldwide", "inferred"
+    if cl == "europe" or any(t in loc for t in ("europe", "european", "emea")) or loc.strip() in ("eu", "europe"):
+        return "remote_eu", "inferred"
+    if cl == "japan" or (not cl and _JAPAN_RE.search(loc)):
+        return "remote_country", "inferred"
+    if cl and cl not in ("", "uk"):
+        return "remote_country", "inferred"
+    for target in _remote_target_countries():
+        forms = [target] + _COUNTRY_ALIASES.get(target, [])
+        if any(f in loc for f in forms):
+            return "remote_country", "inferred"
+    # Remote, and the posting gives nothing to place it. A quarter of them.
+    return "remote_unscoped", "unknown"
+
+
 def _get_remote_score(job_loc: str, work_style: str) -> tuple:
     """Return (base_score, note) for location being UK-wide or remote."""
     loc = job_loc.lower()
@@ -2334,6 +2417,29 @@ def _ja_target_terms() -> tuple[str, ...]:
     return _ja_target_cache
 
 
+def _runway_fit(contract_months, config: dict) -> str:
+    """Does a fixed-length engagement finish before the visa does?
+
+    fits | ends_after_expiry | unknown. Deterministic, no model call, and
+    `unknown` is the honest answer for most postings: measured 2026-08-29, only
+    246 of 5202 postings state a length at all (analyzer.contract_duration_months).
+
+    This is a fact about time, not about eligibility. "ends_after_expiry" says the
+    contract runs past 2027-10-09 — it does NOT say the job is unavailable, that
+    sponsorship is needed, or that anything is impossible. What to do with a role
+    that outlasts the visa is a human decision, and the sponsorship flag beside it
+    is evidence for that decision rather than an answer to it.
+    """
+    if not isinstance(contract_months, (int, float)) or contract_months <= 0:
+        return "unknown"
+    from selection import months_until_expiry  # local import: avoids a cycle
+
+    left = months_until_expiry(config)
+    if left is None:
+        return "unknown"
+    return "fits" if contract_months <= left else "ends_after_expiry"
+
+
 def calculate_title_relevance(
     title: str, context_score: float | None = None, context_source: str | None = None
 ) -> float:
@@ -2478,8 +2584,9 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     exp_match = calculate_experience_match(job_level, user_exp)
     # Pass the inferred country so location scoring does not depend on whether the
     # place name happens to be in _COUNTRY_ALIASES.
+    job_country = _infer_country(job)
     loc_match = calculate_location_match(job_location, job_work_style, user_exp,
-                                         country=_infer_country(job))
+                                         country=job_country)
     sal_match = calculate_salary_match(job_salary, config.get("min_salary_gbp", 30000))
     # Reuse pre-existing LLM context score instead of re-scoring: LLM scores
     # are expensive and must survive plain --reanalyze runs. Accepts the
@@ -2642,7 +2749,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     from cv_generator import role_affinity as _role_affinity_fn
     role_aff = _role_affinity_fn(job.get("title", ""), job_skills, job_description)
 
-    return {
+    out = {
         "composite_score": round(composite, 2),
         "tier": tier,
         "description_missing": description_missing,
@@ -2677,7 +2784,24 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         "summary_ja": summary_ja,
         "role_affinity": role_aff,
         "detected_role": max(role_aff, key=role_aff.get) if role_aff else "general",
+        # Time, not eligibility. See _runway_fit.
+        "runway_fit": _runway_fit(analysis.get("contract_months"), config),
     }
+
+    # How far the arrangement travels, and how sure. `inferred` is the normal
+    # case and nothing gates on it — see classify_remote_scope.
+    scope, scope_confidence = classify_remote_scope(
+        job_location, job_work_style, job_country, job.get("description") or ""
+    )
+    out["remote_scope"] = scope
+    out["remote_scope_confidence"] = scope_confidence
+
+    # The strategy layer, kept out of the composite on purpose. strategy.py
+    # explains why a fifth weak term is not an improvement on four.
+    from strategy import annotate  # local import: keeps matcher importable alone
+
+    out.update(annotate(job, out, config))
+    return out
 
 
 # --- Report Generation ---
@@ -2954,6 +3078,38 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     if filter_reason and _is_stretch_job(job):
         filter_yaml += "\nstretch: true"
 
+    # The strategy layer, emitted as flat Dataview-sliceable fields. This is the
+    # whole payoff of computing it: "show me every tier-2 job whose contract
+    # finishes inside the visa and that is remote outside the UK" is a Dataview
+    # query over these lines and nothing else.
+    #
+    # strategic_coverage rides along with strategic_value on purpose. The value
+    # is renormalised over whichever terms had data, so 1.00 at coverage 0.30
+    # and 1.00 at coverage 1.00 are different claims and the report must not
+    # print them identically.
+    def _y(value):
+        """A YAML scalar, with None as an explicit null rather than an empty
+        string — an absent number and a zero must not read the same."""
+        if value is None:
+            return "null"
+        if isinstance(value, str):
+            return f'"{value}"'
+        return value
+
+    strategy_yaml = "".join([
+        f"\naction_tier: {_y(match.get('action_tier'))}",
+        f"\nstrategic_value: {_y(match.get('strategic_value'))}",
+        f"\nstrategic_coverage: {_y(match.get('strategic_coverage'))}",
+        f"\nrole_family: {_y(match.get('role_family'))}",
+        f"\nladder_step: {_y(match.get('ladder_step'))}",
+        f"\nremote_scope: {_y(match.get('remote_scope'))}",
+        f"\nremote_scope_confidence: {_y(match.get('remote_scope_confidence'))}",
+        f"\nrunway_fit: {_y(match.get('runway_fit'))}",
+        f"\ncontract_kind: {_y(analysis.get('contract_kind'))}",
+        f"\ncontract_months: {_y(analysis.get('contract_months'))}",
+        f"\nsponsorship: {_y(analysis.get('sponsorship'))}",
+    ])
+
     frontmatter = f"""---
 match_score: {score}
 match_score_pct: {score_pct}
@@ -2976,10 +3132,30 @@ skills_score: {int(match['skills']['score'] * 100)}
 experience_score: {int(match['experience']['score'] * 100)}
 location_score: {int(match['location']['score'] * 100)}
 salary_score: {int(match['salary']['score'] * 100)}
-context_score: {int(match.get('context_score', 0) * 100)}
+context_score: {int(match.get('context_score', 0) * 100)}{strategy_yaml}
 scoreable: {"false" if _is_summary_only(job) else "true"}
 url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
 ---"""
+
+    # The sponsorship quote goes in the BODY, never the frontmatter: it is a
+    # sentence, and it is the entire justification for the flag above. A reader
+    # deciding anything on `sponsorship: refused` has to be able to see what the
+    # posting actually said — the system records evidence and does not conclude.
+    sponsorship_note = []
+    if analysis.get("sponsorship") in ("offered", "refused"):
+        _state = analysis["sponsorship"]
+        _quote = (analysis.get("sponsorship_evidence") or "").replace("\n", " ")
+        _label = "スポンサーシップ提供の記載" if _state == "offered" else "スポンサーシップ不可の記載"
+        sponsorship_note = [
+            "",
+            f"> [!{'tip' if _state == 'offered' else 'warning'}] {_label} / Sponsorship: {_state}",
+            f"> {_quote}",
+            "> ",
+            "> *求人票の記載をそのまま引用したもの。資格の判断ではない。*",
+            "> *(Verbatim from the posting. Evidence, not an eligibility verdict — "
+            "a YMS holder can take a role that refuses sponsorship.)*",
+            "",
+        ]
 
     # Warning banner if description was missing
     description_missing = match.get("description_missing", False)
@@ -3033,6 +3209,7 @@ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
         f"",
         *desc_warning,
         *unscoreable_warning,
+        *sponsorship_note,
         f"## 🎯 Overall Match: {match['tier']} ({score_pct}%)",
         f"",
         f"---",

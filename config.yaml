@@ -1,8 +1,20 @@
+# `internship` added 2026-08-29. include_levels has listed internship since the
+# start while this list did not, so the two disagreed and the type list won: 39
+# postings were rejected with "employment type ['internship'] not in allowed",
+# among them "Graduate UX designer" (£32k), "Junior Digital Designer" (£30k),
+# "Web Developer Placement Programme" (£50k) and "Entry Level Grad Scheme"
+# (£31.6k). Those are the UK graduate-entry route, which is the route this search
+# is currently for.
+#
+# The unpaid ones are already handled: min_salary_gbp drops any posting that
+# states a figure below it, and a posting stating no figure at all was never
+# filtered on salary anyway.
 employment_types:
 - full_time
 - part_time
 - contract
 - freelance
+- internship
 # Matched with word boundaries (see filter.passes_filter), so a term here will not
 # fire on a longer word that merely contains it.
 exclude_description_keywords:
@@ -53,6 +65,30 @@ exclude_title_keywords:
 - welder
 - nurse
 - driver
+
+# Titles that contain a word from the list above but are not what that word is
+# there to catch. A keyword hit lying entirely inside one of these phrases does
+# not fire; a hit anywhere else still does, so "Senior Art Director" is still
+# excluded on `senior` while "Junior Art Director" now passes.
+#
+# MEASURED 2026-08-29 — this list is observations, not guesses, and
+# tests/test_title_exclusion_exceptions.py fails if an entry stops matching:
+#
+#   `director`  blocks 17 design-adjacent titles. Sixteen are genuinely senior
+#               ("Creative Director", "Head of Design / Principal Designer",
+#               "Associate Creative Director"). The exceptions are the two Art
+#               Director posts — "Junior Art Director" and "Marketing Designer /
+#               Art Director (1 year FTC)" — where Art Director is a mid-level
+#               craft title, not a management one.
+#   `lead`      blocks 148 titles. Exactly one is not a lead role: "Lead
+#               Generation Specialist", where "lead" is a sales noun.
+#
+# `senior`, `manager` and `head of` were checked the same way and need no
+# exceptions: every design-adjacent title they block is genuinely above level.
+exclude_title_exceptions:
+- art director
+- lead generation
+
 include_levels:
 - entry_level
 - mid
@@ -273,6 +309,20 @@ dropped_sources:
 - weworkremotely
 - remoteok
 
+# --- Immigration timeline (2026-08-29) ---
+# Expected expiry of the Youth Mobility Scheme visa. Read through
+# selection.yms_expiry() / selection.months_until_expiry(); matcher turns it plus
+# analysis.contract_months into match.runway_fit.
+#
+# It is a DATE, not a policy. Nothing in this pipeline concludes anything about
+# eligibility, sponsorship or immigration routes — see analyzer.classify_sponsorship,
+# which records evidence and refuses to score it. This value answers one narrow
+# arithmetic question: does a fixed-length engagement finish before this day.
+#
+# Changing it changes runway_fit on every job with a contract length, and nothing
+# else. Set to null to switch runway_fit off entirely.
+yms_expiry: 2027-10-09
+
 # --- Multi-country / remote expansion (2026-07-25) ---
 # Target countries for REMOTE roles, in priority order. A UK-resident on a YMS
 # visa can hold these remotely; on-site abroad is out of scope (no relocation).
@@ -425,6 +475,45 @@ context_rescore:
   context_max: 0.30
   skills_min: 0.50
   max_draws: 2
+
+# --- Strategy layer (2026-08-29) ---
+# A SECOND column, never a correction to the composite. The composite answers
+# "could this candidate get this job" and is fitted against the CV review score,
+# the only human-checked signal here. These answer a different question — does
+# taking it move the career toward £43-45k creative technology before the visa
+# expires — and mixing the two would lose both. See strategy.py, and the three
+# recorded re-weighting failures in the `weights` block above.
+
+# Which CV profile belongs to which family. The profiles themselves
+# (cv_generator.ROLE_KEYWORDS, 16 of them) stay the routing vocabulary; this only
+# groups them, so a taxonomy change costs no code.
+#
+# `bridge` is deliberately NOT on the ladder. The six bridge terms added
+# 2026-08-07 are a parallel track — jobs that pay now without breaking the story
+# — and giving them a rung would claim a progression that was never the plan.
+# Anything unlisted resolves to "other".
+role_families:
+  core_design: [graphic_designer]
+  hybrid_design_dev: [product_designer, web_developer]
+  creative_technology: [creative_technologist, technical_artist, product_engineer]
+  bridge: [implementation_specialist, technical_support, qa_engineer, product_ops,
+           research_engineer, content_analyst, development_support, data_analysis]
+
+# The transferable-skill trajectory, not a promotion path:
+#   junior design -> hybrid design/dev -> creative technology
+ladder:
+  core_design: 1
+  hybrid_design_dev: 2
+  creative_technology: 3
+
+# Where the candidate currently sits. Everything above it scores as a step
+# forward, level with it as relevant, below it as a step back.
+candidate_ladder_step: 1
+
+# The band the ladder is aimed at. min_salary_gbp (26000) is the floor of the
+# ramp; a posting topping out at or above this band scores full marks. Both ends
+# are used: reaching the band is worth much more than approaching it.
+salary_target_band: [43000, 45000]
 
 # Review submission gate: CV/CL scoring >= this is badged 提出可 (badge only)
 review_score_threshold: 85

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -42,6 +43,42 @@ def load_config() -> dict:
         return yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
     except Exception:
         return {}
+
+
+def yms_expiry(config: dict | None = None) -> date | None:
+    """The visa expiry date from config, or None when it is unset.
+
+    A date and nothing more. This module makes no claim about immigration
+    eligibility, routes, or what happens on the day after — see
+    analyzer.classify_sponsorship for the same rule applied to job text. The only
+    question anything here answers is arithmetic: how much time is left.
+    """
+    config = config if config is not None else load_config()
+    raw = config.get("yms_expiry")
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return date.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def months_until_expiry(config: dict | None = None, today: date | None = None) -> float | None:
+    """Months of visa left, or None when no expiry is configured.
+
+    Fractional and derived from days, not from calendar-month arithmetic: the
+    only consumer compares it against a contract length, and "13.4 months left
+    against a 12-month contract" is the comparison that matters. Negative once
+    the date has passed, which callers must handle rather than clamp — a passed
+    expiry is a real state, not a zero.
+    """
+    expiry = yms_expiry(config)
+    if expiry is None:
+        return None
+    today = today or date.today()
+    return (expiry - today).days / 30.44
 
 
 def max_pages_for(site: str, config: dict | None = None) -> int:

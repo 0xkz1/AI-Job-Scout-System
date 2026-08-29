@@ -769,6 +769,123 @@ def check_pdf_identity_ignores_stamped_properties(config: dict) -> list[str]:
     return []
 
 
+def check_sponsorship_claims_carry_evidence(config: dict) -> list[str]:
+    """A sponsorship verdict must quote the posting that produced it.
+
+    The sponsorship field is the one place in this pipeline that touches
+    immigration, and the rule it was built under is that it records evidence and
+    never infers. That rule is only enforceable if the evidence is actually there:
+    a bare "refused" with no quote is indistinguishable from a guess, and it is
+    the kind of claim someone would act on.
+
+    So both directions are checked. A verdict without a quote is a violation, and
+    a quote that does not contain the word it was matched on is one too — the
+    second case is real, not hypothetical: an early version clipped long
+    paragraphs from the left and filed "Produce electrical building services
+    designs across RIBA Stages 1-7" as the proof of a refusal.
+
+    Postings analysed before the field existed carry no key at all and are
+    skipped; this checks claims, not coverage.
+    """
+    if not ANALYZED.exists():
+        return []
+    try:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - a broken DB is another check's problem
+        return [f"could not read {ANALYZED.name}: {type(e).__name__}: {e}"]
+
+    missing, unsupported = [], []
+    for j in jobs:
+        analysis = j.get("analysis") or {}
+        state = analysis.get("sponsorship")
+        if state not in ("offered", "refused"):
+            continue
+        quote = (analysis.get("sponsorship_evidence") or "").strip()
+        title = (j.get("title") or "?")[:34]
+        if not quote:
+            missing.append(title)
+        elif "sponsor" not in quote.lower():
+            unsupported.append(title)
+
+    out = []
+    if missing:
+        out.append(
+            f"{len(missing)} jobs carry a sponsorship verdict with no evidence quote: "
+            f"{', '.join(missing[:3])}. analyzer.classify_sponsorship must return the "
+            f"sentence it matched, or the flag is an inference."
+        )
+    if unsupported:
+        out.append(
+            f"{len(unsupported)} sponsorship quotes do not contain the word they were "
+            f"matched on: {', '.join(unsupported[:3])}. The quote is clipping away the "
+            f"match — see analyzer._sentence_around."
+        )
+    return out
+
+
+def check_action_tier_respects_its_gates(config: dict) -> list[str]:
+    """The tier is a rule table, so its rules must hold on the stored data.
+
+    Two of them are worth asserting against the live DB rather than only in
+    tests, because the failure is silent: a tier is a small integer that always
+    looks plausible, and it is the field a human would sort by.
+
+      * A FILTERED posting has no documents and therefore no review. It can only
+        be watched (4) or ignored (5). A filtered job at tier 1-3 means something
+        wrote a tier without the filter reason in hand.
+      * strategic_value is renormalised over whichever terms had data, so 1.00
+        off one term and 1.00 off four are different claims. Tier 1 must never
+        rest on the first kind — that is what strategic_coverage is for, and a
+        tier 1 below the floor means the gate was bypassed.
+
+    Postings scored before the strategy layer existed carry no action_tier and
+    are skipped: this checks claims, not coverage.
+    """
+    if not ANALYZED.exists():
+        return []
+    try:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - a broken DB is another check's problem
+        return [f"could not read {ANALYZED.name}: {type(e).__name__}: {e}"]
+
+    from strategy import _COVERAGE_MIN as floor
+    acted_on_a_filtered_job, thin_tier_one, out_of_range = [], [], []
+    for j in jobs:
+        match = j.get("match") or {}
+        tier = match.get("action_tier")
+        if tier is None:
+            continue
+        title = (j.get("title") or "?")[:34]
+        if j.get("_filter_reason") and tier < 4:
+            acted_on_a_filtered_job.append(f"{title} (tier {tier})")
+        coverage = match.get("strategic_coverage")
+        if tier == 1 and isinstance(coverage, (int, float)) and coverage < floor:
+            thin_tier_one.append(f"{title} (coverage {coverage})")
+        value = match.get("strategic_value")
+        if isinstance(value, (int, float)) and not (0.0 <= value <= 1.0):
+            out_of_range.append(f"{title} ({value})")
+
+    out = []
+    if acted_on_a_filtered_job:
+        out.append(
+            f"{len(acted_on_a_filtered_job)} filtered postings carry an action tier "
+            f"below 4: {', '.join(acted_on_a_filtered_job[:3])}. A filtered job has no "
+            f"documents and no review — strategy.action_tier must see _filter_reason."
+        )
+    if thin_tier_one:
+        out.append(
+            f"{len(thin_tier_one)} tier-1 postings rest on a strategic_value below the "
+            f"coverage floor of {floor}: {', '.join(thin_tier_one[:3])}. A value "
+            f"renormalised over one term is not comparable to one over four."
+        )
+    if out_of_range:
+        out.append(
+            f"{len(out_of_range)} strategic_value scores are outside 0-1: "
+            f"{', '.join(out_of_range[:3])}."
+        )
+    return out
+
+
 CHECKS = (
     check_one_document_renderer,
     check_pdf_identity_ignores_stamped_properties,
@@ -782,6 +899,8 @@ CHECKS = (
     check_floor_below_selection_cutoff,
     check_stored_weights_match_config,
     check_irrelevant_titles_excluded,
+    check_sponsorship_claims_carry_evidence,
+    check_action_tier_respects_its_gates,
     check_unscoreable_excluded,
     check_one_entry_per_document_path,
     check_composite_still_discriminates,

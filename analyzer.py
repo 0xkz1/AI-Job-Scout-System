@@ -427,6 +427,208 @@ def classify_employment_type(text: str) -> list[str]:
     return found if found else ["unknown"]
 
 
+# --- Contract shape ---
+
+# employment_types already answers "is this a contract". What it cannot answer is
+# WHEN THE CONTRACT ENDS, and that is the question the YMS clock makes load-bearing:
+# a 12-month FTC starting now finishes inside the visa, the same FTC starting in
+# 2027 does not. See config.yaml `yms_expiry`.
+#
+# MEASURED 2026-08-29 over 5202 postings: 203 (3.9%) state a length in a form a
+# regex can reach. That is the whole population — most contract postings never say
+# how long they are. So this field is null far more often than not, by the market's
+# choice and not by a gap in the pattern. Do not "fix" the low hit rate by widening
+# the proximity window; every number of months in a job description belongs to
+# something, and mostly not to the contract.
+_DURATION_UNITS = r"(?P<n>\d{1,2})\s*[-\s]?(?P<unit>month|year)s?"
+# What marks a duration as the CONTRACT's duration rather than any other span of
+# months in the prose.
+_CONTRACT_WORD = (r"(?:contract|ftc|fixed[-\s]?term|secondment|maternity cover|"
+                  r"paternity cover|interim|temporary)")
+# Months that belong to something else. Without these, "after 6 months you move
+# onto a permanent contract" reads as a six-month contract and "12 months of
+# commercial experience" reads as a twelve-month one. Bare "permanent" is
+# deliberately NOT here: "12 month FTC with a view to permanent" is a real and
+# common shape, and its twelve months are real.
+_NOT_A_DURATION = re.compile(
+    r"probation|notice period|experience|of service|guarantee|warranty|rolling"
+    r"|salary review|first \d|after \d|within \d|every \d|past \d|last \d",
+    re.IGNORECASE,
+)
+_DURATION_RX = (
+    re.compile(rf"\b{_DURATION_UNITS}\b[^.\n]{{0,30}}?\b{_CONTRACT_WORD}\b", re.IGNORECASE),
+    re.compile(rf"\b{_CONTRACT_WORD}\b[^.\n]{{0,30}}?\b{_DURATION_UNITS}\b", re.IGNORECASE),
+)
+
+
+def contract_duration_months(title: str, description: str) -> int | None:
+    """Length of a fixed-length engagement in months, or None when unstated.
+
+    Title before description, because a posting that knows its length puts it
+    there — "Lead UX Designer (12 Month FTC)", "Marketing Designer / Art Director
+    (1 year FTC)" — and a title match cannot be confused with a probation period
+    or a benefits sentence. Years are converted rather than stored separately: one
+    unit downstream, and "1 year contract" and "12 month contract" are the same
+    posting written twice.
+    """
+    for text in (title or "", description or ""):
+        for rx in _DURATION_RX:
+            for m in rx.finditer(text):
+                window = text[max(0, m.start() - 25):m.end() + 25]
+                if _NOT_A_DURATION.search(window):
+                    continue
+                months = int(m.group("n")) * (12 if m.group("unit").lower() == "year" else 1)
+                if 1 <= months <= 36:
+                    return months
+    return None
+
+
+# Ordered: the more specific reading wins. A posting naming IR35 or a day rate is
+# describing contractor work whatever else it also says, and "fixed term" is a
+# stronger statement than "temporary".
+#
+# Bare "contract" is deliberately absent. UK postings use the word for both a
+# fixed-term employee and a day-rate contractor, so mapping it either way would be
+# inventing a fact — and employment_types already records that the word appeared.
+# `unknown` here means "the posting did not say which", which is true of most of
+# the 889 contract-tagged postings in the corpus.
+#
+# Two words were tried here and removed after measurement on the live corpus,
+# because each fired mostly on prose that had nothing to do with the engagement:
+#
+#   "contractor"  — 3 of 7 sampled hits were "engineering contractor" (a company),
+#                   "Maintenance Contractor" (a user persona in a UX brief) and
+#                   "contractor design elements" (a scope of works).
+#   "seasonal"    — "seasonal campaigns", "seasonal direction" in marketing and
+#                   packaging briefs. Not one sampled hit was a seasonal job.
+#
+# "temporary" survives only next to a word naming the engagement, for the same
+# reason: bare "temporary" matched recruiter boilerplate ("supply of temporary
+# workers", present in every posting from some agencies) and the civil-engineering
+# discipline "temporary works design".
+_KIND_PATTERNS = (
+    ("freelance", re.compile(r"\bfreelance\b|\bself[-\s]?employed\b"
+                             r"|\b(?:in|out)side ir35\b|\bday rate\b", re.IGNORECASE)),
+    ("ftc", re.compile(r"\bfixed[-\s]?term\b|\bftc\b|\bsecondment\b"
+                       r"|\b(?:mater|pater)nity cover\b|\binterim\b", re.IGNORECASE)),
+    ("temp", re.compile(r"\btemporary\s+(?:contract|role|position|assignment|basis"
+                        r"|post|vacancy|cover|work)\b|\bon a temporary\b"
+                        r"|\btemp (?:role|contract)\b", re.IGNORECASE)),
+    ("permanent", re.compile(r"\bpermanent\b|\bperm role\b", re.IGNORECASE)),
+)
+
+
+def classify_contract_kind(title: str, description: str) -> str:
+    """permanent | ftc | freelance | temp | unknown — how the engagement is shaped.
+
+    Title first for the same reason contract_duration_months reads it first: a
+    marker in the title is the posting stating its own shape, while a marker in
+    the body may belong to a sentence about something else.
+    """
+    for text in (title or "", description or ""):
+        for kind, rx in _KIND_PATTERNS:
+            if rx.search(text):
+                return kind
+    return "unknown"
+
+
+# --- Sponsorship ---
+
+# EVIDENCE ONLY. This records what a posting SAYS about sponsorship and nothing
+# else. It never infers: not from the salary, not from the company being a
+# licensed sponsor, not from the occupation. There is no sponsorship score and
+# there must not be one — measured 2026-08-29, only 4.0% of 5202 postings mention
+# sponsorship at all (1.7% offer, 1.6% refuse), so any score over this base would
+# be a number computed from silence.
+#
+# `refused` is NOT a filter. The candidate holds a YMS visa with the right to work
+# in the UK until 2027-10-09, so a posting that will not sponsor is still a job
+# that can be taken today — dropping those 83 postings would delete applicable
+# work. The flag exists to tell a role that can outlive the visa from one that
+# cannot, which is a ranking question, not an eligibility one.
+_SPONSOR_REFUSED = re.compile(
+    r"\b(?:unable|not able|cannot|can not|can't|do(?:es)? not|will not|won't|"
+    r"no longer able|not in a position)\b[^.\n]{0,30}?\bsponsor"
+    r"|\bno\s+(?:visa\s+)?sponsorship\b"
+    r"|\bwithout\s+(?:visa\s+)?sponsorship\b"
+    r"|\bsponsorship\s+(?:is\s+)?not\s+(?:available|offered|provided|possible)\b",
+    re.IGNORECASE,
+)
+# Two alternatives were tried here and removed, both for the failure the brief
+# named in advance — concluding sponsorship from something that is not an offer:
+#
+#   "licensed sponsor"        matched "Whilst the University is a licensed sponsor,
+#                             under UKVI not all roles qualify" — a refusal.
+#   "skilled worker ... spon" matched "this vacancy does not currently meet the
+#                             minimum salary threshold for Skilled Worker" — also
+#                             a refusal.
+#
+# Being a licensed sponsor is a fact about the employer, not about this job. What
+# survives below is only wording in which the employer says it will sponsor.
+_SPONSOR_OFFERED = re.compile(
+    r"\b(?:visa\s+)?sponsorship\s+(?:is\s+)?(?:available|offered|provided|possible)\b"
+    r"|\bwe\s+(?:can|will|do|are happy to|are able to)\s+sponsor\b"
+    r"|\b(?:offer|provide|support)\s+(?:visa\s+)?sponsorship\b"
+    r"|\b(?:happy|able|willing|prepared)\s+to\s+sponsor\b",
+    re.IGNORECASE,
+)
+# Belt and braces over the refusal-first ordering. "we cannot currently offer visa
+# sponsorship" reaches _SPONSOR_OFFERED's third alternative on the words "offer
+# visa sponsorship", so an offered hit is dropped when the run-up to it negates.
+_NEGATOR_NEAR = re.compile(
+    r"\b(?:not|no|nor|cannot|can not|can't|unable|won't|will not|without|don't"
+    r"|do not|doesn't|does not|unfortunately|neither)\b",
+    re.IGNORECASE,
+)
+# Postings are pasted from Word and arrive with curly quotes and en dashes, so
+# "can't" and "can\u2019t" are different strings to a regex. One posting was read as
+# OFFERING sponsorship because "we can\u2019t offer visa sponsorship" missed every
+# refusal pattern and then matched an offer one.
+_PUNCT_FOLD = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
+                             "\u2013": "-", "\u2014": "-", "\u00a0": " "})
+
+
+def _sentence_around(text: str, start: int, end: int, limit: int = 240) -> str:
+    """The sentence a match sits in, verbatim from the original text.
+
+    Verbatim matters: this string is the whole justification for the flag, and an
+    invariant requires it to be present. A paraphrase would let the flag drift
+    away from what the posting actually said.
+    """
+    left = max(text.rfind(".", 0, start), text.rfind("\n", 0, start),
+               text.rfind("•", 0, start)) + 1
+    ends = [i for i in (text.find(".", end), text.find("\n", end)) if i != -1]
+    right = (min(ends) + 1) if ends else len(text)
+    if right - left > limit:
+        # Keep the matched phrase in view. Truncating from the left of a long
+        # bullet-less paragraph produced quotes that stopped before the words
+        # they are evidence FOR — "Produce electrical building services designs
+        # across RIBA Stages 1-7" was filed as the proof of a sponsorship
+        # refusal, because the refusal was 300 characters further on.
+        pad = max(0, (limit - (end - start)) // 2)
+        left, right = max(left, start - pad), min(right, end + pad)
+    return " ".join(text[left:right].split())[:limit]
+
+
+def classify_sponsorship(title: str, description: str) -> tuple[str, str | None]:
+    """(state, verbatim evidence) where state is offered | refused | silent.
+
+    Refusal is tested first and wins. A posting containing both readings ("we
+    sponsor for senior roles; we cannot sponsor for this one") is a refusal for
+    the job being advertised, and reading it the other way would be the expensive
+    error of the two.
+    """
+    text = f"{title or ''}\n{description or ''}".translate(_PUNCT_FOLD)
+    m = _SPONSOR_REFUSED.search(text)
+    if m:
+        return "refused", _sentence_around(text, m.start(), m.end())
+    for m in _SPONSOR_OFFERED.finditer(text):
+        if _NEGATOR_NEAR.search(text[max(0, m.start() - 60):m.start()]):
+            continue
+        return "offered", _sentence_around(text, m.start(), m.end())
+    return "silent", None
+
+
 # --- Work style ---
 
 # The Japanese terms are read in the same pass, because a posting written in
@@ -993,6 +1195,8 @@ def analyze_job(job: dict, skip_llm: bool = False) -> dict:
             if work_style == "onsite" and not _ONSITE_EVIDENCE.search(description or ""):
                 work_style = "unknown"
 
+    sponsorship_state, sponsorship_quote = classify_sponsorship(title, description)
+
     # Recorded, not acted on — see the note in classify_experience_level.
     # (years, is_ceiling) or None; is_ceiling means the posting caps experience
     # rather than requiring it, which only a junior posting does.
@@ -1005,6 +1209,15 @@ def analyze_job(job: dict, skip_llm: bool = False) -> dict:
             "required_years": stated_years[0] if stated_years else None,
             "required_years_is_ceiling": bool(stated_years[1]) if stated_years else None,
             "employment_types": classify_employment_type(combined_text),
+            # How the engagement is shaped and when it ends. Both are regex over
+            # text already in hand, so they run in the CHEAP pass and are
+            # available to the filter before any LLM call is paid for.
+            "contract_kind": classify_contract_kind(title, description),
+            "contract_months": contract_duration_months(title, description),
+            # Evidence, never inference. See classify_sponsorship: `refused` does
+            # not filter anything, because a YMS holder can take the job today.
+            "sponsorship": sponsorship_state,
+            "sponsorship_evidence": sponsorship_quote,
             "work_style": work_style,
             "salary": salary_info,
             "skills": skills,

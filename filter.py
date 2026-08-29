@@ -40,6 +40,26 @@ def _annualise(amount: float, period: str | None) -> float | None:
     return amount if amount >= _MIN_PLAUSIBLE_ANNUAL else None
 
 
+def _exception_spans(title_lower: str, exceptions: list[str]) -> list[tuple[int, int]]:
+    """Character ranges in the title covered by an `exclude_title_exceptions` phrase.
+
+    Spans rather than a whole-title allowlist, because the exception has to be
+    surgical: "Senior Art Director" contains "art director" and must still be
+    excluded on `senior`. Only the `director` hit is inside the phrase.
+    """
+    spans: list[tuple[int, int]] = []
+    for phrase in exceptions or []:
+        p = (phrase or "").lower().strip()
+        if not p:
+            continue
+        spans += [m.span() for m in re.finditer(r'\b' + re.escape(p) + r'\b', title_lower)]
+    return spans
+
+
+def _within_any(span: tuple[int, int], spans: list[tuple[int, int]]) -> bool:
+    return any(start <= span[0] and span[1] <= end for start, end in spans)
+
+
 def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
     """
     Check if a job passes all configured filters.
@@ -56,10 +76,21 @@ def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
     # "seniority" or description text like "cooperate with senior engineers".
     exclude_titles = config.get("exclude_title_keywords", [])
     title_lower = title.lower()
+    exempt = _exception_spans(title_lower, config.get("exclude_title_exceptions", []))
     for kw in exclude_titles:
         kw_lower = kw.lower().strip()
-        if kw_lower and re.search(r'\b' + re.escape(kw_lower) + r'\b', title_lower):
-            return False, f"title contains excluded keyword '{kw}'"
+        if not kw_lower:
+            continue
+        hits = list(re.finditer(r'\b' + re.escape(kw_lower) + r'\b', title_lower))
+        if not hits:
+            continue
+        # A hit lying wholly inside an exception phrase is that phrase, not the
+        # word the exclusion is aimed at. Every hit has to be exempt for the term
+        # to be let through, so "Senior Art Director" still fails on `senior`
+        # while "Junior Art Director" passes.
+        if all(_within_any(h.span(), exempt) for h in hits):
+            continue
+        return False, f"title contains excluded keyword '{kw}'"
 
     # --- Exclude by description keywords (word-boundary match) ---
     exclude_desc = config.get("exclude_description_keywords", [])
