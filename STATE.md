@@ -84,7 +84,41 @@ Telegram wording — had never executed.
 
 ## High Priority (loops waiting on a human)
 
-- **Nothing.** Both loops are scheduled, both ran, both behaved.
+- **The action tiers have no outcome data to be calibrated against, and none is
+  being collected.** `record_outcome.py` exists and `10_output/_outcomes.json`
+  does not — zero applications have had their result recorded. Until that file
+  starts filling, `strategy._TIER1` / `_TIER2` / `_MONITOR_MIN` /
+  `_OPPORTUNISTIC_MIN` stay a starting rule table and can never become a
+  measurement. Nothing in the loop can fix this: it needs a human to record what
+  happened after applying. Cheapest useful version is a single line per
+  application — applied / screened / interviewed / rejected / offered.
+
+## Deferred by decision
+
+Recorded so they are not silently re-proposed. Each has its measurement written
+down; see `EXPANSION_2026-08-29.md` for the numbers.
+
+- **`app.py` does not surface the strategy layer.** Zero hits for `action_tier`
+  or `strategic_value` in the Streamlit UI. Not urgent — the eleven new fields
+  are in the match-report frontmatter, so Obsidian and Dataview already have
+  them, which is where these get read. Worth doing only if the UI becomes the
+  place decisions are made.
+- **QA Analyst stays on a sample of three.** It measures like the two keywords
+  dropped on 2026-08-30 (24 past the filter, 3 reviewed, mean 53.3, none at
+  >=75) and was kept anyway: it is the most written-first job on the list, which
+  is the candidate's stated constraint, and three reviews is not a measurement.
+  Revisit when it has a real sample — not before, and not on the same evidence.
+- **The keyword budget now has 8 spare pairs (36 of 44).** Do not fill them by
+  guessing. "Graphic Designer" is the obvious candidate and the wrong one: it
+  already produces more submission-ready documents than any searched term (125
+  reviewed, 33 at >=75) on zero pairs, arriving as by-catch of `Designer`.
+  Anything added here needs a measured reason, the way the two removals had one.
+- **Level Fit on `required_years` is dead.** r = -0.068 against the review score
+  over 278 postings; the years a posting asks for do not predict how it reviews.
+  The field stays as evidence. Do not re-propose the dimension.
+- **No immigration score, ever.** Only 4.0% of postings mention sponsorship at
+  all. The flag records evidence with a verbatim quote and an invariant enforces
+  it; a score over that base would be computed from silence.
 
 ## Watch List
 
@@ -158,6 +192,13 @@ Telegram wording — had never executed.
   per-job directories. Any script globbing `*_match.md` reports 0 and always has.
 
 ## Recently closed
+
+- **The strategy layer had never run in production** → 2026-08-30. The nightly
+  completed with it: 24 postings scraped, all 24 carrying every new field
+  (`contract_kind`, `contract_months`, `sponsorship`, `remote_scope`,
+  `runway_fit`, `strategic_value`, `action_tier`), and 5247 of 5254 match
+  reports regenerated with the new frontmatter. The seven without it are
+  Syncthing conflict files and `Untitled.md`. No new invariant violations.
 
 - **Delivery path unverified** → 2026-08-14. `telegram:5766380505,local` resolves
   to chat "KZ"; `last_delivery_error` is `None` on successful runs.
