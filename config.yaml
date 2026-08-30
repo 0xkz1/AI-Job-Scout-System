@@ -107,17 +107,34 @@ include_levels:
 # Best performers, for reference: Creative Technologist 66.7%, Technical Artist
 # 42.9%, Digital Designer 40%, Web Designer 40%, Remote 37.9%, Edinburgh 33.3%.
 #
-# The six "bridge" terms below were added 2026-08-07. They target the roles that sit
-# between the creative-technologist target and unrelated work — jobs that pay now
-# without breaking the story. Each has its own CV profile, cover letter and outreach
+# Six "bridge" terms were added 2026-08-07, targeting the roles that sit between
+# the creative-technologist target and unrelated work — jobs that pay now without
+# breaking the story. Each has its own CV profile, cover letter and outreach
 # template, so a hit routes to a document set written for it.
 #
-# Ordered by how much English-language, synchronous client contact the job carries,
-# which is the candidate's stated constraint: QA Analyst and Research Software
-# Engineer are written-first work, Technical Support is written-first only where the
-# channel is tickets rather than phone, and Implementation Consultant / Solutions
-# Engineer / Digital Producer are meeting-heavy. All six are searched; the ranking
-# matters when choosing which results to act on, not which to collect.
+# TWO OF THE SIX WERE DROPPED 2026-08-30, measured on the CV review score — the
+# only signal here a human has checked. Per keyword, over 5148 postings, counting
+# what actually reached a review:
+#
+#   Implementation Consultant   128 past the filter,  8 reviewed, mean 48.4, 0 at >=75
+#   Digital Producer             14 past the filter,  1 reviewed,            0 at >=75
+#
+# Between them they held 6 of the 42 search pairs and had produced no
+# submission-ready document in the life of the database. Removed. Note this also
+# takes them out of filter_jobs_by_keywords, so a posting that matched ONLY on
+# those phrases is now dropped at scrape time — which is the point.
+#
+# QA Analyst measures similarly (24 past the filter, 3 reviewed, mean 53.3, 0 at
+# >=75) and is DELIBERATELY KEPT. It is the most written-first job on the list,
+# which is the candidate's stated constraint, and three reviews is not a
+# measurement. Revisit it once it has a real sample, not before.
+#
+# The three that stay besides QA Analyst have each produced documents at 75+:
+# Solutions Engineer (42 reviewed, 4 at >=75), Technical Support (25, 6) and
+# Research Software Engineer (5, 2). Ordered by how much English-language,
+# synchronous client contact the job carries: QA Analyst and Research Software
+# Engineer are written-first work, Technical Support is written-first only where
+# the channel is tickets rather than phone, Solutions Engineer is meeting-heavy.
 #
 # Multi-word phrases, never bare "Implementation" or "Support": scraped jobs pass
 # through filter_jobs_by_keywords, which keeps a job when ANY keyword appears in the
@@ -130,13 +147,11 @@ keywords:
 - Web Designer
 - Digital Designer
 - Designer
-- Implementation Consultant
 - Solutions Engineer
 - Technical Support
 - QA Analyst
-- Digital Producer
 - Research Software Engineer
-# Manchester dropped 2026-08-07 to pay for the two keywords above. It is the weakest
+# Manchester dropped 2026-08-07 to pay for two keywords since removed (see above). It is the weakest
 # location on the list for this candidate: Edinburgh-based, needs work now, and a
 # Manchester post is neither commutable nor a better relocation than London — which
 # stays, as the one non-Scottish market big enough to be worth the searches.
@@ -176,11 +191,9 @@ keyword_locations:
   Web Developer: [Edinburgh, Glasgow, London, Remote]
   Designer: [Edinburgh, Glasgow, Remote]
   Web Designer: [Edinburgh, Glasgow, Remote]
-  Implementation Consultant: [Edinburgh, Glasgow, Remote]
   Solutions Engineer: [Edinburgh, Glasgow, Remote]
   Technical Support: [Edinburgh, Glasgow, Remote]
   QA Analyst: [Edinburgh, Glasgow, Remote]
-  Digital Producer: [Edinburgh, Glasgow, Remote]
   Research Software Engineer: [Edinburgh, Glasgow, Remote]
 
 # Locations only ONE site can search, appended to every keyword's location list
@@ -228,11 +241,9 @@ keyword_aliases:
   Web Designer: [Webデザイナー, ウェブデザイナー]
   Digital Designer: [デジタルデザイナー]
   Designer: [デザイナー]
-  Implementation Consultant: [導入コンサルタント, 導入支援]
   Solutions Engineer: [ソリューションエンジニア, ソリューションズエンジニア, セールスエンジニア]
   Technical Support: [テクニカルサポート, サポートエンジニア, ITサポート]
   QA Analyst: [QAエンジニア, 品質保証, テストエンジニア]
-  Digital Producer: [デジタルプロデューサー, Webプロデューサー, プロデューサー]
   Research Software Engineer: [リサーチエンジニア, 研究開発エンジニア]
 max_pages_per_search: 3
 
