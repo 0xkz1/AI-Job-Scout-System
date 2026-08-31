@@ -28,16 +28,25 @@ WHY EACH SITE IS CHECKED THE WAY IT IS (measured 2026-08-31, not assumed)
   arbeitnow  410 for a removed posting, 200 for a live one.
   remotive   same.
 
-  guardian   NOT CHECKED. Every job page — live ones included — server-renders
-             <p id="message">This job has expired</p> in the header. Both a
-             posting scraped in July and one scraped last week carry it
-             byte-identically, so the phrase proves nothing, and the id space is
-             loose enough that a made-up id returned a different real job. 41
-             reports; left for a human rather than guessed at.
-  indeed     NOT CHECKED. uk.indeed.com answers 401 "Authenticating..." to any
-             request without a browser fingerprint, and the interstitial looks
-             the same whether the job behind it is open or gone. Reading that as
-             evidence would expire 612 reports at once, most of them wrongly.
+  guardian   a closed posting carries <p id="message">This job has expired</p>;
+             a live one has no #message element at all. Match the ELEMENT, not
+             the phrase: the first two Guardian postings drawn from this database
+             both carried the banner, which made it look unconditional — until a
+             posting taken off the site's own live listing turned out to have no
+             #message element at all. Two expired samples are not a control group.
+
+  indeed     NOT CHECKED, and not for want of trying. uk.indeed.com answers 401
+             "Authenticating..." to a plain request, 403 "Security Check" to the
+             /m/ mobile path, and the same Cloudflare "Additional Verification
+             Required" page to a headless browser with stealth applied and
+             cookies/indeed_cookies.json loaded — asked for a known-dead jk and a
+             live one, which came back indistinguishable. scraper_indeed reached
+             the same conclusion from the other side: its
+             _fill_descriptions_from_pane note records /viewjob as blocked
+             outright and unfixable, which is why it reads descriptions off the
+             search listing instead. There is no per-posting page to ask, so the
+             612 indeed reports stay a manual job — --list-manual puts them in a
+             worth-checking order instead of leaving them a pile.
 
 Sources with no rule are reported as `unsupported` and never touched.
 
@@ -77,11 +86,17 @@ GONE, LIVE, BLOCKED, UNSUPPORTED = "gone", "live", "blocked", "unsupported"
 
 # The sources check_url has a measured rule for. Everything else is skipped
 # before it costs a slot in --limit: a run capped at 200 that spent 14 of them
-# printing "no rule for guardian" is 14 postings that went unchecked.
-SUPPORTED_SOURCES = ("linkedin", "reed", "adzuna", "arbeitnow", "remotive")
+# printing "no rule for indeed" is 14 postings that went unchecked.
+SUPPORTED_SOURCES = ("linkedin", "reed", "adzuna", "arbeitnow", "remotive",
+                     "guardian")
 
 LINKEDIN_JOB = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 LINKEDIN_CLOSED = "no longer accepting applications"
+# The Guardian renders its closed-posting notice into this element, and omits
+# the element entirely while a posting is open. Anchored to the element rather
+# than to the words for the reason in the docstring.
+GUARDIAN_BANNER = re.compile(r'<p[^>]*id="message"[^>]*>(.*?)</p>',
+                             re.DOTALL | re.IGNORECASE)
 
 # Seconds between requests to one site. LinkedIn answers a steady trickle
 # indefinitely and 429s a burst; adzuna is the opposite — it tolerates a short
@@ -89,7 +104,7 @@ LINKEDIN_CLOSED = "no longer accepting applications"
 # the turn at roughly a dozen detail pages, so its pace is deliberately slower
 # than anything else here.
 DELAYS = {"linkedin": 2.0, "reed": 1.5, "adzuna": 4.0,
-          "arbeitnow": 1.5, "remotive": 1.5}
+          "arbeitnow": 1.5, "remotive": 1.5, "theguardian": 1.5}
 # Consecutive blocks after which a site is left alone for a later run. Pushing
 # past this does not recover the postings, it just deepens the ban for the next
 # attempt.
@@ -153,6 +168,7 @@ def read_reports(match_dir: Path | None = None) -> list[dict]:
             "score": score,
             "expired": _flag(fm, "expired"),
             "applied": _flag(fm, "applied"),
+            "saved_at": _field(fm, "saved_at"),
         })
     return out
 
@@ -178,6 +194,21 @@ def tick_expired(path: Path, dry_run: bool = False) -> bool:
 # --------------------------------------------------------------------------
 # Asking the sites
 # --------------------------------------------------------------------------
+
+def clickable(url: str, source: str) -> str:
+    """The URL a human should be handed for this posting.
+
+    Indeed's stored /rc/clk links are 300 characters of tracking around one `jk`,
+    and this list exists to be clicked. Cloudflare lets a real browser through
+    where it refuses this script, so the plain /viewjob form is the useful one.
+    """
+    if (source or "").lower() == "indeed":
+        jk = re.search(r"[?&]jk=([a-f0-9]+)", url or "")
+        if jk:
+            host = urlsplit(url).netloc or "uk.indeed.com"
+            return f"https://{host}/viewjob?jk={jk.group(1)}"
+    return url
+
 
 def _title_and_h1(html: str) -> str:
     def one(pattern):
@@ -231,6 +262,24 @@ def check_url(url: str, source: str, fetch) -> tuple[str, str]:
         # 403 and the "suspicious behaviour" body are what adzuna serves once it
         # decides a client is scraping; 400 is what the token-bound land/ad link
         # answers whether or not the ad is live. Neither is evidence.
+        return BLOCKED, f"HTTP {status}"
+
+    if source == "guardian":
+        status, html = fetch(url)
+        if status == 200:
+            banner = GUARDIAN_BANNER.search(html or "")
+            text = re.sub(r"\s+", " ",
+                          re.sub(r"<[^>]+>", " ", banner.group(1))).strip() if banner else ""
+            if "expired" in text.lower():
+                return GONE, text
+            if banner:
+                # A banner saying something this code has not been shown is not
+                # evidence of anything. Reading it as expiry would hand the site
+                # the ability to close every Guardian posting at once.
+                return BLOCKED, f"unrecognised banner: {text[:80]}"
+            return LIVE, _title_and_h1(html)
+        if status == 404:
+            return GONE, "HTTP 404"
         return BLOCKED, f"HTTP {status}"
 
     if source in ("arbeitnow", "remotive"):
@@ -334,9 +383,30 @@ def main() -> int:
                     help="ignore every cached verdict")
     ap.add_argument("--dry-run", action="store_true",
                     help="fetch and decide, but write nothing")
+    ap.add_argument("--list-manual", action="store_true",
+                    help="list the open reports no rule can reach, worth-checking "
+                         "order, and fetch nothing")
     args = ap.parse_args()
 
     reports = read_reports()
+
+    if args.list_manual:
+        # indeed cannot be asked, so its 612 reports would otherwise be a pile to
+        # work through in file order. Ranked by score, they are a queue: the ones
+        # worth an application are the ones worth knowing are still open.
+        manual = [r for r in reports
+                  if not r["expired"] and not r["applied"] and r["url"]
+                  and r["source"].lower() not in SUPPORTED_SOURCES]
+        manual.sort(key=lambda r: (-r["score"], r["saved_at"]))
+        if args.limit:
+            manual = manual[:args.limit]
+        for r in manual:
+            print(f"{r['score']:.2f}  {r['saved_at'] or '?':10}  {r['source'] or '?':9}  "
+                  f"{r['path'].name[:-3]}\n        {clickable(r['url'], r['source'])}")
+        print(f"\n{len(manual)} report(s) — no automated rule reaches these; "
+              f"tick `expired` by hand in the report and this run will skip it.")
+        return 0
+
     state = {} if args.recheck else load_state()
     already_gone = removed_urls()
 

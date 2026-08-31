@@ -32,25 +32,63 @@ def fetcher(status, html=""):
 
 # --- the traps: pages that read as closed and are not ----------------------
 
-def test_the_guardian_is_not_guessed_at():
-    """Every Guardian job page server-renders "This job has expired" in its
-    header, live ones included — a posting scraped in July and one scraped last
-    week carry it byte-identically. Reading the phrase would expire all 41."""
-    fetch = fetcher(200, "<p id='message'>This job has expired</p><h1>ML Engineer</h1>")
-    verdict, _ = ce.check_url("https://jobs.theguardian.com/job/10146129/ml-engineer/",
-                              "guardian", fetch)
+def test_a_source_with_no_rule_costs_no_request():
+    fetch = fetcher(200, "<h1>Something</h1>")
+    verdict, _ = ce.check_url("https://example.test/job/1", "somewhere-new", fetch)
     assert verdict == ce.UNSUPPORTED
-    assert fetch.calls == [], "a source with no rule should not cost a request"
+    assert fetch.calls == []
+
+
+def test_the_guardian_banner_is_matched_as_an_element_not_a_phrase():
+    """A live Guardian posting has no #message element at all; a closed one
+    carries the banner. The first two postings drawn from this database both had
+    it, which made the banner look unconditional until one taken off the site's
+    own live listing turned out to have none — so the element is the signal, and
+    a banner this code has not been shown is not evidence of anything."""
+    gone, evidence = ce.check_url("https://jobs.theguardian.com/job/10146129/ml-engineer/",
+                                  "guardian",
+                                  fetcher(200, '<p id="message" class="mds-message">'
+                                               'This job has expired</p><h1>ML Engineer</h1>'))
+    assert gone == ce.GONE and evidence == "This job has expired"
+
+    live, _ = ce.check_url("https://jobs.theguardian.com/job/10169290/quality-manager/",
+                           "guardian", fetcher(200, "<h1>Quality Manager</h1>"))
+    assert live == ce.LIVE
+
+    other, _ = ce.check_url("https://jobs.theguardian.com/job/1/x/", "guardian",
+                            fetcher(200, '<p id="message">Applications are paused</p>'))
+    assert other == ce.BLOCKED
+
+
+def test_the_guardian_phrase_outside_the_banner_decides_nothing():
+    verdict, _ = ce.check_url(
+        "https://jobs.theguardian.com/job/1/x/", "guardian",
+        fetcher(200, "<h1>Designer</h1><p>Tell us why this job has expired</p>"))
+    assert verdict == ce.LIVE
 
 
 def test_indeed_is_not_guessed_at():
-    """uk.indeed.com answers 401 "Authenticating..." to anything without a
-    browser fingerprint, and that page is identical whether the job behind it is
-    open or gone."""
+    """uk.indeed.com answers 401 "Authenticating..." to a plain request, 403 to
+    the /m/ path, and Cloudflare's "Additional Verification Required" to a
+    headless browser with stealth and the saved cookies — the same page for a
+    known-dead jk as for a live one. There is no per-posting page to ask."""
     fetch = fetcher(401, "Authenticating...")
     verdict, _ = ce.check_url("https://uk.indeed.com/viewjob?jk=f7a7fdfc9b3ff2bd",
                               "indeed", fetch)
     assert verdict == ce.UNSUPPORTED
+    assert fetch.calls == [], "a blocked site should not be asked at all"
+    assert "indeed" not in ce.SUPPORTED_SOURCES
+
+
+def test_an_indeed_link_is_handed_over_in_a_form_a_human_can_open():
+    """The stored /rc/clk link is 300 characters of tracking around one jk, and
+    the manual list exists to be clicked. Cloudflare lets a real browser
+    through where it refuses this script."""
+    got = ce.clickable(
+        "https://uk.indeed.com/rc/clk?jk=13edc870860bed60&bb=xx&xkcb=yy&vjs=3", "indeed")
+    assert got == "https://uk.indeed.com/viewjob?jk=13edc870860bed60"
+    same = "https://www.reed.co.uk/jobs/x/1"
+    assert ce.clickable(same, "reed") == same
 
 
 def test_an_adzuna_land_link_is_not_evidence():
@@ -209,8 +247,11 @@ def test_a_source_with_no_rule_does_not_use_up_the_run(tmp_path, monkeypatch, ca
     (tmp_path / "db.json").write_text("[]", encoding="utf-8")
     (tmp_path / "G.md").write_text(
         REPORT.replace('url: "https://www.reed.co.uk/jobs/x/1"',
-                       'source: "guardian"\nurl: "https://jobs.theguardian.com/job/1/x/"'),
+                       'source: "indeed"\nurl: "https://uk.indeed.com/viewjob?jk=abc123"'),
         encoding="utf-8")
+    # nothing here may reach the network: the point is that it never gets that far
+    monkeypatch.setattr(ce, "make_fetch",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetched")))
     monkeypatch.setattr(sys, "argv", ["check_expired.py", "--dry-run"])
     assert ce.main() == 0
     out = capsys.readouterr().out
