@@ -27,23 +27,26 @@ import gen_version
 CV_DIR = Path(__file__).resolve().parent / "10_output" / "10_cvs"
 MATCH_DIR = Path(__file__).resolve().parent / "10_output" / "00_matches"
 
-# Category lines whose text changed. Keyed by the CV's category heading, which
-# is stable — only the skill list under it moves.
-TRACKED_CATEGORIES = [
-    "Frontend & Product Engineering",
-    "Design & Visual Production",
-]
-
-
 def current_lines() -> dict[str, str]:
-    """The live skill line for each tracked category, read from the master."""
+    """The live skill line for every category, read from the master.
+
+    The categories used to be a hardcoded list of the two that had changed,
+    which is the second source of truth this file's own docstring warns about —
+    and it went stale exactly as predicted: "REST API integration (Postman),
+    n8n workflow automation" was dropped from the master on 2026-08-31 and 1249
+    CVs kept claiming both, because "Programming & Automation" was not on the
+    list. Reading the categories from the master means a line removed there is
+    removed from the CVs, whichever line it was.
+    """
     master = (_cv_root() / "skill-toolkit" / "master.md").read_text(encoding="utf-8")
     body = master.split("## Technical Toolkit", 1)[-1]
     out = {}
-    for cat in TRACKED_CATEGORIES:
-        m = re.search(rf"^{re.escape(cat)}\n(.+)$", body, re.MULTILINE)
-        if m:
-            out[cat] = m.group(1).strip()
+    for block in re.split(r"\n\s*\n", body.strip()):
+        rows = [l.strip() for l in block.strip().split("\n") if l.strip()]
+        # A category is a heading line followed by its skill list. Anything
+        # else in the file (front matter, the section title) is not one.
+        if len(rows) == 2 and not rows[0].startswith("#"):
+            out[rows[0]] = rows[1]
     return out
 
 
@@ -67,9 +70,8 @@ def main() -> int:
     args = ap.parse_args()
 
     lines = current_lines()
-    if len(lines) != len(TRACKED_CATEGORIES):
-        missing = set(TRACKED_CATEGORIES) - set(lines)
-        print(f"could not read from master: {', '.join(sorted(missing))}")
+    if not lines:
+        print("could not read any category from the toolkit master")
         return 1
 
     files = sorted(CV_DIR.glob("*_CV.md"))
