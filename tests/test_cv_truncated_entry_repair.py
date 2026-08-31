@@ -154,3 +154,23 @@ def test_the_breadth_line_is_rebuilt_not_duplicated():
         pytest.skip("sample CV not present")
     text = cv.read_text(encoding="utf-8")
     assert len(rt.OTHER_LINE.findall(text)) == 1
+
+
+def test_a_heading_the_model_shortened_to_one_word_still_resolves():
+    """"TAIFUNOME" for "TAIFUNOME — Research & Creative Technology Platform".
+    The word-overlap rule cannot see it — one word against one word fails its
+    two-word floor — so a truncated entry under that heading was dropped
+    instead of restored, and 40 CVs kept a write-up two passes believed they
+    had already rewritten."""
+    project = cg._project_for_title("TAIFUNOME")
+    assert project is not None and project["id"] == "taifunome-research-platform"
+
+
+def test_an_ambiguous_prefix_resolves_to_nothing():
+    """A prefix that names more than one project names none of them."""
+    shared = "AI"
+    matches = [p for p in cg.PROJECTS
+               if cg._title_key(p["title"]).startswith(cg._title_key(shared) + " ")]
+    if len(matches) < 2:
+        pytest.skip("no ambiguous prefix in the current project set")
+    assert cg._project_for_title(shared) is None

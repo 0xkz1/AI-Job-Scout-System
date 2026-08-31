@@ -1309,6 +1309,15 @@ def _project_for_title(title: str) -> dict | None:
     for p in PROJECTS:
         if _title_key(p["title"]) == key:
             return p
+    # A heading the model shortened to the project's leading words: "TAIFUNOME"
+    # for "TAIFUNOME — Research & Creative Technology Platform". The word-overlap
+    # rule below cannot see it — one word overlapping one word fails its
+    # two-word floor — so 40 CVs kept a write-up that every other pass thought
+    # it had already rewritten. Only when the prefix names exactly one project,
+    # because a shared first word decides nothing.
+    starts = [p for p in PROJECTS if _title_key(p["title"]).startswith(key + " ")]
+    if len(starts) == 1:
+        return starts[0]
     words = {w for w in key.split() if len(w) > 3}
     if not words:
         return None
