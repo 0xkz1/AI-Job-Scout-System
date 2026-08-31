@@ -103,7 +103,10 @@ GUARDIAN_BANNER = re.compile(r'<p[^>]*id="message"[^>]*>(.*?)</p>',
 # burst and then starts refusing everything, and refetch_unscoreable's notes put
 # the turn at roughly a dozen detail pages, so its pace is deliberately slower
 # than anything else here.
-DELAYS = {"linkedin": 2.0, "reed": 1.5, "adzuna": 4.0,
+# adzuna's 8.0 is measured, not guessed: at 4.0 the first full sweep got through
+# 519 ads and then answered 429 to everything, which cost the remaining 1355. The
+# other four sources finished that same run without a single block.
+DELAYS = {"linkedin": 2.0, "reed": 1.5, "adzuna": 8.0,
           "arbeitnow": 1.5, "remotive": 1.5, "theguardian": 1.5}
 # Consecutive blocks after which a site is left alone for a later run. Pushing
 # past this does not recover the postings, it just deepens the ban for the next
