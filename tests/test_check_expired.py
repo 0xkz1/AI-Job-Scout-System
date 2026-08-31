@@ -257,3 +257,24 @@ def test_a_source_with_no_rule_does_not_use_up_the_run(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert "no rule for their source" in out
     assert "checking" not in out
+
+
+def test_one_posting_can_be_checked_on_its_own(tmp_path, monkeypatch, capsys):
+    """"This one was expired and you did not catch it" is how the gaps surface,
+    so checking a single report has to be one command, not a full pass."""
+    monkeypatch.setattr(ce, "MATCHES", tmp_path)
+    monkeypatch.setattr(ce, "STATE", tmp_path / "state.json")
+    monkeypatch.setattr(ce, "ANALYZED", tmp_path / "db.json")
+    (tmp_path / "db.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "Wanted_Designer.md").write_text(REPORT.replace(
+        'expired: false', 'source: "reed"\nexpired: false'), encoding="utf-8")
+    (tmp_path / "Other_Designer.md").write_text(REPORT.replace(
+        'expired: false', 'source: "reed"\nexpired: false'), encoding="utf-8")
+    monkeypatch.setattr(ce, "make_fetch", lambda *a, **k: (lambda url: (404, "<h1>This job has expired</h1>")))
+    monkeypatch.setattr(sys, "argv", ["check_expired.py", "--match", "wanted"])
+    assert ce.main() == 0
+    out = capsys.readouterr().out
+    assert "checking 1 posting(s)" in out
+    assert "Wanted_Designer" in out and "Other_Designer" not in out
+    assert "expired: true" in (tmp_path / "Wanted_Designer.md").read_text(encoding="utf-8")
+    assert "expired: false" in (tmp_path / "Other_Designer.md").read_text(encoding="utf-8")

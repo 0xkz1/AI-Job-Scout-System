@@ -376,6 +376,9 @@ def main() -> int:
                     help="postings to fetch this run (0 = no cap)")
     ap.add_argument("--source", action="append", default=None,
                     help="only this source; repeatable")
+    ap.add_argument("--match", default=None,
+                    help="only reports whose filename contains this (case-insensitive) "
+                         "— for checking one posting you are looking at right now")
     ap.add_argument("--min-score", type=float, default=0.0)
     ap.add_argument("--fresh-days", type=float, default=DEFAULT_FRESH_DAYS,
                     help="skip postings confirmed live more recently than this")
@@ -396,7 +399,8 @@ def main() -> int:
         # worth an application are the ones worth knowing are still open.
         manual = [r for r in reports
                   if not r["expired"] and not r["applied"] and r["url"]
-                  and r["source"].lower() not in SUPPORTED_SOURCES]
+                  and r["source"].lower() not in SUPPORTED_SOURCES
+                  and (not args.match or args.match.lower() in r["path"].name.lower())]
         manual.sort(key=lambda r: (-r["score"], r["saved_at"]))
         if args.limit:
             manual = manual[:args.limit]
@@ -430,6 +434,8 @@ def main() -> int:
         if r["expired"] or r["applied"] or not r["url"]:
             continue
         if wanted and r["source"].lower() not in wanted:
+            continue
+        if args.match and args.match.lower() not in r["path"].name.lower():
             continue
         if r["source"].lower() not in SUPPORTED_SOURCES:
             no_rule += 1
