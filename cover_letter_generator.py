@@ -466,7 +466,7 @@ _OPENING_TEMPLATE = "I am writing to apply for the {job_title} position at {comp
 # Opens the second evidence block. Deliberately the weakest connective there
 # is: the two blocks are chosen independently, so anything stronger ("Likewise",
 # "In the same way") would assert a link the selection never established.
-_EVIDENCE_CONNECTIVE = "Separately,"
+_EVIDENCE_CONNECTIVES = ("Separately,", "Elsewhere,")
 
 # The filler gates, in two tiers.
 #
@@ -1176,7 +1176,7 @@ def _fit_evidence_to_budget(job_title: str, company: str, canonical: str,
     fixed += len(canonical.split()) + _BRIDGE_MAX_WORDS
     kept, total = [], fixed
     for item in evidence:
-        cost = len(item["fact"].split()) + (len(_EVIDENCE_CONNECTIVE.split()) if kept else 0)
+        cost = len(item["fact"].split()) + (1 if kept else 0)
         if kept and total + cost > _LETTER_MAX_WORDS:
             break
         kept.append(item)
@@ -1196,12 +1196,25 @@ def _evidence_paragraphs(evidence: list[dict]) -> list[str]:
 
     Only facts opening with "I" take it: prefixing anything else would leave a
     capital mid-sentence, and lowercasing blindly would eat a proper noun.
+
+    A connective is spent only on a project the letter has not named yet, and
+    each is spent once. Both rules became load-bearing when a third block was
+    allowed. "Separately," in front of a second paragraph about the site the
+    first one just described is not a signal, it is a false one — the Lothian
+    Buses posting draws the portfolio site twice — and two paragraphs opening
+    on the same word read as a list the writer stopped attending to, which was
+    54% of letters when every position past the first took the same connective.
+    A block whose project is already named opens cold on purpose: the facts are
+    authored self-contained, so it names its own subject in the first clause.
     """
-    paragraphs = []
-    for position, item in enumerate(evidence):
+    paragraphs, seen, spent = [], set(), 0
+    for item in evidence:
         fact = item["fact"].strip()
-        if position and fact.startswith("I "):
-            fact = f"{_EVIDENCE_CONNECTIVE} {fact}"
+        if seen and item["source_id"] not in seen and fact.startswith("I "):
+            connective = _EVIDENCE_CONNECTIVES[min(spent, len(_EVIDENCE_CONNECTIVES) - 1)]
+            fact = f"{connective} {fact}"
+            spent += 1
+        seen.add(item["source_id"])
         paragraphs.append(fact)
     return paragraphs
 

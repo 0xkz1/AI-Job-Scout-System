@@ -394,7 +394,8 @@ def test_assembly_orders_the_blocks_and_ends_on_the_bridge():
     talk" was a third sentence saying nothing the two before it had not."""
     body = cl._assemble_letter_body(
         "Product Designer", "Example", "Identity paragraph.",
-        [{"fact": "Evidence one."}, {"fact": "Evidence two."}], "Bridge sentence.")
+        [{"fact": "Evidence one.", "source_id": "one"},
+         {"fact": "Evidence two.", "source_id": "two"}], "Bridge sentence.")
 
     assert body.splitlines()[0] == \
         "I am writing to apply for the Product Designer position at Example."
@@ -570,3 +571,32 @@ def test_the_group_cap_holds_across_every_slot_not_just_the_first(monkeypatch):
                                        "product_designer", limit=limit)
         groups = [f["group"] for f in selected if f["group"]]
         assert len(groups) == len(set(groups)), f"group repeated at limit={limit}"
+
+
+# --- the evidence connectives ----------------------------------------------
+
+def test_a_connective_is_spent_once_each():
+    """Two paragraphs opening on the same word read as a list the writer stopped
+    attending to. It was 54% of letters when every position past the first took
+    the same connective."""
+    blocks = [{"fact": "I did the first thing.", "source_id": "a"},
+              {"fact": "I did the second thing.", "source_id": "b"},
+              {"fact": "I did the third thing.", "source_id": "c"}]
+
+    opens = [p.split(",")[0] for p in cl._evidence_paragraphs(blocks)[1:]]
+
+    assert len(opens) == len(set(opens))
+
+
+def test_no_connective_for_a_project_the_letter_has_already_named():
+    """"Separately," in front of a second paragraph about the site the first one
+    just described is not a signal, it is a false one. The Lothian Buses posting
+    draws the portfolio site twice."""
+    blocks = [{"fact": "I built the site as one narrative.", "source_id": "site"},
+              {"fact": "I built TAIFU mode over Canvas 2D.", "source_id": "studio"},
+              {"fact": "I built the site with semantic HTML.", "source_id": "site"}]
+
+    paragraphs = cl._evidence_paragraphs(blocks)
+
+    assert paragraphs[1].startswith("Separately, ")
+    assert paragraphs[2] == "I built the site with semantic HTML."
