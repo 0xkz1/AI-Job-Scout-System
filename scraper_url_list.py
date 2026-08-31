@@ -253,6 +253,37 @@ def get_source_key(url: str) -> str:
         return "glassdoor"
     return domain.replace("www.", "").split(".")[0]
 
+
+def dropped_sources() -> set[str]:
+    """The boards config.yaml says this pipeline no longer takes."""
+    try:
+        import yaml
+        config = yaml.safe_load(
+            open(os.path.join(os.path.dirname(__file__), "config.yaml"),
+                 encoding="utf-8")) or {}
+    except Exception:
+        return set()
+    return {str(s).strip().lower() for s in config.get("dropped_sources", [])}
+
+
+def drop_dropped_sources(urls: list[str]) -> tuple[list[str], list[str]]:
+    """Split pasted URLs into the ones to fetch and the ones from a dropped board.
+
+    run.py drops these on the way in from staging, which is enough to keep them
+    out of the database but not enough to stop the fetch: url-list.md is read
+    before any of that, so a dropped board was still costing a page load and an
+    extraction call per link. Filtering here means a URL from talents.studysmarter
+    .co.uk (fraudulent, dropped 2026-08-31) is never requested at all.
+    """
+    dropped = dropped_sources()
+    if not dropped:
+        return urls, []
+    keep, skip = [], []
+    for u in urls:
+        (skip if get_source_key(u) in dropped else keep).append(u)
+    return keep, skip
+
+
 async def scrape_urls(urls):
     jobs = []
     
@@ -443,7 +474,11 @@ def main():
         else:
             removed += 1
 
+    unique_urls, skipped = drop_dropped_sources(unique_urls)
+
     print(f"Found {len(urls)} URLs in url-list.md")
+    if skipped:
+        print(f"  → Skipped {len(skipped)} URL(s) from a dropped source (config.yaml dropped_sources)")
     if removed:
         print(f"  → Removed {removed} duplicate(s) after URL normalization (tracking params stripped, case/slash normalized)")
     print(f"  → {len(unique_urls)} unique URLs to process")

@@ -319,6 +319,12 @@ sites:
 dropped_sources:
 - weworkremotely
 - remoteok
+# talents.studysmarter.co.uk. Dropped 2026-08-31: the user identified it as a
+# fraudulent site, so its postings are not leads. It arrived through url-list.md
+# rather than a scraper, so scraper_url_list also reads this list and refuses to
+# fetch a URL whose source key is dropped — otherwise the pipeline would keep
+# requesting pages from it and only discard the result afterwards.
+- talents
 
 # --- Immigration timeline (2026-08-29) ---
 # Expected expiry of the Youth Mobility Scheme visa. Read through

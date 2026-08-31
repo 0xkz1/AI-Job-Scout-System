@@ -117,3 +117,38 @@ def test_an_empty_drop_list_changes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "SAVED_DIR", str(staging))
     monkeypatch.setattr(run, "load_saved_from_index", lambda: [])
     assert len(run.load_all_from_saved({})) == 1
+
+
+# --- talents.studysmarter.co.uk, dropped 2026-08-31 as a fraudulent site ---
+
+def test_the_config_names_talents():
+    """Not a budget decision like the others: the user identified the site as
+    fraudulent, so its postings are not leads at any price."""
+    assert "talents" in DROPPED_SOURCES
+
+
+def test_a_pasted_url_from_a_dropped_source_is_never_fetched():
+    """talents arrived through url-list.md, not a scraper, and the staging-side
+    drop in run.py only discards the result — the page load and the extraction
+    call had already been paid for."""
+    import scraper_url_list
+    keep, skip = scraper_url_list.drop_dropped_sources([
+        "https://talents.studysmarter.co.uk/companies/x/designer-1/",
+        "https://www.linkedin.com/jobs/view/4445522521",
+    ])
+    assert keep == ["https://www.linkedin.com/jobs/view/4445522521"]
+    assert len(skip) == 1
+
+
+def test_no_talents_document_is_left_behind():
+    """The reports, CVs, letters and reviews it produced were deleted with the
+    rows. A file surviving here would be re-scored and re-listed."""
+    out = ROOT / "10_output"
+    if not out.exists():
+        pytest.skip("no output tree to check")
+    stray = [
+        p for d in ("00_matches", "10_cvs", "10_cover-letters", "15_reviews")
+        for p in (out / d).rglob("*.md")
+        if "studysmarter" in p.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert not stray, f"{len(stray)} talents document(s) left: {stray[:3]}"
