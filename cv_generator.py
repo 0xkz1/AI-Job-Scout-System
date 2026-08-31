@@ -1284,6 +1284,74 @@ def _strip_fabricated_employment(body: str) -> str:
     return "\n".join(kept).strip("\n")
 
 
+def _bullet_is_unfinished(line: str) -> bool:
+    """True when a write-up bullet stops mid-sentence.
+
+    Every bullet in career/cv/projects/*.md ends in terminal punctuation — all
+    31 of them, in both languages — so a bullet that does not is not a style
+    choice, it is a sentence that was cut off.
+    """
+    s = line.strip()
+    return s.startswith("•") and not re.search(r'[.!?)\]”"。]\s*$', s)
+
+
+def _project_for_title(title: str) -> dict | None:
+    """The project an entry heading names, or None.
+
+    Matched through _title_key rather than by equality because the model
+    rewrites headings as it orders them — "My Personal Identity Mark" comes back
+    as "Personal Identity Mark" — and the same near-match rule _already_written_up
+    uses is the one that has been shown to survive that.
+    """
+    key = _title_key(title)
+    if not key:
+        return None
+    for p in PROJECTS:
+        if _title_key(p["title"]) == key:
+            return p
+    words = {w for w in key.split() if len(w) > 3}
+    if not words:
+        return None
+    for p in PROJECTS:
+        p_words = set(_title_key(p["title"]).split())
+        if len(words & p_words) >= max(2, len(words) - 1):
+            return p
+    return None
+
+
+def _repair_truncated_entries(body: str, lang: str = "en") -> str:
+    """Replace any write-up containing a cut-off sentence with its source text.
+
+    A truncated model reply does not look truncated by the time the CV is
+    written. The reply stops mid-bullet, the body comes out short, and
+    _pad_experience_body then appends whole entries rendered from source to fill
+    the page — so the CV arrives full-length and correct-looking, with one
+    sentence in the middle that stops after two words. Observed on
+    Wondrous_Creations_Web_Artist: "...designed it end to end — positioning,
+    logo", and on 40-odd others where the fragment happened to be a prefix of
+    the source text.
+
+    Repairing rather than dropping, because the prose was never the model's to
+    write: the experience prompt asks it to select and order projects and
+    forbids modifying their descriptions, so the source file already holds what
+    the bullet was trying to say. An entry whose heading names no project this
+    module knows is dropped instead — there is nothing to restore it from, and
+    _other_projects_line puts the project back on the breadth line either way.
+    """
+    entries = []
+    for entry in _split_entries(body):
+        if not any(_bullet_is_unfinished(l) for l in entry.split("\n")):
+            entries.append(entry)
+            continue
+        heading = entry.split("\n", 1)[0]
+        title = heading.split(" | ", 1)[0].split(" · ", 1)[0]
+        title = title.replace("**", "").replace("[", "").replace("]", "").strip()
+        project = _project_for_title(title)
+        if project and _entry_description(project, lang):
+            entries.append(_format_project_entry(project, lang))
+    return "\n\n".join(entries)
+
+
 def _experience_body(job_title: str = "", job_description: str = "",
                      role_type: str = "general", lang: str = "en") -> str:
     """The write-up entries alone — LLM-ordered when a description is available,
@@ -1306,7 +1374,8 @@ def _experience_body(job_title: str = "", job_description: str = "",
 
     body = _strip_llm_other_lines(body)
     body = _strip_echoed_job_title(body, job_title)
-    return _strip_fabricated_employment(body)
+    body = _strip_fabricated_employment(body)
+    return _repair_truncated_entries(body)
 
 
 def _finish_experience(body: str, lang: str = "en") -> str:
