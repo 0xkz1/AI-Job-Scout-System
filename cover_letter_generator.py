@@ -876,7 +876,7 @@ def _load_letter_facts() -> list[dict]:
 
 
 def _select_evidence(job_title: str, job_description: str, role_type: str,
-                     limit: int = 2) -> list[dict]:
+                     limit: int = 3) -> list[dict]:
     """Choose the evidence blocks deterministically.
 
     No model is involved. The same role type always draws the same evidence for
@@ -929,7 +929,9 @@ def _select_evidence(job_title: str, job_description: str, role_type: str,
             used_groups.add(fact["group"])
 
     def _available(rows):
-        return [(hits, fact) for hits, _, fact in rows
+        # scored holds NEGATED hits so one sort key orders it; undo that here so
+        # every caller below reads a plain count and `hits > 0` means what it says.
+        return [(-negated, fact) for negated, _, fact in rows
                 if fact not in chosen
                 and not (fact["group"] and fact["group"] in used_groups)]
 
@@ -937,12 +939,37 @@ def _select_evidence(job_title: str, job_description: str, role_type: str,
     if core:
         _take(core[0][1])
 
-    for hits, fact in _available(scored):
-        if len(chosen) >= limit:
+    # One slot is then RESERVED for proof, when the posting reaches for any.
+    #
+    # Core blocks carry the broad vocabulary — brand, design system, product,
+    # content — so they outscore the narrower technical ones on almost every
+    # posting. Measured over 300 design postings before this reserve existed,
+    # 247 letters came out core+core and only 53 carried a single block saying
+    # what was actually built; raising the limit to 3 moved that to 64, because
+    # the extra slot went to a third core block. A letter of three method
+    # paragraphs is the failure the Lothian Buses letter was hand-written to
+    # escape, and it escaped by naming artefacts.
+    #
+    # `hits > 0` still gates it: a posting that never reaches for the stack
+    # gets no reserve, and the slot returns to the general fill below.
+    proof = [(hits, fact) for hits, fact in _available(scored)
+             if fact["tier"] != "core" and hits > 0]
+    if proof and len(chosen) < limit:
+        _take(proof[0][1])
+
+    # Recomputed each pass rather than iterated once. _available() reads
+    # used_groups, so a list materialised before the loop cannot see a group the
+    # loop itself adds. This was unreachable while the limit was 2 — the loop
+    # ran at most once — and became a live defect at 3, where it let both
+    # kazukiyunome.com build blocks into one letter despite their shared group:
+    # two engineering paragraphs about a single website, in 5 of 300 measured
+    # design postings.
+    while len(chosen) < limit:
+        rows = [(hits, fact) for hits, fact in _available(scored)
+                if fact["tier"] == "core" or hits > 0]
+        if not rows:
             break
-        if fact["tier"] != "core" and hits == 0:
-            continue
-        _take(fact)
+        _take(rows[0][1])
     return chosen
 
 

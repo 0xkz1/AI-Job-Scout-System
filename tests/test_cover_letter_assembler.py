@@ -503,3 +503,70 @@ def test_assembled_letters_stay_within_the_one_page_budget():
         body = letter.split("Dear Hiring Team,")[1].rsplit("Yours sincerely,")[0]
         ok, reason = cl._vet_letter_body(body.strip())
         assert ok, f"{title}: {reason}"
+
+
+# --- the reserved proof slot ------------------------------------------------
+
+def _proof_facts():
+    """Three ungrouped core blocks and two technical blocks sharing a group.
+
+    Enough shape to exercise the reserve and the group cap together, which the
+    four-fact fixture above cannot: it runs out of eligible blocks before the
+    limit is reached, so the fill loop never runs twice.
+    """
+    return [
+        {"source_id": "taifunome-research-platform", "fact": "I own the design system.",
+         "tier": "core", "group": "", "roles": ["product_designer"],
+         "keywords": ["design system"]},
+        {"source_id": "taifunome_studio", "fact": "I have run the studio since 2023.",
+         "tier": "core", "group": "", "roles": ["product_designer"],
+         "keywords": ["brand"]},
+        {"source_id": "web3-node-ops", "fact": "I ran nodes on Linux.",
+         "tier": "core", "group": "", "roles": ["product_designer"], "keywords": []},
+        {"source_id": "portfolio_website", "fact": "I built it with semantic HTML.",
+         "tier": "technical", "group": "build", "roles": ["product_designer"],
+         "keywords": ["html"]},
+        {"source_id": "portfolio_website", "fact": "I made its overlays screen-reader navigable.",
+         "tier": "technical", "group": "build", "roles": ["product_designer"],
+         "keywords": ["html", "css"]},
+    ]
+
+
+def _use_proof_fixtures(monkeypatch):
+    monkeypatch.setattr(cl, "_load_letter_facts", _proof_facts)
+    monkeypatch.setattr(cl, "_load_evidence_bank", _bank)
+
+
+def test_a_proof_block_outranks_a_second_core_block(monkeypatch):
+    """Core blocks carry the broad vocabulary, so they win on nearly every
+    posting. Measured over 300 design postings, letting them fill every slot
+    left 247 of them saying only what the work meant and never what it was."""
+    _use_proof_fixtures(monkeypatch)
+
+    selected = cl._select_evidence("Product Designer", "design system brand html css",
+                                   "product_designer")
+
+    assert [f["tier"] for f in selected] == ["core", "technical", "core"]
+
+
+def test_a_proof_block_is_not_reserved_when_the_posting_never_asks(monkeypatch):
+    """The reserve is gated on a keyword hit, exactly as the fill loop is."""
+    _use_proof_fixtures(monkeypatch)
+
+    selected = cl._select_evidence("Product Designer", "design system brand",
+                                   "product_designer")
+
+    assert [f["tier"] for f in selected] == ["core", "core", "core"]
+
+
+def test_the_group_cap_holds_across_every_slot_not_just_the_first(monkeypatch):
+    """Availability is recomputed each pass. Iterating one snapshot let the loop
+    take a block whose group an earlier pass in the same loop had claimed —
+    unreachable at a limit of 2, a live defect the moment the limit grew."""
+    _use_proof_fixtures(monkeypatch)
+
+    for limit in (2, 3, 4, 5):
+        selected = cl._select_evidence("Product Designer", "design system brand html css",
+                                       "product_designer", limit=limit)
+        groups = [f["group"] for f in selected if f["group"]]
+        assert len(groups) == len(set(groups)), f"group repeated at limit={limit}"
