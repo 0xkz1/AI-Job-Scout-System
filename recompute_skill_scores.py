@@ -31,7 +31,15 @@ from matcher import (  # noqa: E402
     calculate_skill_match,
     load_user_experience,
     load_user_skills,
+    make_safe_name,
 )
+from strategy import annotate  # noqa: E402
+
+# The CV review score lives in a review file's frontmatter, not on the job, and
+# action_tier's top tier requires it. Imported from the backfill rather than
+# copied: two readers of the same frontmatter would drift, and this is the second
+# script that needs it.
+from backfill_strategy_layer import review_scores  # noqa: E402
 
 ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
 
@@ -41,6 +49,7 @@ def main():
     user_skills = load_user_skills()
     user_exp = load_user_experience()
     config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
+    scores = review_scores()
 
     changed, tier_changed = 0, 0
     ups, downs = [], []
@@ -117,6 +126,13 @@ def main():
         m["tier"] = new_tier
         if new_tier != old_tier:
             tier_changed += 1
+
+        # The strategy layer reads composite_score, so leaving it alone here would
+        # reproduce exactly the bug the comments above describe: a stored value
+        # made unreachable by a recompute. action_tier is derived, not measured —
+        # it has to be re-derived whenever the number under it moves.
+        m.update(annotate(job, m, config, review_score=scores.get(
+            make_safe_name(job.get("company", ""), job.get("title", "")))))
 
     ANALYZED_PATH.write_text(json.dumps(db, indent=2, ensure_ascii=False, default=str))
     print(f"{changed} 件のスキルスコアを更新 (↑{len(ups)} ↓{len(downs)}), "

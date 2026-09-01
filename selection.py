@@ -173,15 +173,26 @@ def _dedupe(jobs: list[dict]) -> list[dict]:
     title) gives all three ONE document path — so past this point a job must be a
     single entry whatever the database decided.
     """
-    from matcher import is_junk_description  # local import: avoids a cycle
+    from matcher import is_junk_description, make_safe_name  # local import: avoids a cycle
 
     def rank(j: dict) -> tuple[int, int]:
         desc = j.get("description") or ""
         return (0 if is_junk_description(desc) else 1, len(desc))
 
-    best: dict[tuple[str, str], dict] = {}
+    best: dict[str, dict] = {}
     for j in jobs:
-        key = (j.get("company", ""), j.get("title", ""))
+        # Keyed on the DOCUMENT PATH, not on (company, title). The two are not the
+        # same key, and the difference is the whole reason this function exists:
+        # make_safe_name truncates the title at 50 characters, so two postings
+        # whose titles differ only past that point are distinct to a (company,
+        # title) key and identical to the filesystem.
+        #
+        # Found 2026-09-01 on two real LinkedIn postings — Aquent's "UIデザイナー
+        # テクノロジーやAIを活用した…[AQ-14798]" and the same title ending
+        # "[AQ-15555]". Different jobs, different URLs, composites 0.69 and 0.61,
+        # both inside the generation set, both writing the same file. Whichever
+        # was generated last won while selection ranked by the other.
+        key = make_safe_name(j.get("company", ""), j.get("title", ""))
         cur = best.get(key)
         if cur is None or rank(j) > rank(cur):
             best[key] = j
