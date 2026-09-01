@@ -193,6 +193,16 @@ down; see `EXPANSION_2026-08-29.md` for the numbers.
 
 ## Recently closed
 
+- **Five of the six invariant violations** → 2026-09-01. `recompute_skill_scores.py`
+  applied `title_relevance` to stored composites (216 tiers moved), closing the
+  title-excluded jobs sitting inside the generation and review selections;
+  `invalidate_unscoreable_reviews.py` nulled 67 review scores written off failed
+  scrapes; and `selection._dedupe` now keys on the document path rather than
+  (company, title), closing both document-path collisions. One violation remains
+  and needs a network fetch: 273 postings still hold a 500-char Adzuna summary
+  instead of a description (`refetch_unscoreable.py --top-only`, in batches —
+  adzuna refuses long runs).
+
 - **The strategy layer had never run in production** → 2026-08-30. The nightly
   completed with it: 24 postings scraped, all 24 carrying every new field
   (`contract_kind`, `contract_months`, `sponsorship`, `remote_scope`,
