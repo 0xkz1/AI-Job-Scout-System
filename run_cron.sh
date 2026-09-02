@@ -93,6 +93,20 @@ stage url_list  20m "${RUNNER[@]}" "${PYTHON}" scraper_url_list.py
 stage saved     20m "${RUNNER[@]}" "${PYTHON}" scraper_saved.py
 stage pipeline   6h "${RUNNER[@]}" "${PYTHON}" -u run.py
 
+# Everything below this line spends money on postings that are still open, and
+# roughly half of them were not: the first full sweep on 2026-09-01 found 2351
+# of 4462 already closed — 77% of reed's, 60% of adzuna's. A closed posting was
+# re-scored, re-reviewed and handed fresh documents for as long as it sat in the
+# database, because nothing ever asked the site. The tick this sets is a
+# job-scoped lock (gen_version), so it is what points the stages below at live
+# work.
+#
+# After the pipeline, not before it: the pipeline is the night's real work and
+# must not lose hours to this. --limit spreads the sweep over nights, the same
+# reasoning as the rescore cap; a `live` verdict is trusted for a week, so the
+# standing load is the slice that aged out rather than the whole pool.
+stage expiry    30m "${PYTHON}" -u check_expired.py --limit 250
+
 # run.py scores what it ingests and nothing else, so anything already in the
 # database when the persona changes keeps the score it was given against the old
 # one. Two scales in one ranking rank nothing (5dedcf8), and the drift is
@@ -137,7 +151,7 @@ stage backfill  4h "${PYTHON}" -u rereview_top.py --new-only
 
 echo ""
 echo "──────── summary ────────"
-for k in url_list saved pipeline rescore review backfill; do
+for k in url_list saved pipeline expiry rescore review backfill; do
     printf '  %-10s %s\n' "$k" "${STATUS[$k]:-skipped}"
 done
 echo "  00_matches:       $(find 10_output/00_matches -name '*.md' 2>/dev/null | wc -l) reports"
@@ -150,7 +164,7 @@ echo "  log:              ${LOG}"
 # and a red cron line for one flaky site trains the reader to ignore red lines.
 # Keep this list in step with the stages above; it silently under-reports if a
 # stage is added and not listed here.
-for k in url_list saved pipeline rescore review backfill; do
+for k in url_list saved pipeline expiry rescore review backfill; do
     [ "${STATUS[$k]:-}" = "ok" ] && exit 0
 done
 exit 1

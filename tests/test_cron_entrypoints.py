@@ -210,3 +210,64 @@ def test_one_failing_stage_does_not_cancel_the_others():
     text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
     assert "set -euo" not in text, "set -e aborts the nightly on the first stage that fails"
     assert "timeout" in text, "a hung browser would otherwise eat the whole night"
+
+
+# --- the stage lists have to stay in step with the stages -------------------
+
+def _stage_names(text: str) -> list[str]:
+    return re.findall(r"^stage\s+(\S+)\s", text, re.MULTILINE)
+
+
+def test_run_cron_reports_every_stage_it_runs():
+    """run_cron.sh's own comment: the summary "silently under-reports if a stage
+    is added and not listed here". Two lists, both hand-maintained — and the
+    second one decides the exit code, so a stage missing from it cannot rescue a
+    night where everything else failed."""
+    text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
+    stages = _stage_names(text)
+    assert stages, "no stages found — the parser has drifted from the script"
+    for loop in re.findall(r"^for k in ([^;]+); do", text, re.MULTILINE):
+        listed = loop.split()
+        missing = [s for s in stages if s not in listed]
+        assert not missing, f"stages missing from a summary/exit list: {missing}"
+
+
+def test_the_expiry_check_runs_before_anything_that_spends_on_a_posting():
+    """A closed posting was re-scored, re-reviewed and handed fresh documents
+    for as long as it sat in the database. The tick is a job-scoped lock, so it
+    only helps if it is set before the stages that read it."""
+    text = (ROOT / "run_cron.sh").read_text(encoding="utf-8")
+    stages = _stage_names(text)
+    assert "expiry" in stages, "run_cron.sh no longer checks for closed postings"
+    for later in ("rescore", "review", "backfill"):
+        assert stages.index("expiry") < stages.index(later), (
+            f"expiry runs after {later}, so {later} still pays for closed postings")
+
+
+def test_the_expiry_check_runs_after_the_pipeline():
+    """run_stage clamps a stage to the remaining budget, so a check placed above
+    the night's real work takes its hours."""
+    stages = _stage_names((ROOT / "run_cron.sh").read_text(encoding="utf-8"))
+    assert stages.index("pipeline") < stages.index("expiry")
+
+
+NIGHTLY = Path.home() / "dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh"
+
+
+def test_the_scheduled_nightly_checks_for_closed_postings_too():
+    """run_cron.sh is the manual equivalent, not the scheduled job — its own
+    header says anything belonging in the real nightly belongs in
+    job_scout_nightly.sh. A fix applied to one and not the other is a fix that
+    never runs."""
+    if not NIGHTLY.exists():
+        pytest.skip("hermes archivist profile not present on this machine")
+    text = NIGHTLY.read_text(encoding="utf-8")
+    assert "check_expired.py" in text, (
+        "the scheduled nightly does not check for closed postings, so the "
+        "review and regeneration stages keep paying for them")
+    assert text.index("run.py --from-saved") < text.index("check_expired.py"), (
+        "the expiry check must not take budget from the analysis pass")
+    for later in ("rescore_context.py", "rereview_top.py", "regen_match_reports.py"):
+        assert text.index("check_expired.py") < text.index(later), (
+            f"{later} runs before the expiry check, so it still pays for "
+            f"closed postings")
