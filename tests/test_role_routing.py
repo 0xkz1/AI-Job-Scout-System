@@ -49,7 +49,22 @@ BENEFITS_BOILERPLATE = (
         ("Back End Engineer", "Python and PostgreSQL services.", "web_developer"),
         ("Back-End Engineer", "Python and PostgreSQL services.", "web_developer"),
         ("Backend Engineer", "Python and PostgreSQL services.", "web_developer"),
-        ("Front End Engineer", "TypeScript and CSS.", "web_developer"),
+        # Front-end titles split off web_developer 2026-09-03, so the same
+        # spelling sweep is pinned on this side of the split too — including the
+        # hyphenated form, which matched no keyword at all before the split.
+        ("Front End Engineer", "TypeScript and CSS.", "frontend_developer"),
+        ("Front-End Engineer", "TypeScript and CSS.", "frontend_developer"),
+        ("Frontend Engineer", "TypeScript and CSS.", "frontend_developer"),
+        ("Front End Developer", "TypeScript and CSS.", "frontend_developer"),
+        ("Front-End Developer", "TypeScript and CSS.", "frontend_developer"),
+        ("Frontend Developer", "TypeScript and CSS.", "frontend_developer"),
+        # The tie the dict order exists to settle: one title hit here
+        # ("front end") and one on web_developer ("software engineer"). The
+        # title names the discipline, so the discipline wins.
+        ("Front End Software Engineer", "TypeScript and CSS.", "frontend_developer"),
+        # ...and the reverse: a full-stack title keeps the full-stack CV even
+        # when the stack it names is React.
+        ("Full Stack Developer", "React, Node and PostgreSQL.", "web_developer"),
         # Engineering disciplines that are not software: these were answered
         # with a web-developer and a product-designer CV respectively.
         ("Mechanical Design Engineer",

@@ -32,7 +32,7 @@ from __future__ import annotations
 # change without a code change.
 _DEFAULT_FAMILIES = {
     "core_design": ["graphic_designer"],
-    "hybrid_design_dev": ["product_designer", "web_developer"],
+    "hybrid_design_dev": ["product_designer", "web_developer", "frontend_developer"],
     "creative_technology": ["creative_technologist", "technical_artist", "product_engineer"],
     "bridge": ["implementation_specialist", "technical_support", "qa_engineer",
                "product_ops", "research_engineer", "content_analyst",

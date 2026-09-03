@@ -247,6 +247,12 @@ def get_strengths(role_type: str = "general") -> str:
 _TOOLKIT_CATEGORY_ORDER = {
     "general":               [],  # master-file order as-is
     "web_developer":         ["Programming & Automation", "Frontend & Product Engineering", "Systems & Infrastructure", "AI Systems & Agents"],
+    # The reverse of web_developer's opening pair, which is the whole point of
+    # the split: a front-end reader scans for the interface stack first and the
+    # language second. Design sits above Programming because these postings ask
+    # for someone who works with UX, and the Figma/design-token block is the
+    # evidence for that.
+    "frontend_developer":    ["Frontend & Product Engineering", "Design & Visual Production", "Programming & Automation", "Systems & Infrastructure"],
     "product_designer":      ["Design & Visual Production", "Frontend & Product Engineering", "3D & Generative Media", "AI Systems & Agents"],
     # Brand/print roles read the image-making tools as craft evidence, so 3D &
     # Generative Media sits above the front-end block — the reverse of
@@ -349,12 +355,43 @@ ROLE_KEYWORDS = {
     ],
     "creative_technologist": ["creative technologist", "creative tech", "technical creative", "creative developer", "generative ai", "ai artist", "comfyui", "stable diffusion"],
     "technical_artist": ["technical artist", "tech artist", "graph technical artist", "pipeline artist", "vfx artist", "shader artist", "rendering artist"],
+    # Split out of web_developer 2026-09-03. web_developer owns one profile file,
+    # and that file's headline is "Full-stack Developer" — so every front-end
+    # title in the corpus (27 CVs on disk) introduced the applicant as a
+    # full-stack developer whose PROFILE paragraph opens on web scrapers and data
+    # pipelines. The route was correct; the bucket was too wide to carry a
+    # headline. Front-end titles and React now have their own profile, and the
+    # back-end/full-stack/software-engineer vocabulary stays with web_developer.
+    #
+    # Listed BEFORE web_developer because a title tie is settled by dict order,
+    # and the ties are real: "Front End Software Engineer" scores one title hit
+    # here and one on web_developer's "software engineer". The front-end reading
+    # is the right one — the title names the discipline, "software engineer" only
+    # names the profession.
+    #
+    # The three spellings are listed BARE rather than as "front end developer"/
+    # "front end engineer" compounds, and the compounds are deliberately absent.
+    # Measured over the 5406-posting corpus: 83 titles name front-end work, and
+    # the compound list caught only 46 of them. The misses were the titles that
+    # put a word between the discipline and the noun — "Front End Web Developer"
+    # (24 of them went to web_developer on "web developer"), "Frontend Software
+    # Engineer", "Software Engineer, Front End" — plus 10 that matched nothing at
+    # all ("Frontend JavaScript Developer", "Front End Game Developer"). Bare
+    # forms catch all of those, and listing ONLY the bare form keeps a front-end
+    # title at exactly one hit: adding both would score "Front End Engineer"
+    # twice and let it outvote a genuine hybrid like "UI/UX Designer and Front
+    # End Engineer", which product_designer should keep.
+    "frontend_developer": ["front end", "front-end", "frontend", "react", "reactjs"],
     # "Engineer" and spaced/hyphenated spellings are listed explicitly: matching is
     # anchored, so "backend developer" does not cover "Back End Engineer" — that
     # gap left the canonical title with zero title evidence and let a body hit
     # decide. "reactjs" is its own entry because the anchor stops "react" from
     # firing inside it.
-    "web_developer": ["web developer", "frontend developer", "front end developer", "front-end developer", "backend developer", "back end developer", "back-end developer", "backend engineer", "back end engineer", "back-end engineer", "frontend engineer", "front end engineer", "full stack", "fullstack", "software engineer", "software developer", "python developer", "django", "react", "reactjs"],
+    # "full-stack" joins "full stack"/"fullstack" for the same reason the back-end
+    # spellings are all listed: the hyphenated form matched nothing, so a posting
+    # titled "Full-stack Engineer" had zero title evidence and was decided by its
+    # body — which named React, and routed a full-stack post to the front-end CV.
+    "web_developer": ["web developer", "backend developer", "back end developer", "back-end developer", "backend engineer", "back end engineer", "back-end engineer", "full stack", "full-stack", "fullstack", "software engineer", "software developer", "python developer", "django"],
     "product_engineer": [
         "product engineer", "product engineering", "product-led", "product ownership",
         "full-stack product", "fullstack product", "product builder",
@@ -748,6 +785,16 @@ STATIC_EXPERIENCE = {
         "portfolio_website",
         "ai-job-scout-system",
         "hermes-ai-agent-orchestration-system",
+    ],
+    # web_developer's list with the agent-orchestration entry swapped for Asset
+    # Weaver: Hermes is backend evidence, and Asset Weaver is the one record that
+    # is TypeScript and Node.js AND names interface work — onboarding, progress
+    # feedback, error recovery — which is what a front-end post is reading for.
+    "frontend_developer": [
+        "taifunome-research-platform",
+        "portfolio_website",
+        "asset-weaver-obsidian-plugin",
+        "ai-job-scout-system",
     ],
     "development_support": [
         "taifunome-research-platform",
