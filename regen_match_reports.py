@@ -32,6 +32,7 @@ from matcher import (  # noqa: E402
     read_carried_properties,
 )
 from scraper_url_list import normalize_url  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 MATCH_DIR = JIS / "10_output" / "00_matches"
 CV_DIR = JIS / "10_output" / "10_cvs"
@@ -94,7 +95,7 @@ def main():
         key = (job.get("title", ""), job.get("company", ""))
         by_title[key] = job
 
-    files = sorted(p for p in MATCH_DIR.glob("*.md") if p.is_file())
+    files = md_files(MATCH_DIR)
     matched, unmatched, changed, unchanged, locked = 0, [], 0, 0, 0
     sample_shown = False
 

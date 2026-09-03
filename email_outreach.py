@@ -15,6 +15,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+from doc_paths import md_files
+
 ROOT = Path(__file__).resolve().parent
 EMAIL_LIST = ROOT / "00_saved" / "email-list.md"  # superseded by EMAIL_TARGETS, kept for reference
 EMAIL_TARGETS = ROOT / "00_saved" / "email-targets"
@@ -115,7 +117,7 @@ def parse_email_list(path: Path = EMAIL_TARGETS) -> list[dict]:
     rows = []
     if not path.is_dir():
         return rows
-    for note in sorted(path.glob("*.md")):
+    for note in md_files(path):
         fm = _read_frontmatter(note)
         if not fm or fm.get("type") != "email_target":
             continue

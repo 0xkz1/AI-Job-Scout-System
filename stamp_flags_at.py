@@ -35,6 +35,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
 MATCH_DIR = ROOT / "10_output" / "00_matches"
@@ -105,7 +106,7 @@ def main() -> int:
         return 1
 
     flags_to_process = {args.flag: FLAG_DATE_MAP[args.flag]} if args.flag else FLAG_DATE_MAP
-    files = sorted(MATCH_DIR.glob("*.md"))
+    files = md_files(MATCH_DIR)
 
     summary = {}
     for flag, date_prop in flags_to_process.items():

@@ -73,6 +73,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from scraper_linkedin_guest import USER_AGENT, job_id_from_url  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 MATCHES = ROOT / "10_output" / "00_matches"
 ANALYZED = ROOT / "10_output" / "_analyzed.json"
@@ -152,7 +153,7 @@ def read_reports(match_dir: Path | None = None) -> list[dict]:
     """
     match_dir = match_dir or MATCHES
     out = []
-    for path in sorted(match_dir.glob("*.md")):
+    for path in md_files(match_dir):
         try:
             head = path.read_text(encoding="utf-8")[:4000]
         except OSError:

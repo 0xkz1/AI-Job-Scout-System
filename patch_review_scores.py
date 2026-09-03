@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from matcher import read_review_scores
+from doc_paths import md_files
 
 MATCH_DIR = Path(__file__).resolve().parent / "10_output" / "00_matches"
 
@@ -58,7 +59,7 @@ def main() -> int:
         print(f"no such directory: {MATCH_DIR}")
         return 1
 
-    files = sorted(MATCH_DIR.glob("*.md"))
+    files = md_files(MATCH_DIR)
     changed = with_scores = stale = 0
     for f in files:
         original = f.read_text(encoding="utf-8")

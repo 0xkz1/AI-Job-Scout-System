@@ -38,6 +38,7 @@ MATCH_DIR = OUTPUT_DIR / "00_matches"
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from analyzer import analyze_job
+from doc_paths import md_files
 from matcher import (
     analyze_match,
     generate_match_report,
@@ -272,10 +273,10 @@ def main():
         return
 
     # Find all non-README MDs
-    watched_mds = sorted([
-        f for f in WATCHED_DIR.glob("*.md")
+    watched_mds = [
+        f for f in md_files(WATCHED_DIR)
         if f.name.lower() != "readme.md"
-    ])
+    ]
 
     if not watched_mds:
         print(f"📭 No watched job MDs found in {WATCHED_DIR}/")

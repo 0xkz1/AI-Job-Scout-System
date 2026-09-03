@@ -34,6 +34,7 @@ REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "mistral-medium-latest")
 # llm_client rather than restated here: the two lists drifted before, and a chain
 # entry with no dispatch branch fails every call to that provider.
 from llm_client import MISTRAL_PROVIDERS as _MISTRAL_PROVIDERS  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 MISTRAL_KEYS = tuple(_MISTRAL_PROVIDERS)
 
@@ -191,7 +192,7 @@ def _load_skills_md() -> str:
         pass
     toolkit_dir = ROOT.parent / "cv" / "skill-toolkit"
     try:
-        for f in sorted(toolkit_dir.glob("*.md")):
+        for f in md_files(toolkit_dir):
             parts.append(f"--- skill-toolkit/{f.name} ---\n"
                          + f.read_text(encoding="utf-8"))
     except Exception:

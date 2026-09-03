@@ -46,6 +46,7 @@ from matcher import (analyze_match, generate_match_report, load_user_skills, loa
                      make_safe_name, read_applied_flag, read_expired_flag)
 from cv_generator import generate_cv, detect_role_type
 from cover_letter_generator import save_cover_letter
+from doc_paths import md_files
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 
@@ -466,7 +467,7 @@ def archive_duplicate_files(archived_jobs: list[dict], output_dir: str):
         return
         
     archived_count = 0
-    for match_file in matches_dir.glob("*.md"):
+    for match_file in md_files(matches_dir):
         try:
             content = match_file.read_text(encoding="utf-8")
             # Extract URL from frontmatter

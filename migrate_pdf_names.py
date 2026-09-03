@@ -12,6 +12,7 @@ Usage:
 import re
 import sys
 from pathlib import Path
+from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
 PDF_DIR = ROOT / "10_output" / "20_pdfs"
@@ -59,7 +60,7 @@ def main():
     for d in SCAN_DIRS:
         if not d.exists():
             continue
-        for md in d.glob("*.md"):
+        for md in md_files(d):
             text = md.read_text(encoding="utf-8")
             orig = text
             for old, new in rename_map.items():

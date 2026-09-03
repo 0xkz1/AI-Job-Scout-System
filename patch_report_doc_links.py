@@ -26,6 +26,7 @@ import sys
 import tarfile
 from datetime import datetime
 from pathlib import Path
+from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "10_output"
@@ -73,7 +74,7 @@ def main() -> int:
         print(f"no such directory: {MATCH_DIR}")
         return 1
 
-    files = sorted(MATCH_DIR.glob("*.md"))
+    files = md_files(MATCH_DIR)
     todo, counts = [], {"cv": 0, "cover_letter": 0}
     for f in files:
         out, added = patch(f.stem, f.read_text(encoding="utf-8"))

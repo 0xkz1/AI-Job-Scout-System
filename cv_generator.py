@@ -6,6 +6,7 @@
 import re
 
 from contact_details import CONTACT, header_line, links_line
+from doc_paths import md_files
 
 DEFAULT_TECHNICAL_TOOLKIT = """Systems & Infrastructure
 Linux (Ubuntu), tmux (process monitoring and session management), Docker, custom PC build, system configuration
@@ -667,7 +668,7 @@ def load_projects_from_md() -> list[dict]:
     for dirname, kind in _ENTRY_DIRS:
         d = cv_root / dirname
         if d.exists():
-            files += [(f, kind) for f in sorted(d.glob("*.md"))]
+            files += [(f, kind) for f in md_files(d)]
 
     for fpath, dir_kind in files:
         if fpath.name == "README.md":

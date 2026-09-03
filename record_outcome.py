@@ -39,6 +39,7 @@ import re
 import sys
 from datetime import date
 from pathlib import Path
+from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
 MATCHES = ROOT / "10_output" / "00_matches"
@@ -84,7 +85,7 @@ def _set(text: str, key: str, value: str) -> str:
 
 def _reports() -> list[tuple[Path, str]]:
     out = []
-    for p in sorted(MATCHES.glob("*.md")):
+    for p in md_files(MATCHES):
         if ".sync-conflict-" in p.name:
             continue
         text = p.read_text(encoding="utf-8")

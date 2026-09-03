@@ -82,6 +82,7 @@ from matcher import (
     DEFAULT_WEIGHTS,
 )
 from filter import passes_filter
+from doc_paths import md_files
 
 MIN_SALARY_GBP = 30000
 
@@ -1980,7 +1981,7 @@ with tab_watched:
 
     # Show watched directory contents
     if WATCHED_DIR.exists():
-        watched_files = sorted([f for f in WATCHED_DIR.glob("*.md") if f.name != "README.md"])
+        watched_files = [f for f in md_files(WATCHED_DIR) if f.name != "README.md"]
         st.metric("Watched MDs", len(watched_files))
         if watched_files:
             with st.expander(f"View {len(watched_files)} watched files"):
@@ -2174,7 +2175,7 @@ with tab_watched:
     else:
         st.info("`00_saved/email-targets/` にまだノートがありません。`Email Targets.base` から追加してください。")
 
-    _drafts = sorted(EMAIL_OUT_DIR.glob("*.md")) if EMAIL_OUT_DIR.exists() else []
+    _drafts = md_files(EMAIL_OUT_DIR)
     if _drafts:
         from email_outreach import SENDER_ACCOUNT, gmail_compose_url
         st.markdown("**生成済み下書き:**")

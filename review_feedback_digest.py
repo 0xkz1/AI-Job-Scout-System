@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from matcher import make_safe_name  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 REVIEWS = ROOT / "10_output" / "15_reviews"
 DB = ROOT / "10_output" / "_analyzed.json"
@@ -83,7 +84,7 @@ def _index_sources() -> list[tuple[Path, int, str]]:
     for d in SOURCE_DIRS:
         if not d.exists():
             continue
-        for p in sorted(d.rglob("*.md")):
+        for p in md_files(d, recursive=True):
             if _DEAD & {part.lower() for part in p.relative_to(d).parts[:-1]}:
                 continue
             try:

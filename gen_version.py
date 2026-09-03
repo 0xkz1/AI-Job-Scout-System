@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+from doc_paths import md_files
+
 ROOT = Path(__file__).resolve().parent
 PROFILE_DIR = Path("/media/kz003/atelier/00_Kazuki")
 CV_ROOT = PROFILE_DIR / "career" / "cv"
@@ -72,7 +74,7 @@ def _global_digest(h) -> None:
         _hash_file(h, f)
     for d in _GLOBAL_DIRS:
         if d.exists():
-            for f in sorted(d.glob("*.md")):
+            for f in md_files(d):
                 _hash_file(h, f)
 
 
