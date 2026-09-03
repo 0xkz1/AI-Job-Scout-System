@@ -1013,7 +1013,12 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
         @page {{ size: A4; margin: 10mm 11mm; }}
         body {{ font-family: "DejaVu Sans", sans-serif; font-size: 9.5pt; line-height: 1.3; color: #1a1a1a; }}
         h1 {{ font-size: {"12pt" if is_cl else "16pt"}; margin: 0 0 3pt; }}
-        h2 {{ font-size: 11.5pt; border-bottom: 1px solid #999; padding-bottom: 2pt; margin: 7pt 0 3pt; page-break-after: avoid; }}
+        /* The rule under a section heading is a boundary, not an underline: the
+           heading is already 11.5pt bold above 9.5pt body text, so #999 was
+           competing with it. Lightened to #d5d5d5, which still separates a
+           section on a dense page without reading as part of the title. No
+           height changes, so the two-page budget is untouched. */
+        h2 {{ font-size: 11.5pt; border-bottom: 1px solid #d5d5d5; padding-bottom: 2pt; margin: 7pt 0 3pt; page-break-after: avoid; }}
         h3 {{ font-size: 9.8pt; margin: 14pt 0 1pt; page-break-after: avoid; }}
         h4 {{ font-size: 9.5pt; margin: 4pt 0 0; page-break-after: avoid; }}
         p, li {{ margin: {"6pt" if is_cl else "1.5pt"} 0; }}
@@ -1029,7 +1034,15 @@ def _md_to_pdf_bytes(md_path: Path) -> bytes:
         hr {{ display: none; }}
         table {{ border-collapse: collapse; width: 100%; }}
         th, td {{ border: 1px solid #ccc; padding: 3pt 6pt; text-align: left; }}
-        a {{ color: #1a1a1a; text-decoration: none; }}
+        /* One accent, used twice: the role title under the name, and every
+           link. Both are things a reader looks FOR — the first tells them what
+           this CV is answering, the second is the only part of the page they
+           can act on — and neither was distinguishable from body text before.
+           Deep navy rather than anything brighter: this is a document that has
+           to survive being printed in black and white by a recruiter, so the
+           colour carries no information the text does not. */
+        a {{ color: #1f3a5f; text-decoration: none; }}
+        h1 + h4 {{ color: #1f3a5f; }}
     </style></head><body>{body}</body></html>"""
     return HTML(string=html).write_pdf()
 

@@ -28,6 +28,7 @@ Set in .env — see .env.example:
     CV_PORTFOLIO, CV_GITHUB, CV_LINKEDIN
 """
 import os
+import re
 
 from dotenv import load_dotenv
 
@@ -60,14 +61,43 @@ CONTACT = {
 }
 
 
+def _bare(url: str) -> str:
+    """The address without its scheme or www — "kazukiyunome.com"."""
+    return re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+
+
 def header_line(lang: str = "en") -> str:
-    """The "City | email | phone" line that opens every CV."""
+    """The "City | email | phone" line that opens every CV.
+
+    The address is written as a markdown link so the rendered PDF carries a real
+    mailto annotation. It was plain text, and a plain address is only clickable
+    where the reader's PDF viewer happens to guess at one.
+    """
     phone = CONTACT["phone_intl"] if lang == "ja" else CONTACT["phone"]
-    return f"{CONTACT['location']} | {CONTACT['email']} | {phone}"
+    email = CONTACT["email"]
+    return f"{CONTACT['location']} | [{email}](mailto:{email}) | {phone}"
 
 
 def links_line() -> str:
-    """The portfolio/GitHub/LinkedIn line under the header."""
-    return (f"Portfolio Website: {CONTACT['portfolio']} | "
-            f"GitHub: {CONTACT['github']} | "
-            f"LinkedIn: {CONTACT['linkedin']}")
+    """The portfolio/GitHub/LinkedIn line under the header.
+
+    Bare hosts as the visible text, the full address as the href. Two things
+    were wrong with spelling the URLs out in plain text. The line wrapped onto a
+    second row — three schemes and a "www." are about thirty characters of no
+    information. And none of the three was a link: decompressing a rendered CV
+    on 2026-09-04 found exactly two URI annotations in the whole document, both
+    taifunome.com from the experience entry, and nothing at all for the
+    portfolio, GitHub or LinkedIn. Whatever clicked was the viewer recognising a
+    full URL in running text, which is precisely what shortening the text alone
+    would have taken away.
+
+    Note the deliberate difference from the entry-title URLs in cv_generator,
+    which stay spelled out in full: those name someone else's domain, where the
+    reader has to be told where the link goes. These three are the applicant's
+    own canonical addresses, and the host is the whole message.
+    """
+    portfolio, github, linkedin = (
+        CONTACT["portfolio"], CONTACT["github"], CONTACT["linkedin"])
+    return (f"Portfolio: [{_bare(portfolio)}]({portfolio}) | "
+            f"GitHub: [{_bare(github)}]({github}) | "
+            f"LinkedIn: [{_bare(linkedin)}]({linkedin})")
