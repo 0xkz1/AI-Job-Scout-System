@@ -5,7 +5,7 @@
 
 import re
 
-from contact_details import CONTACT, header_line, links_line
+from contact_details import CONTACT, bare_host, header_line, links_line
 from doc_paths import md_files
 
 DEFAULT_TECHNICAL_TOOLKIT = """Systems & Infrastructure
@@ -943,21 +943,32 @@ def _with_project_url(title_line: str, inner: str) -> str:
     Both paths pass through this function, so this is the one place that sees
     every title line, project and employment alike.
 
-    The full address is shown, not a shortened host — a reader opening the
-    PDF on a computer can click it, and the text should say what it points
-    to rather than make them trust a bare domain.
+    The visible text is the bare host, not the full address. It used to be the
+    full address, on the reasoning that a reader should be told where a link
+    goes rather than have to trust a bare domain — which is a fair rule about
+    someone else's domain, and describes none of the URLs this actually renders.
+    Exactly one entry in career/cv/** carries a `url:` at all, and it is the
+    applicant's own studio. Spelling it out bought nothing and cost a line: at
+    9.5pt the scheme pushed the title onto a second row, leaving "taifunome.com/"
+    orphaned under a heading. Same rule as the contact links in
+    contact_details.links_line, and the same helper renders both.
     """
     head = inner.split(" | ")[0].strip()
     for p in _ALL_ENTRIES:
         if not p.get("url") or _title_key(p["title"]) != _title_key(head):
             continue
-        shown = f"[{p['url']}]({p['url']})"
+        shown = f"[{bare_host(p['url'])}]({p['url']})"
         # Idempotent: this runs over lines that may already carry the address —
         # a CV patched in place, or a body re-finished after padding — and an
         # entry titled "… · [url](url) · [url](url)" is the whole cost of
         # forgetting that.
         if shown in title_line:
             return title_line
+        # A CV written before the shortening carries the same link with the full
+        # address as its text. Drop that suffix rather than appending beside it,
+        # which is the doubled-title failure above wearing a different label.
+        title_line = re.sub(r"\s*·\s*\[[^\]]*\]\(" + re.escape(p["url"]) + r"\)",
+                            "", title_line)
         return f"{title_line} · {shown}"
     return title_line
 

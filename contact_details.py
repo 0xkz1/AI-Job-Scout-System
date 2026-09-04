@@ -61,8 +61,13 @@ CONTACT = {
 }
 
 
-def _bare(url: str) -> str:
-    """The address without its scheme or www — "kazukiyunome.com"."""
+def bare_host(url: str) -> str:
+    """The address without its scheme or www — "kazukiyunome.com".
+
+    Public because cv_generator needs the same rendering for the URL it appends
+    to an entry title. Two copies of this would be two answers to "what does a
+    link look like on this CV".
+    """
     return re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
 
 
@@ -98,6 +103,6 @@ def links_line() -> str:
     """
     portfolio, github, linkedin = (
         CONTACT["portfolio"], CONTACT["github"], CONTACT["linkedin"])
-    return (f"Portfolio: [{_bare(portfolio)}]({portfolio}) | "
-            f"GitHub: [{_bare(github)}]({github}) | "
-            f"LinkedIn: [{_bare(linkedin)}]({linkedin})")
+    return (f"Portfolio: [{bare_host(portfolio)}]({portfolio}) | "
+            f"GitHub: [{bare_host(github)}]({github}) | "
+            f"LinkedIn: [{bare_host(linkedin)}]({linkedin})")
