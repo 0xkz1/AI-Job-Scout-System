@@ -1460,8 +1460,31 @@ def _finish_experience(body: str, lang: str = "en") -> str:
 # a proxy — what actually fills the page is line count, and a heading plus a
 # short entry costs lines a long paragraph does not — so leave headroom rather
 # than aiming at the observed edge.
-_CV_TARGET_WORDS = 1080
-_CV_MAX_WORDS = 1120
+#
+# Counted by _budget_words, which does not count bullet markers. Both numbers
+# are 13 lower than the values measured above, because those were measured when
+# str.split() was counting the marker as a word and a CV carried about thirteen
+# of them. Same budget, expressed in units that do not move when a section
+# gains bullets — which is exactly how this went wrong: bulleting the
+# EXPERIENCE entries added six markers, a 1116-word CV became "1122", tripped
+# _CV_MAX_WORDS by two, and the trimmer dropped a 93-word project write-up to
+# the "Other projects" line to recover them.
+_CV_TARGET_WORDS = 1067
+_CV_MAX_WORDS = 1107
+
+def _budget_words(text: str) -> int:
+    """Words of page space in a CV body, ignoring bullet markers.
+
+    str.split() counts "•" as a word. It is two characters of page width and no
+    line of its own, so counting it makes the budget depend on how many bullets
+    a section happens to use rather than on how much text there is. That is not
+    theoretical: bulleting the EXPERIENCE entries added six markers to every CV,
+    which pushed a 1116-word Bright Ascension CV to a counted 1122 — two over
+    _CV_MAX_WORDS — and the trimmer paid the two back by demoting a 93-word
+    project write-up.
+    """
+    return sum(1 for w in text.split() if w != "•")
+
 
 # Every promoted entry costs a title line and a blank line on top of its words.
 # At roughly ten words to a rendered line that is ~20 words of page space the
@@ -1561,7 +1584,7 @@ def _pad_experience_body(body: str, needed_words: int, role_type: str) -> str:
         if not p or _already_written_up(p["title"], body):
             continue  # already written up
         entry = _format_project_entry(p)
-        cost = len(entry.split()) + _ENTRY_LINE_COST
+        cost = _budget_words(entry) + _ENTRY_LINE_COST
         if cost > budget:
             continue  # would push past the two-page ceiling — try a shorter one
         body = f"{body}\n\n{entry}"
@@ -1602,7 +1625,7 @@ def _shorten_entry(entry: str, excess_words: int) -> tuple[str, int]:
     # project someone forgot to describe, which is worse than not writing it up.
     while excess_words > 0 and len(bullet_idx) > 1:
         cut = bullet_idx.pop()
-        excess_words -= len(lines[cut].split())
+        excess_words -= _budget_words(lines[cut])
         del lines[cut]
     return "\n".join(lines), excess_words
 
@@ -1626,7 +1649,7 @@ def _trim_experience_body(body: str, excess_words: int, min_entries: int = _CV_M
     entries = _split_entries(body)
     while excess_words > 0 and len(entries) > min_entries:
         dropped = entries.pop()
-        excess_words -= len(dropped.split()) + _ENTRY_LINE_COST
+        excess_words -= _budget_words(dropped) + _ENTRY_LINE_COST
     for i in range(len(entries) - 1, 0, -1):
         if excess_words <= 0:
             break
@@ -1706,7 +1729,7 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
         # toolkit) is fixed, so the shortfall is measured on the whole CV and paid
         # for by promoting another project. Re-uses the LLM's own ordering — no
         # second model call.
-        shortfall = _CV_TARGET_WORDS - len(cv_body.split())
+        shortfall = _CV_TARGET_WORDS - _budget_words(cv_body)
         if shortfall > 0:
             padded = _pad_experience_body(exp_body, shortfall, role_type)
             if padded != exp_body:
@@ -1718,8 +1741,8 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
         # did. Dropping the least relevant write-up is not a loss of breadth: the
         # project moves to the "Other projects" line, which is computed from
         # whatever is not written up.
-        elif len(cv_body.split()) > _CV_MAX_WORDS:
-            trimmed = _trim_experience_body(exp_body, len(cv_body.split()) - _CV_MAX_WORDS)
+        elif _budget_words(cv_body) > _CV_MAX_WORDS:
+            trimmed = _trim_experience_body(exp_body, _budget_words(cv_body) - _CV_MAX_WORDS)
             if trimmed != exp_body:
                 exp_body = trimmed
                 experience = _finish_experience(exp_body, lang)
