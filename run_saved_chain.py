@@ -71,6 +71,27 @@ def main() -> int:
         print(f"\n❌ analysis failed (exit {code})", flush=True)
         return 1
 
+    # Integrity checks last, over what the run just produced.
+    #
+    # invariants.py carries twenty-odd of these and, until 2026-09-11, only
+    # nightly_scout ran them — so the WebUI button, which is how the URL-list
+    # route is actually driven, never checked anything it wrote. Every fault
+    # this pipeline has had was silent: a report present and correct-looking
+    # with no link to the CV beside it, a wall banked as a job page. Nothing
+    # errors, so nothing gets looked at.
+    #
+    # Printed, never fatal: the scrape and the analysis have already banked
+    # their work, and a violation is a thing to read, not a reason to discard
+    # the run.
+    try:
+        sys.path.insert(0, str(ROOT))
+        from invariants import report as _invariant_report
+        print(f"\n{'=' * 60}\n③ Integrity checks  ({datetime.now():%H:%M:%S})\n{'=' * 60}",
+              flush=True)
+        _invariant_report()
+    except Exception as e:  # noqa: BLE001 - never let the check take the run down
+        print(f"⚠️ 整合性チェックを実行できませんでした: {type(e).__name__}: {e}", flush=True)
+
     print(f"\n✅ chain complete  ({datetime.now():%H:%M:%S})", flush=True)
     return 0
 

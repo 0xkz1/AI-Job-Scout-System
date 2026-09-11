@@ -901,6 +901,55 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
                 if _reviewed:
                     print(f"  🔍 reviewed {_reviewed} new document(s)", flush=True)
 
+    # --- Re-finish the reports for the documents this run just wrote ---
+    #
+    # The report was written in the loop above, and its cv:/cover_letter: links
+    # are derived from what is ON DISK — correct, except that the check runs
+    # before the expensive half creates the files. So a job receiving its FIRST
+    # documents gets a report that predates them: no links, and no review
+    # scores to read either, because the reviews had not run yet.
+    #
+    # The failure is silent, which is why it survived. The report is present
+    # and reads correctly; only the CV/CL columns and the apply_priority
+    # formula in the Obsidian Bases come out blank, and the 🎯 優先度 view —
+    # which filters on cv_review_score existing — drops the job entirely.
+    #
+    # Measured 2026-09-11: all 16 jobs that got their first documents in one
+    # run had unlinked reports. The run printed "Saved 3977 match reports" and
+    # "Saved 16 tailored CVs" and nothing said the two were not joined up.
+    #
+    # patch_report_doc_links.py and patch_review_scores.py were written to
+    # repair exactly this by hand, and were called by nothing — the data got
+    # fixed each time and the generator kept reproducing it. Same logic, now on
+    # the path that creates the problem. Both are pure additions and idempotent,
+    # so a job whose report was already complete is untouched.
+    if _doc_tasks:
+        from patch_report_doc_links import patch as _link_docs
+        from patch_review_scores import patch as _add_review_scores
+
+        _refinished = 0
+        for _t in _doc_tasks:
+            _stem = _t["match_filename"]
+            _path = os.path.join(match_dir, f"{_stem}.md")
+            if not os.path.exists(_path):
+                continue
+            try:
+                with open(_path, encoding="utf-8") as _f:
+                    _before = _f.read()
+                _linked, _ = _link_docs(_stem, _before)
+                _text = _linked if _linked else _before
+                _text, _ = _add_review_scores(_text, _stem)
+                if _text != _before:
+                    with open(_path, "w", encoding="utf-8") as _f:
+                        _f.write(_text)
+                    _refinished += 1
+            except OSError as _e:
+                # One unreadable report must not lose the rest of the run's work.
+                print(f"  ⚠ could not re-finish {_stem}: {_e}", flush=True)
+        if _refinished:
+            print(f"  🔗 linked {_refinished} report(s) to the documents just written",
+                  flush=True)
+
     print(f"  📊 Saved {len(passed_jobs)} match reports to {match_dir}/")
     # "deferred", not "outside top N": the cap now counts documents this run
     # would write, so these are jobs whose turn is a later run rather than jobs
@@ -1300,8 +1349,10 @@ async def main():
             # Checkpoint save BEFORE report/CV generation: LLM context scores and
             # summaries are expensive — a crash below must not lose them.
             raw_path = os.path.join(output_dir, "_analyzed.json")
-            with open(raw_path, "w") as f:
+            tmp_path = f"{raw_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(analyzed, f, indent=2, ensure_ascii=False, default=str)
+            os.replace(tmp_path, raw_path)
 
             # Apply filters (title exclusion etc.) even in reanalyze mode
             passed, filtered_out = filter_jobs(analyzed, config)

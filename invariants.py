@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import Counter
@@ -43,6 +44,8 @@ import yaml  # noqa: E402
 
 OUTPUT = ROOT / "10_output"
 ANALYZED = OUTPUT / "_analyzed.json"
+YIELD_HISTORY = OUTPUT / "_nightly_site_yield_history.json"
+STATUS_HISTORY = OUTPUT / "_nightly_site_status_history.json"
 REVIEWS = OUTPUT / "15_reviews"
 
 # The cron script that actually runs the scrapers. It lives outside this repo, so
@@ -378,11 +381,24 @@ def check_review_scores_track_rubric(config: dict) -> list[str]:
     return []
 
 
-# Per-site wall-clock cap enforced by the Hermes cron wrapper (`timeout`, so a
-# breach shows up as exit 124). Not readable from this repo — the wrapper lives in
-# ~/.hermes/profiles/archivist/cron/jobs.json — so it is mirrored here and must be
-# updated alongside it.
+# Per-site wall-clock cap enforced by the nightly wrapper (`timeout`, so a breach
+# shows up as exit 124). Not readable from this repo — the script lives in
+# ~/dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh — so it is
+# mirrored here and must be updated alongside it.
 SITE_TIMEOUT_SECONDS = 1500
+# Sites the script gives their own cap, for reasons it records next to each:
+# indeed and linkedin because a cold description cache cannot fit 1500s, reed
+# because its measured run is 2110s (see _SECONDS_PER_SEARCH below). A site
+# absent here is judged against SITE_TIMEOUT_SECONDS.
+_SITE_TIMEOUT_OVERRIDES = {
+    "reed": 2200,
+    "indeed": 2400,
+    "linkedin": 2400,
+}
+
+
+def _site_timeout(site: str) -> int:
+    return _SITE_TIMEOUT_OVERRIDES.get(site, SITE_TIMEOUT_SECONDS)
 # MEASURED seconds per search, per site. Two earlier attempts at this were wrong:
 #   1. Modelling it as "2s setup + 2s per page" gave 14s at depth 6 — off by 5x,
 #      because page navigation is not the cost. The per-job description fetch is:
@@ -391,20 +407,34 @@ SITE_TIMEOUT_SECONDS = 1500
 #   2. Applying reed's measured 68s to every site flagged all five, including
 #      guardian, which demonstrably completes.
 # Sites differ by an order of magnitude, so each carries its own number:
-#   reed      68.0  observed directly (37 searches in 42 min, depth 6)
+#   reed      58.6  observed directly (36 searches in 2110s, depth 3, 2026-09-08)
 #   guardian  22.6  back-computed from a completing run (1421s / 63 searches)
 #   adzuna     ---  API path now; the old Playwright timeout says only ">23.8"
 #   indeed     ---  its 27s runs were instant Cloudflare failures, not work
 # A site with no entry is NOT judged: warning off a guess would train the reader
 # to ignore this check. Add a number only from `time run.py --site <site>`.
 # Stored as (seconds_per_search, depth_it_was_measured_at) so lowering depth is
-# reflected instead of ignored. Cost splits into a fixed page walk — ~2s of settle
-# per page — and the description fetch, which scales with how many postings the
-# depth returns; both fall as depth falls, so the figure is scaled linearly by
-# depth. Linear is an approximation, deliberately kept simple: it is calibrated at
-# the depth actually measured, and re-measuring is cheap (`time run.py --site X`).
+# reflected instead of ignored, and the figure is scaled linearly by depth.
+#
+# That scaling is why reed was allowed to time out for five nights while this
+# check said it fit. reed's 68s was measured at depth 6; scaled linearly it
+# predicted 34s at depth 3, so 36 searches "needed" 1224s of the 1500s cap. The
+# run re-measured AT depth 3 on 2026-09-08 took 58.6s per search — 2110s, not
+# 1224s. Cost does not halve when depth does, because a search that returns two
+# pages walks two pages at either setting; only the searches deep enough to be
+# truncated get cheaper.
+#
+# The same run says where the time actually goes, and it is not where the note
+# above assumed: 648 descriptions fetched (~648s, 31%) against ~1460s of page
+# walking across 83 page loads. Making the fetch concurrent — the fix this check
+# suggests, and which scraper_helper tried once and hit EPIPE — would bring 2110s
+# to roughly 1590s. Still over the cap. The page walk is now the cost.
+#
+# So prefer a number measured at the depth actually configured. Re-measuring is
+# cheap and unambiguous: `run.py --site <site> --scrape-only`, wall-clock over
+# the "searching" lines.
 _SECONDS_PER_SEARCH = {
-    "reed": (68.0, 6),
+    "reed": (58.6, 3),
     "guardian": (22.6, 3),
 }
 
@@ -440,14 +470,17 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
         depth = max_pages_for(site, config)
         per_search = rate * depth / measured_depth
         needed = searches * per_search
-        if needed > SITE_TIMEOUT_SECONDS:
+        cap = _site_timeout(site)
+        if needed > cap:
             out.append(
-                f"{site}: ~{needed:.0f}s needed against a {SITE_TIMEOUT_SECONDS}s cron "
+                f"{site}: ~{needed:.0f}s needed against a {cap}s cron "
                 f"timeout ({searches} searches x {per_search:.0f}s measured, depth "
                 f"{depth}). Expect exit 124 and truncated postings. Cut `keywords` x "
-                f"`locations` to at most {int(SITE_TIMEOUT_SECONDS / per_search)} "
-                f"searches, or make the description fetch concurrent — depth is not the "
-                f"main cost, the serial 1s-per-job description fetch is."
+                f"`locations` to at most {int(cap / per_search)} "
+                f"searches, lower `max_pages_per_site`, or raise this site's cron "
+                f"timeout if the nightly DEADLINE still has room. Making the "
+                f"description fetch concurrent is NOT enough on its own: measured on "
+                f"reed, it is under a third of the run."
             )
     return out
 
@@ -467,6 +500,22 @@ def check_every_site_still_yields(config: dict) -> list[str]:
     green runs, a growing database (other sites), and no signal anywhere. The
     per-site exit codes could not show it either, because the run genuinely
     succeeded.
+
+    What it measures is NEW rows, though, and "returned nothing" and "returned
+    only postings already in the database" are not the same fault. guardian is
+    the case that separates them: it is a small board that yields 2-4 matching
+    jobs a night, the same handful for weeks, so it goes for stretches with no
+    new row while its extractor is working perfectly. Reported as a stale
+    selector it sends the reader to debug a scraper that is fine. So the
+    scraper's own output — the yield history the nightly writes — is consulted
+    before the selector is blamed.
+
+    That history is not enough on its own: it records only nights a site RAN, and
+    carries no dates, so a site that has been dying at its timeout keeps showing
+    the healthy counts from the last night it finished. reed read as a saturated
+    board on five-night-old numbers while it was in fact being killed at 1500s
+    every night. The status history does carry the failures, so it is asked first
+    — "it never finished" outranks both other readings.
     """
     from datetime import date, datetime, timedelta
 
@@ -510,12 +559,73 @@ def check_every_site_still_yields(config: dict) -> list[str]:
                 age = f"{days} days"
             except ValueError:
                 age = f"since {seen}"
-            out.append(
-                f"{site}: no job scraped for {age} (last {seen}) while still in "
-                f"`sites`. A stale selector yields nothing without erroring — check "
-                f"the extractor against a live page before trusting the exit code."
-            )
+            statuses = _recent_statuses(site)
+            if statuses and not any(s == "ok" for s in statuses):
+                out.append(
+                    f"{site}: no new posting for {age} (last {seen}) because it has "
+                    f"not completed a run — its last {len(statuses)} recorded nights "
+                    f"are {'/'.join(statuses)}. Nothing is wrong with the extractor; "
+                    f"the run is being killed before it finishes. Fix the budget, not "
+                    f"the selector."
+                )
+                continue
+            recent = _recent_yields(site)
+            if recent and any(recent):
+                # The scraper is returning postings; they are simply ones the
+                # database already holds. Not a fault to fix, but still worth
+                # saying — a board that has gone this long without a new posting
+                # is a board that has stopped being worth its slot in the budget.
+                out.append(
+                    f"{site}: returning jobs ({'/'.join(str(n) for n in recent)} on "
+                    f"its last {len(recent)} recorded nights) but no NEW posting for "
+                    f"{age} (last {seen}) — the extractor is working and the board is "
+                    f"saturated. Judge it on whether the slot still earns its place, "
+                    f"not as a broken selector."
+                )
+            else:
+                out.append(
+                    f"{site}: no job scraped for {age} (last {seen}) while still in "
+                    f"`sites`, and its yield history shows nothing returned either. A "
+                    f"stale selector yields nothing without erroring — check the "
+                    f"extractor against a live page before trusting the exit code."
+                )
     return out
+
+
+def _recent_yields(site: str, keep: int = 5) -> list[int]:
+    """What the nightly recorded this site's scraper as actually RETURNING.
+
+    Distinct from the row count in the database: this is the scraper's own
+    output before the merge drops duplicates. Absent (the file, the site, or a
+    malformed entry) is reported as no evidence, not as a zero — an unrecorded
+    night must not read as a failed one.
+    """
+    try:
+        history = json.loads(YIELD_HISTORY.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    counts = history.get(site) if isinstance(history, dict) else None
+    if not isinstance(counts, list):
+        return []
+    return [n for n in counts[-keep:] if isinstance(n, int)]
+
+
+def _recent_statuses(site: str, keep: int = 4) -> list[str]:
+    """What the nightly recorded this site's run as DOING — ok, timeout, failed.
+
+    The yield history holds only nights a site ran and stamps no dates on them,
+    so it cannot say whether the numbers in it are from last night or last week.
+    This one records the failures too, which is what separates "quiet board"
+    from "killed before it finished".
+    """
+    try:
+        history = json.loads(STATUS_HISTORY.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = history.get(site) if isinstance(history, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [s for s in entries[-keep:] if isinstance(s, str)]
 
 
 def check_configured_sites_are_scheduled(config: dict) -> list[str]:
@@ -611,19 +721,23 @@ def check_one_document_renderer(config: dict) -> list[str]:
 
     Generation is already single-source — one generate_cv, one
     save_cover_letter, one MASTER_COVER_LETTER — which is why a fix to the
-    letter template reaches every route for free. Rendering is not. app.py
-    holds the live renderer (_md_to_pdf_bytes) and pdf_generator.py holds a
-    second, orphaned copy that nothing imports but that still runs as a CLI.
-    It never received the two-A4-page CV tightening or any of the cover-letter
-    layout rules, so running it produces documents that look a year old, and
-    nothing says so.
+    letter template reaches every route for free. Rendering is not, and has
+    now been split twice. First pdf_generator.py carried an orphaned copy that
+    nothing imported but that still ran as a CLI; it never received the
+    two-A4-page CV tightening or any of the cover-letter layout rules. Then
+    pdf_core.py was added as an "extraction" that was really a rewrite: no
+    markdown preprocessing and no nl2br, so every toolkit category and entry
+    title fused into the paragraph beneath it. Both shipped documents that
+    looked wrong, and nothing said so.
 
-    A second copy cannot be kept in sync by discipline; this check exists so
-    that adding one is loud instead of silent.
+    The live renderer now lives in pdf_core.py — app.py imports it, so the
+    Streamlit route and the CLI cannot diverge. A second copy cannot be kept in
+    sync by discipline; this check exists so that adding one is loud instead of
+    silent.
     """
     import re
 
-    allowed = {"app.py"}
+    allowed = {"pdf_core.py"}
     offenders = []
     for path in sorted(ROOT.glob("*.py")):
         if path.name in allowed:
@@ -635,9 +749,9 @@ def check_one_document_renderer(config: dict) -> list[str]:
         return []
     return [
         f"a second PDF renderer lives in {', '.join(offenders)}. The live one is "
-        f"app.py:_md_to_pdf_bytes; a copy silently misses every layout fix applied "
-        f"there. Delete it, or have it call _convert_pdf_versioned instead of "
-        f"rendering its own HTML."
+        f"pdf_core.py:_md_to_pdf_bytes; a copy silently misses every layout fix "
+        f"applied there. Delete it, or import _convert_pdf_versioned from pdf_core "
+        f"instead of rendering its own HTML."
     ]
 
 
@@ -886,7 +1000,75 @@ def check_action_tier_respects_its_gates(config: dict) -> list[str]:
     return out
 
 
+def check_reports_link_their_documents(config: dict) -> list[str]:
+    """A report whose CV or cover letter is on disk must link to it.
+
+    The links are what the Obsidian Bases read: the CV/CL columns, the
+    apply_priority formula, and the 🎯 優先度 view, which filters on
+    cv_review_score existing and so drops an unlinked job from the table
+    altogether. An unlinked report is therefore a document that was paid for
+    and cannot be found — and it reads as perfectly correct on its own, which
+    is why this went unnoticed.
+
+    run.py derives the links from file existence, but that check ran before the
+    expensive half wrote the files, so every job receiving its FIRST documents
+    got a report that predated them. Measured 2026-09-11: 16 of 16 such jobs in
+    one run. Two hand-run repair scripts existed for it — patch_report_doc_links
+    and patch_review_scores — and were called by nothing, so the data was fixed
+    repeatedly while the generator kept reproducing the fault.
+
+    A ceiling on what is reported, not on what is checked: the point is to say
+    that the seam has opened, and a run that has just broken it breaks it in
+    bulk.
+    """
+    # Through doc_paths, not Path.glob: a Syncthing conflict copy sits beside
+    # the real report with a .md suffix and is not a document.
+    from doc_paths import md_files
+
+    match_dir = OUTPUT / "00_matches"
+    cv_dir = OUTPUT / "10_cvs"
+    cl_dir = OUTPUT / "10_cover-letters"
+    if not match_dir.exists():
+        return []
+
+    orphaned = []
+    for report_path in md_files(match_dir):
+        stem = report_path.stem
+        has_cv = (cv_dir / f"{stem}_CV.md").exists()
+        has_cl = (cl_dir / f"{stem}_CL.md").exists()
+        if not (has_cv or has_cl):
+            continue
+        try:
+            head = report_path.read_text(encoding="utf-8")[:4000]
+        except OSError:
+            continue
+        fm = re.match(r"\A---\n(.*?)\n---\n", head, re.DOTALL)
+        if not fm:
+            continue
+        body = fm.group(1)
+        missing = []
+        if has_cv and not re.search(r"^cv:", body, re.MULTILINE):
+            missing.append("cv")
+        if has_cl and not re.search(r"^cover_letter:", body, re.MULTILINE):
+            missing.append("cover_letter")
+        if missing:
+            orphaned.append(f"{stem} ({'/'.join(missing)})")
+
+    if not orphaned:
+        return []
+    shown = ", ".join(sorted(orphaned)[:5])
+    more = f" and {len(orphaned) - 5} more" if len(orphaned) > 5 else ""
+    return [
+        f"{len(orphaned)} match report(s) do not link a document that exists on "
+        f"disk: {shown}{more}. The document was generated and cannot be reached "
+        f"from the table. Run `python patch_report_doc_links.py --apply` to "
+        f"repair the reports, then find what wrote them without the link — "
+        f"run.py re-finishes them after the generation half for this reason."
+    ]
+
+
 CHECKS = (
+    check_reports_link_their_documents,
     check_one_document_renderer,
     check_pdf_identity_ignores_stamped_properties,
     check_configured_sites_are_dispatched,
