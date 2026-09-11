@@ -442,8 +442,13 @@ SKILL_SYNONYMS = {
     "frontend architecture": "web design",
     "component based architecture": "design systems",
     "component driven development": "design systems",
-    "backend services": "node.js / express",
-    "backend development": "node.js / express",
+    # Retargeted 2026-09-05 when skills.md split "Node.js / Express" in two:
+    # Express is one 139-line internal API, Node.js is the plugin runtime and
+    # the tooling. A posting asking for "backend development" is asking about
+    # the latter, and pointing these at the row that no longer exists would
+    # have scored every such posting 0 in silence.
+    "backend services": "node.js",
+    "backend development": "node.js",
     "agentic frameworks": "multi-agent systems",
     "data orchestration": "workflow automation",
     "landing page": "web design",
