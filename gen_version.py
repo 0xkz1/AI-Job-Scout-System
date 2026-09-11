@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-
 from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
@@ -48,18 +47,33 @@ TEMPLATE_DIR = PROFILE_DIR / "career" / "cover-letter"
 GEN_SPEC_VERSION = "2026-08-08.1"  # strategy-led narrative CL: plan verified evidence before drafting, then vet the full body
 
 # Data files whose CONTENT feeds every pair, regardless of role.
+#
+# The two letter sources are listed for the reason the note under _GLOBAL_DIRS
+# gives: they feed EVERY cover letter, and while they were missing here, editing
+# them changed every letter without moving a single fingerprint. Measured
+# 2026-08-28: the canonical narrative went from 252 words to 177 and four fact
+# blocks gained a role gate, and `--stale-only` still reported 0 documents to
+# rebuild — 1,028 letters carrying the superseded opening all claimed to be
+# current.
 _GLOBAL_FILES = [
     PROFILE_DIR / "ethos.md",
     PROFILE_DIR / "about.md",
     PROFILE_DIR / "profile.md",
     PROFILE_DIR / "interests.md",
     PROFILE_DIR / "skills.md",
+    TEMPLATE_DIR / "canonical_narrative_v1.md",
+    TEMPLATE_DIR / "letter_facts_v1.md",
 ]
 # "experience" holds the employment records, which used to sit in "projects".
 # It must be listed: an employment entry edited outside this list changes every
 # CV while leaving every fingerprint identical, so nothing rebuilds and the
 # stale documents keep reporting themselves as current.
-_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "experience", CV_ROOT / "skill-toolkit"]
+# "profile" holds the per-role CV profile paragraphs. It is listed for the same
+# reason: a profile edited outside this list changes the CVs built from it while
+# leaving their fingerprints identical. glob("*.md") does not descend, so the
+# superseded copies in profile/archive/ stay out of the hash.
+_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "experience", CV_ROOT / "skill-toolkit",
+                CV_ROOT / "profile"]
 
 
 def _hash_file(h, path: Path) -> None:
