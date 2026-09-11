@@ -2,13 +2,21 @@
 
 Why this exists. The scrapers load that file as Playwright's storage_state, and
 on 2026-09-11 it was five weeks stale and had never held a session: every
-cookie in it was anonymous. Signed out, Indeed no longer answers /viewjob with
-a posting or with a Cloudflare challenge — it answers with a sign-in wall, 404
-characters of "Ready to take the next step? / Create an account or sign in."
-On 2026-09-07 that wall came back for 27 of 33 URLs in one run.
+cookie in it was anonymous — 35 live cookies, not one of them a login. Indeed
+answers such a session with a posting for the first request and a sign-in wall
+for the rest, 404 characters of "Ready to take the next step? / Create an
+account or sign in." On 2026-09-07 that wall came back for 27 of 33 URLs in
+one run.
 
-So no amount of retrying, stealth or route-switching fixes it from here. The
-session has to be a real one, and only you can create it.
+The wall turned out to count per browser session, not per account: relaunching
+the browser resets it, which is what scrape_urls now does when every route
+comes back walled, and it recovers the postings on its own. So this script is
+no longer required to get a scrape through.
+
+It is still worth running. A real session is the difference between one
+posting per browser launch and a run that does not spend most of its time
+relaunching, and some pages Indeed only renders in full to a signed-in
+viewer.
 
     xvfb-run does NOT work for this. It needs a browser you can see and type
     into, so run it from your desktop session, not over a bare SSH shell.

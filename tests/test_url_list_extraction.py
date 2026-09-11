@@ -19,6 +19,7 @@ Three faults, all measured on the 2026-08-03/06 runs:
     was fetched and stored twice.
 """
 import ast
+import asyncio
 import json
 import pathlib
 
@@ -164,6 +165,100 @@ def test_a_long_page_mentioning_a_ray_id_is_not_blocked():
             "read a Cloudflare Ray ID from logs, and tune WAF rules. ") * 20
     assert len(page) > s.BLOCK_MAX_CHARS
     assert s.looks_blocked(page) is None
+
+
+# --- the wall counts per browser session ----------------------------------
+
+class _FakeBrowser:
+    def __init__(self, closed):
+        self._closed = closed
+
+    async def close(self):
+        self._closed.append(self)
+
+
+class _FakePlaywright:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_a_walled_indeed_url_is_retried_in_a_new_browser(tmp_path, monkeypatch):
+    """Measured 2026-09-11: with the same stored anonymous cookies, 12 postings
+    fetched in one browser session returned 1, and the same postings fetched
+    one per fresh browser returned 8 of 8 — every one on m/viewjob at the first
+    attempt. So every route coming back walled means the session is spent, not
+    that the posting is gone, and giving up there threw away recoverable jobs.
+    """
+    monkeypatch.setattr(s, "OUTPUT_FILE", str(tmp_path / "url_list_jobs.json"))
+    monkeypatch.setattr(s, "async_playwright", lambda: _FakePlaywright())
+
+    closed = []
+    launches = []
+
+    async def _new_browser(p, announce=True):
+        b = _FakeBrowser(closed)
+        launches.append(b)
+        return b, object()
+
+    # Walled on the first session, fine on the second — the observed shape.
+    attempts = []
+
+    async def _fetch(page, url, jk):
+        attempts.append(jk)
+        return None if len(attempts) == 1 else "a real posting page" * 200
+
+    monkeypatch.setattr(s, "_new_browser", _new_browser)
+    monkeypatch.setattr(s, "_fetch_indeed_page", _fetch)
+    monkeypatch.setattr(s, "extract_job_from_text", lambda t: {
+        "title": "Content Designer", "company": "Acme",
+        "location": "Edinburgh", "description": "Write the words."})
+
+    jobs = asyncio.run(s.scrape_urls(["https://uk.indeed.com/viewjob?jk=abc123"]))
+
+    assert len(launches) == 2, "a walled fetch did not get a fresh browser session"
+    assert launches[0] in closed, "the spent session was left open"
+    assert len(attempts) == 2, "the URL was not retried after the relaunch"
+    assert [j["title"] for j in jobs] == ["Content Designer"], (
+        "the posting recovered by the retry was not kept"
+    )
+
+
+def test_a_posting_blocked_in_a_fresh_session_too_is_given_up_on(tmp_path, monkeypatch):
+    """One retry, not a loop. A posting that is genuinely unreachable must not
+    relaunch a browser per attempt forever."""
+    monkeypatch.setattr(s, "OUTPUT_FILE", str(tmp_path / "url_list_jobs.json"))
+    monkeypatch.setattr(s, "async_playwright", lambda: _FakePlaywright())
+
+    closed = []
+    launches = []
+
+    async def _new_browser(p, announce=True):
+        b = _FakeBrowser(closed)
+        launches.append(b)
+        return b, object()
+
+    attempts = []
+
+    async def _fetch(page, url, jk):
+        attempts.append(jk)
+        return None
+
+    monkeypatch.setattr(s, "_new_browser", _new_browser)
+    monkeypatch.setattr(s, "_fetch_indeed_page", _fetch)
+
+    def _never(text):
+        raise AssertionError("a model call was made on a page that never loaded")
+
+    monkeypatch.setattr(s, "extract_job_from_text", _never)
+
+    jobs = asyncio.run(s.scrape_urls(["https://uk.indeed.com/viewjob?jk=abc123"]))
+
+    assert jobs == []
+    assert len(attempts) == 2, "gave up too early, or retried more than once"
+    assert len(launches) == 2
 
 
 # --- URL normalisation ----------------------------------------------------

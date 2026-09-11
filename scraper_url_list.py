@@ -355,6 +355,41 @@ async def _fetch_indeed_page(page, url: str, jk: str) -> str | None:
             continue
     return None
 
+async def _new_browser(p, announce: bool = True):
+    """A fresh browser carrying the stored Indeed session, stealth applied.
+
+    A factory rather than inline setup because the run rebuilds it mid-flight:
+    Indeed's sign-in wall is a per-browser-session counter, not a block on
+    being signed out. Measured 2026-09-11 with the same anonymous cookies —
+    12 postings fetched in one browser session returned 1; the same postings
+    fetched one per fresh browser returned 8 of 8, every one on m/viewjob at
+    the first attempt. Relaunching resets it.
+    """
+    browser = await p.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    )
+    context_kwargs = {
+        "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "viewport": {"width": 1920, "height": 1080},
+        "locale": "en-GB",
+        "timezone_id": "Europe/London",
+    }
+    if os.path.exists(COOKIE_FILE):
+        context_kwargs["storage_state"] = COOKIE_FILE
+        if announce:
+            print(f"  → Loaded Indeed session from {COOKIE_FILE}")
+    context = await browser.new_context(**context_kwargs)
+    await Stealth().apply_stealth_async(context)
+    page = await context.new_page()
+    return browser, page
+
+
 async def scrape_urls(urls):
     jobs = []
     
@@ -397,31 +432,7 @@ async def scrape_urls(urls):
     print(f"Found {len(urls_to_scrape)} new URLs to scrape.")
 
     async with async_playwright() as p:
-        context_kwargs = {
-            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "viewport": {"width": 1920, "height": 1080},
-            "locale": "en-GB",
-            "timezone_id": "Europe/London",
-        }
-        if os.path.exists(COOKIE_FILE):
-            try:
-                context_kwargs["storage_state"] = COOKIE_FILE
-                print(f"  → Loaded Indeed session from {COOKIE_FILE}")
-            except Exception as e:
-                print(f"  ⚠ Could not load {COOKIE_FILE}: {e}")
-
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
-        context = await browser.new_context(**context_kwargs)
-        stealth = Stealth()
-        await stealth.apply_stealth_async(context)
-        page = await context.new_page()
+        browser, page = await _new_browser(p)
 
         for i, url in enumerate(urls_to_scrape, 1):
             print(f"\n[{i}/{len(urls_to_scrape)}] Fetching: {url}")
@@ -453,7 +464,18 @@ async def scrape_urls(urls):
                 if indeed_jk:
                     text = await _fetch_indeed_page(page, url, indeed_jk)
                     if not text:
-                        print(f"    🚫 Indeed anti-bot check blocked all variants for jk={indeed_jk}. "
+                        # Not a retry of the same request — a new browser. The
+                        # wall counts per session, so every route staying blocked
+                        # says this session is spent, not that the posting is
+                        # unreachable. Adaptive rather than a fixed relaunch
+                        # interval: costs nothing on a run that is not being
+                        # walled, and keeps up with one that is.
+                        print("    ↻ every route walled — new browser session, one retry")
+                        await browser.close()
+                        browser, page = await _new_browser(p, announce=False)
+                        text = await _fetch_indeed_page(page, url, indeed_jk)
+                    if not text:
+                        print(f"    🚫 Indeed blocked jk={indeed_jk} in a fresh session too. "
                               f"(Tip: Open URL in browser and save HTML to 00_saved/local_html/ for 100% extraction)")
                         continue
                 else:
