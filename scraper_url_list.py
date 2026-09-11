@@ -7,6 +7,7 @@ import fcntl
 from datetime import datetime
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 
 from llm_client import call_llm
 from scraper_linkedin_guest import fetch_one, job_id_from_url
@@ -14,6 +15,7 @@ from scraper_linkedin_guest import fetch_one, job_id_from_url
 SAVED_DIR = os.path.join(os.path.dirname(__file__), "00_saved")
 URL_LIST_FILE = os.path.join(SAVED_DIR, "url-list.md")
 OUTPUT_FILE = os.path.join(SAVED_DIR, "url_list_jobs.json")
+COOKIE_FILE = os.path.join(os.path.dirname(__file__), "cookies", "indeed_cookies.json")
 
 # Anti-bot interstitials are short, but not short enough to trip the
 # too-short guard: Indeed's Cloudflare page renders 250 characters of "Additional
@@ -40,6 +42,28 @@ BLOCK_MARKERS = (
 # conditions together, so a genuinely terse posting is not thrown away.
 BLOCK_MAX_CHARS = 400
 RAY_ID_RE = re.compile(r"\bray id\b", re.IGNORECASE)
+
+# Indeed answers a signed-out /viewjob with a sign-in wall rather than a 403: a
+# 404-character page reading "Ready to take the next step? / Create an account
+# or sign in." It cites no Cloudflare and carries no Ray ID, so neither guard
+# above sees it, and at 404 characters it clears BLOCK_MAX_CHARS by four. On
+# 2026-09-07 that handed the model a login form 27 times in one 33-URL run and
+# every one of them came back an empty object.
+#
+# Length-gated because real postings do close with "ready to take the next
+# step?" as a call to action. A page that says it in under a thousand
+# characters is the wall; a posting that says it is thousands long.
+LOGIN_WALL_MARKERS = (
+    "create an account or sign in",
+    "ready to take the next step",
+)
+LOGIN_WALL_MAX_CHARS = 1000
+
+# Floor for accepting an Indeed page that has no #jobDescriptionText element —
+# the branch the sign-in wall walked through. Measured on the same run: the
+# wall bodies were 404 characters, the one genuine page that reached this
+# branch was 7,954. The old floor of 300 sat below both.
+INDEED_BODY_MIN_CHARS = 1200
 
 
 ANALYZED_PATH = os.path.join(os.path.dirname(__file__), "10_output", "_analyzed.json")
@@ -104,6 +128,10 @@ def looks_blocked(text: str) -> str | None:
             return marker
     if len(text) < BLOCK_MAX_CHARS and RAY_ID_RE.search(text):
         return "cloudflare ray id on a near-empty page"
+    if len(text) < LOGIN_WALL_MAX_CHARS:
+        for marker in LOGIN_WALL_MARKERS:
+            if marker in low:
+                return f"sign-in wall ({marker})"
     return None
 
 
@@ -284,6 +312,49 @@ def drop_dropped_sources(urls: list[str]) -> tuple[list[str], list[str]]:
     return keep, skip
 
 
+
+async def _fetch_indeed_page(page, url: str, jk: str) -> str | None:
+    """Fetch job posting text from Indeed using the fastest, highest-yield variant first.
+
+    Direct /viewjob is heavily blocked by Cloudflare (403), whereas the mobile Web
+    endpoint (m/viewjob) with cookies + stealth succeeds in ~2s and returns the full
+    #jobDescriptionText. We try m/viewjob first, and only fall back if needed.
+    """
+    variants = [
+        ("m/viewjob (mobile - fastest & highest yield)", f"https://uk.indeed.com/m/viewjob?jk={jk}"),
+        ("rc/clk (redirect route)", f"https://uk.indeed.com/rc/clk?jk={jk}"),
+        ("viewjob (standard direct)", f"https://uk.indeed.com/viewjob?jk={jk}"),
+    ]
+    for label, target_url in variants:
+        try:
+            print(f"    → Trying {label}...")
+            resp = await page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
+            await page.wait_for_timeout(2000)
+            text = (await page.evaluate("document.body.innerText") or "").strip()
+            if len(text) < 100:
+                continue
+            blocked = looks_blocked(text)
+            if blocked:
+                print(f"      ↳ {label}: {blocked}, {len(text)} chars")
+                continue
+            desc_el = await page.query_selector("#jobDescriptionText, .jobsearch-JobComponent-description")
+            if desc_el:
+                desc_text = (await desc_el.inner_text()).strip()
+                if len(desc_text) > 100:
+                    print(f"    ✓ Successfully retrieved Indeed description via {label} ({len(desc_text)} chars)")
+                    return text
+            elif len(text) >= INDEED_BODY_MIN_CHARS:
+                print(f"    ✓ Retrieved Indeed page content via {label} ({len(text)} chars)")
+                return text
+            else:
+                # Say which of the two it was, so the next wall variant is
+                # diagnosable from the log instead of from a rerun.
+                print(f"      ↳ {label}: no #jobDescriptionText and only "
+                      f"{len(text)} chars of body — not a posting")
+        except Exception:
+            continue
+    return None
+
 async def scrape_urls(urls):
     jobs = []
     
@@ -326,11 +397,30 @@ async def scrape_urls(urls):
     print(f"Found {len(urls_to_scrape)} new URLs to scrape.")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
+        context_kwargs = {
+            "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "viewport": {"width": 1920, "height": 1080},
+            "locale": "en-GB",
+            "timezone_id": "Europe/London",
+        }
+        if os.path.exists(COOKIE_FILE):
+            try:
+                context_kwargs["storage_state"] = COOKIE_FILE
+                print(f"  → Loaded Indeed session from {COOKIE_FILE}")
+            except Exception as e:
+                print(f"  ⚠ Could not load {COOKIE_FILE}: {e}")
+
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
+        context = await browser.new_context(**context_kwargs)
+        stealth = Stealth()
+        await stealth.apply_stealth_async(context)
         page = await context.new_page()
 
         for i, url in enumerate(urls_to_scrape, 1):
@@ -359,50 +449,39 @@ async def scrape_urls(urls):
                     # the model rather than dropping the URL outright.
                     print("    ⚠ Guest endpoint gave nothing — falling back to the LLM path")
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(5000) # Give it 5s to render JS/SPA content
-                
-                # Try to reject/accept cookies if popups appear (generic approach)
-                try:
-                    btns = await page.query_selector_all("button")
-                    for btn in btns:
-                        text = await btn.inner_text()
-                        if text and any(w in text.lower() for w in ["accept", "agree", "allow"]):
-                            await btn.click()
-                            await page.wait_for_timeout(1000)
-                            break
-                except Exception:
-                    pass
+                indeed_jk = _indeed_jk(url)
+                if indeed_jk:
+                    text = await _fetch_indeed_page(page, url, indeed_jk)
+                    if not text:
+                        print(f"    🚫 Indeed anti-bot check blocked all variants for jk={indeed_jk}. "
+                              f"(Tip: Open URL in browser and save HTML to 00_saved/local_html/ for 100% extraction)")
+                        continue
+                else:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(5000) # Give it 5s to render JS/SPA content
+                    
+                    try:
+                        btns = await page.query_selector_all("button")
+                        for btn in btns:
+                            b_text = await btn.inner_text()
+                            if b_text and any(w in b_text.lower() for w in ["accept", "agree", "allow"]):
+                                await btn.click()
+                                await page.wait_for_timeout(1000)
+                                break
+                    except Exception:
+                        pass
 
-                # Get entire page text
-                text = await page.evaluate("document.body.innerText")
-                text = text.strip() if text else ""
-                
-                if len(text) < 100:
-                    print("    ⚠ Page content seems too short or blocked.")
-                    continue
+                    text = await page.evaluate("document.body.innerText")
+                    text = text.strip() if text else ""
+                    
+                    if len(text) < 100:
+                        print("    ⚠ Page content seems too short or blocked.")
+                        continue
 
-                # Checked before spending an extraction call. Indeed's
-                # Cloudflare interstitial is 250 characters — over the guard
-                # above — so every blocked /viewjob URL used to be sent to the
-                # model and come back empty, at ~107s each. Say what actually
-                # happened instead, and say what would fix it.
-                blocked = looks_blocked(text)
-                if blocked:
-                    hint = ""
-                    if _indeed_jk(url):
-                        # Not a fetcher problem, and not fixable by one: verified
-                        # 2026-08-06 that /viewjob stays blocked under xvfb-run
-                        # with a headed browser, cached cookies and stealth. The
-                        # nightly reaches these postings from the search listing
-                        # instead, which is why adopt_from_database exists.
-                        hint = (" Indeed's /viewjob is a hard block that no fetcher here "
-                                "can pass; the nightly reads these from the search listing "
-                                "instead, so this one will be adopted automatically once a "
-                                "search happens to surface it.")
-                    print(f"    🚫 Blocked by an anti-bot check ({blocked!r}) — no job "
-                          f"data on this page.{hint}")
-                    continue
+                    blocked = looks_blocked(text)
+                    if blocked:
+                        print(f"    🚫 Blocked by an anti-bot check ({blocked!r}) — no job data on this page.")
+                        continue
 
                 print("    Processing text with the LLM...")
                 job_data = extract_job_from_text(text)

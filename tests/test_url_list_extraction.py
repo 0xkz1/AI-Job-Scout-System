@@ -106,6 +106,57 @@ def test_a_real_job_page_is_not_flagged_as_blocked():
     assert s.looks_blocked(page) is None
 
 
+def test_the_indeed_sign_in_wall_is_detected():
+    """The fault that cost the 2026-09-07 run.
+
+    Signed out, Indeed stopped answering /viewjob with a Cloudflare
+    interstitial and started answering with a sign-in form: 404 characters,
+    no Cloudflare wording, no Ray ID. It therefore cleared BLOCK_MARKERS, and
+    cleared the Ray-ID heuristic twice over — no Ray ID, and four characters
+    past BLOCK_MAX_CHARS. 27 of 33 URLs in that run were handed to the model
+    as if they were postings and every one came back an empty object.
+
+    The opening is verbatim from the run log; the boilerplate after it is
+    padding to the 404 characters the log recorded.
+    """
+    page = ("Ready to take the next step?\nCreate an account or sign in.\n"
+            "By clicking any of the options below, you agree to Indeed's Terms "
+            "of Service and consent to our Cookie Policy and Privacy Policy. "
+            "Continue with Google\nContinue with Apple\nContinue with Facebook\n"
+            "Continue with email\nAlready have an account? Sign in\n"
+            "\u00a9 2026 Indeed\nAccessibility at Indeed\nPrivacy Centre\n"
+            "Do Not Sell My Personal Information\nCookies")
+    # The regime that broke: past the Ray-ID heuristic's ceiling, and short
+    # enough that the new gate still applies. The log recorded 404 characters;
+    # this fixture is the same shape and lands in the same band.
+    assert s.BLOCK_MAX_CHARS < len(page) < s.LOGIN_WALL_MAX_CHARS
+    assert s.looks_blocked(page) == "sign-in wall (create an account or sign in)"
+
+
+def test_a_posting_closing_with_the_same_call_to_action_survives():
+    """"Ready to take the next step?" is ordinary closing copy in a job ad, so
+    the wall phrases only condemn a page too short to be a posting as well.
+    Without the length gate this fix would silently discard real postings."""
+    page = ("Senior Product Designer at Acme Corp. Edinburgh, Scotland. You "
+            "will own the design system, run research and ship in Figma. ") * 12
+    page += "Ready to take the next step? Apply through the link below."
+    assert len(page) > s.LOGIN_WALL_MAX_CHARS
+    assert s.looks_blocked(page) is None
+
+
+def test_the_indeed_body_floor_sits_between_the_wall_and_a_real_page():
+    """_fetch_indeed_page accepts a page with no #jobDescriptionText on length
+    alone. The old floor of 300 sat below the 404-character wall, which is how
+    the wall was announced as "✓ Retrieved Indeed page content".
+
+    Both numbers are from the 2026-09-07 run: the walls were 404 characters,
+    and the one genuine page that reached this branch — jk=478229beba043340
+    via rc/clk — was 7,954.
+    """
+    assert s.INDEED_BODY_MIN_CHARS > 404
+    assert s.INDEED_BODY_MIN_CHARS < 7954
+
+
 def test_a_long_page_mentioning_a_ray_id_is_not_blocked():
     """The heuristic needs BOTH tells. A real posting that happens to contain
     the words must survive — length is what separates them."""

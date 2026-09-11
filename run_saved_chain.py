@@ -46,6 +46,17 @@ def main() -> int:
     if code != 0:
         print(f"\n❌ scrape failed (exit {code}) — not analysing", flush=True)
         return 1
+    # Pages the network path cannot reach are saved out of a browser into
+    # 00_saved/local_html/, and this is what reads them. Nothing ran it before
+    # 2026-09-11, so the workaround the WebUI documents for a blocked Indeed
+    # URL produced nothing no matter how many pages were saved.
+    #
+    # Not fatal: it is the secondary route, and stage ① may have staged real
+    # work that should still be analysed.
+    code = _run("①b Extract 00_saved/local_html/", ["scraper_local_html.py"])
+    if code != 0:
+        print(f"\n⚠ saved-HTML extraction failed (exit {code}) — continuing", flush=True)
+
     if args.scrape_only:
         print("\n✅ scrape done (--scrape-only)", flush=True)
         return 0
