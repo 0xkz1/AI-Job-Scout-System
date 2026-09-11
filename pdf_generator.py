@@ -22,8 +22,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from app import (
+from pdf_core import (
     _convert_pdf_versioned,
+    PdfPageCountError,
     OUTPUT_DIR,
     CV_DIR,
     CL_DIR,
@@ -88,7 +89,14 @@ def main():
             sys.exit(1)
         if not _stale_guard(file_path, args.force):
             sys.exit(2)
-        pdf_path, version, is_new = _convert_pdf_versioned(file_path)
+        try:
+            pdf_path, version, is_new = _convert_pdf_versioned(file_path)
+        except PdfPageCountError as e:
+            # stdout, like _stale_guard: the Obsidian plugin runs this over ssh
+            # with stderr discarded, and a refusal the user cannot read is just
+            # a failure.
+            print(f"🛑 ページ数オーバー: {e}")
+            sys.exit(3)
         status_str = "Minted new version" if is_new else "Reused existing version"
         print(f"✅ [{status_str}] PDF v{version}: {pdf_path}")
         return
@@ -106,11 +114,19 @@ def main():
     print(f"📄 Processing {len(cv_files)} CV(s) with live renderer...")
     count = 0
     skipped = 0
+    overlong = 0
     for cv_path in cv_files:
         if not _stale_guard(cv_path, args.force):
             skipped += 1
             continue
-        pdf_path, version, is_new = _convert_pdf_versioned(cv_path)
+        # Per document, not per batch: one CV that renders long must not take
+        # the other fifty down with it.
+        try:
+            pdf_path, version, is_new = _convert_pdf_versioned(cv_path)
+        except PdfPageCountError as e:
+            print(f"  🛑 CV: {e}")
+            overlong += 1
+            continue
         print(f"  ✓ CV: {cv_path.name} -> v{version}")
         count += 1
 
@@ -118,12 +134,19 @@ def main():
             stem = cv_path.stem.removesuffix("_CV")
             cl_path = CL_DIR / f"{stem}_CL.md"
             if cl_path.exists() and _stale_guard(cl_path, args.force):
-                cl_pdf, cl_v, _ = _convert_pdf_versioned(cl_path)
+                try:
+                    cl_pdf, cl_v, _ = _convert_pdf_versioned(cl_path)
+                except PdfPageCountError as e:
+                    print(f"  🛑 CL: {e}")
+                    overlong += 1
+                    continue
                 print(f"  ✓ CL: {cl_path.name} -> v{cl_v}")
 
     print(f"✅ Rendered {count} document set(s).")
     if skipped:
         print(f"🛑 Skipped {skipped} stale CV(s) — regenerate them, or pass --force.")
+    if overlong:
+        print(f"🛑 Refused {overlong} document(s) over their page budget — trim and re-run.")
 
 
 if __name__ == "__main__":
