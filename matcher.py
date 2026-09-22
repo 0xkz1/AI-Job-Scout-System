@@ -2118,7 +2118,15 @@ def translate_to_ja(text_en: str) -> str:
                        f"Output ONLY the Japanese, no preamble:\n\n{text_en}"}],
             system_prompt="You are a precise EN→JA translator. Output only the translation.",
             temperature=0.1,
-            max_tokens=400,
+            # Budget, not answer length: the models behind the gateway are
+            # reasoning models and spend this same allowance on hidden reasoning
+            # before writing anything, so a translation that fits in 400 still
+            # comes back empty whenever the reasoning is large. A truncated reply
+            # returns "" here, and the caller then walks the whole provider chain
+            # paying that reasoning cost once per provider -- headroom is cheaper
+            # than the fallthrough, and a model that finishes early is billed only
+            # for what it wrote.
+            max_tokens=1024,
         )
         return (out or "").strip()
     except Exception:
@@ -2172,7 +2180,12 @@ Respond ONLY with JSON. Both values MUST be plain strings (flowing prose,
             messages=[{"role": "user", "content": prompt}],
             system_prompt="You are a job description summarizer. Output ONLY valid JSON.",
             temperature=0.2,
-            max_tokens=280 if en_only else 450,
+            # Reasoning budget, as in the translator above. Truncation is not
+            # silent corruption here -- the regex below needs a closing brace, so
+            # a cut-off object simply fails to match -- but it is still a wasted
+            # call, and these were the single largest source of empty replies in
+            # the nightly log.
+            max_tokens=768 if en_only else 1024,
         )
 
         import json

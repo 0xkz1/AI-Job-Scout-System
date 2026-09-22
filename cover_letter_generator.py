@@ -257,7 +257,16 @@ PROBLEM: <the specific fabricated claim, under 15 words>"""
             messages=[{"role": "user", "content": prompt}],
             system_prompt="You verify cover-letter openings strictly. Reply in the requested one-line format only.",
             temperature=0.0,
-            max_tokens=80,
+            # Budget, not answer length. The verdict is one short line, but every
+            # model behind the gateway is a reasoning model and spends this same
+            # allowance on hidden reasoning first -- measured at 46-162 tokens for
+            # a prompt this size, varying run to run. At 80 the reasoning ate 78
+            # and the reply came back empty with finish_reason=length, which the
+            # except below swallows as "verification skipped": the fabrication
+            # check silently stopped running. Headroom for the reasoning is what
+            # keeps it running; a model that finishes early is billed for what it
+            # generated, so the unused ceiling costs nothing.
+            max_tokens=512,
         ) or "").strip()
         # The model sometimes bolds its own verdict ("**PROBLEM: …**") despite
         # being asked for one plain line, and a startswith("PROBLEM") test then
@@ -1119,7 +1128,11 @@ Output ONLY the two sentences."""
             system_prompt=("You write two factual sentences connecting a fixed candidate "
                            "profile to one job posting. You never add a third sentence."),
             temperature=0.3,
-            max_tokens=200,
+            # Same reasoning-token budget problem as the verification call above.
+            # Two sentences land around 90 tokens; at 200 the reasoning fits only
+            # when it happens to be small, so the bridge failed intermittently and
+            # every failure fell through to the static opening.
+            max_tokens=768,
         ) or "").strip().strip('"')
     except Exception as e:
         print(f"  ⚠ CL bridge generation skipped ({e})")

@@ -111,7 +111,10 @@ def score_one(job: dict, persona: str) -> dict | None:
         system_prompt=("You are a career alignment scoring engine. Output ONLY valid JSON. "
                        "The candidate is deployment-agnostic: cloud and local are equally "
                        "normal for them. Never call them local-first."),
-        temperature=0.1, max_tokens=400,
+        # Reasoning budget, not answer length -- see matcher._translate_to_ja.
+        # A cut-off object fails the brace match below and this returns None,
+        # which reads from the outside exactly like a dead key.
+        temperature=0.1, max_tokens=1024,
     )
     for match in reversed(list(re.finditer(r"\{.*\}", content, re.DOTALL))):
         try:

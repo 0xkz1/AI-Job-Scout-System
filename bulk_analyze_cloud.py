@@ -163,7 +163,10 @@ def main():
         from llm_client import call_llm
         test = call_llm(
             messages=[{"role": "user", "content": "Say OK"}],
-            max_tokens=10,
+            # "Say OK" needs two tokens, but a reasoning model spends its whole
+            # allowance thinking first and returns an empty string, so a ten-token
+            # probe fails against a working provider and aborts the run below.
+            max_tokens=64,
             temperature=0,
         )
         print(f"✅ API test: {test.strip()}", flush=True)
