@@ -546,9 +546,18 @@ def classify_contract_kind(title: str, description: str) -> str:
 # that can be taken today — dropping those 83 postings would delete applicable
 # work. The flag exists to tell a role that can outlive the visa from one that
 # cannot, which is a ranking question, not an eligibility one.
+# The gap between the negator and "sponsor" was 30 characters, which fits "we
+# cannot sponsor" and almost nothing a real posting writes. Measured over 6,307
+# silent postings, widening it to 80 recovers ten refusals and flips no "offered"
+# posting, because the clause between the two is where the qualifier lives:
+# "does not MEET THE ELIGIBILITY CRITERIA FOR VISA sponsorship", "will not
+# CONSIDER APPLICANTS REQUIRING sponsorship", "does not MEET THE MINIMUM
+# REQUIREMENTS SET BY THE UKVI TO ENABLE sponsorship". Four of the ten are
+# designer roles that sat in the pipeline as "silent", i.e. as jobs worth
+# applying to at a company that cannot hire him. 120 recovers nothing further.
 _SPONSOR_REFUSED = re.compile(
     r"\b(?:unable|not able|cannot|can not|can't|do(?:es)? not|will not|won't|"
-    r"no longer able|not in a position)\b[^.\n]{0,30}?\bsponsor"
+    r"no longer able|not in a position)\b[^.\n]{0,80}?\bsponsor"
     r"|\bno\s+(?:visa\s+)?sponsorship\b"
     r"|\bwithout\s+(?:visa\s+)?sponsorship\b"
     r"|\bsponsorship\s+(?:is\s+)?not\s+(?:available|offered|provided|possible)\b",

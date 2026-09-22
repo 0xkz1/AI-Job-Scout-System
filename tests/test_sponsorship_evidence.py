@@ -137,3 +137,38 @@ def test_the_invariant_catches_a_missing_quote():
     assert len(found) == 2
     assert "no evidence quote" in found[0]
     assert "do not contain the word" in found[1]
+
+
+# A fourth way of getting it wrong, found the same way: the refusal pattern only
+# allowed 30 characters between the negator and "sponsor", which fits "we cannot
+# sponsor" and little else a real posting writes. The qualifier lives in exactly
+# that gap, so ten postings that refuse in plain English were read as silent —
+# four of them designer roles, i.e. jobs offered up as worth applying to at a
+# company that had said it could not hire him.
+@pytest.mark.parametrize("sentence", [
+    "We cannot accept applications from anyone requiring sponsorship for UK employment.",
+    "Please note that this role does not meet the eligibility criteria for visa sponsorship.",
+    "On this occasion the University will not consider applicants requiring sponsorship for this role.",
+    "This role does not meet the minimum requirements set by the UKVI to enable sponsorship of migrant workers.",
+    "Please be aware that this role does not fulfil the requirements for visa sponsorship.",
+    "This vacancy does not currently meet the minimum salary threshold requirements for Skilled Worker sponsorship.",
+])
+def test_refusal_survives_a_qualifier_between_the_negator_and_sponsor(sentence):
+    state, evidence = classify_sponsorship("Graphic Designer", sentence)
+    assert state == "refused", f"read as {state!r}: {sentence}"
+    assert evidence and "sponsor" in evidence.lower()
+
+
+def test_widened_gap_does_not_reach_across_a_sentence():
+    """The gap reaches a qualifier, not a negator in the sentence before.
+
+    A separate, older rule (_NEGATOR_NEAR looks back 60 characters) suppresses the
+    offer here, so this reads as silent both before and after the widening — the
+    point being asserted is only that "cannot" in the previous sentence does not
+    now pair with this sentence's "sponsorship" and manufacture a refusal.
+    """
+    state, _ = classify_sponsorship(
+        "Designer",
+        "We cannot accept late applications. Visa sponsorship is available for this role.",
+    )
+    assert state != "refused"
