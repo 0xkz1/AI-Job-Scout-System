@@ -80,3 +80,6 @@ debug_*.py
 # Sweep them into 10_output/.stray_from_root_<date>/ — that path is already
 # ignored by the 10_output/* rule above.
 /*.pdf
+
+# Run logs written by run_saved_chain.py
+90_logs/
