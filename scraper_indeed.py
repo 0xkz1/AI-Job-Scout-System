@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import os
+import sys
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -60,6 +61,31 @@ class CloudflareBlocked(RuntimeError):
     timeout means Indeed is throttling and more requests make it worse, whereas
     a challenge is a coin flip that is worth flipping again.
     """
+
+
+def _a_human_is_watching() -> bool:
+    """Whether the Cloudflare challenge has anyone who could solve it.
+
+    `_headed_display_available` answers whether a window CAN open, which on this
+    machine is yes: the scheduler runs on the desktop and its X socket is live.
+    Nobody is sitting at it at 02:00. The scraper opened a real browser window
+    per search anyway and polled for thirty seconds waiting for a keypress that
+    cannot arrive -- measured on 2026-09-23 at 2,046 seconds, 38% of the night's
+    scrape budget, for zero jobs.
+
+    stdin is what separates the two cases: a person running this by hand has a
+    terminal, and a cron job does not.
+    """
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        # stdin closed out from under us; assume nobody is there.
+        return False
+
+
+def _can_solve_challenge() -> bool:
+    """A headed retry is only worth starting if a window can open AND be used."""
+    return _headed_display_available() and _a_human_is_watching()
 
 
 def _headed_display_available() -> bool:
@@ -284,7 +310,7 @@ async def scrape_indeed(
         force_bypass = False
         import os as _os
         if cookie_path and not _os.path.exists(cookie_path):
-            if _headed_display_available():
+            if _can_solve_challenge():
                 print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
                 is_headless = False
                 force_bypass = True
@@ -293,9 +319,9 @@ async def scrape_indeed(
                 # start without a reachable X server, so forcing it here would crash
                 # instead of falling back. Stay headless and let the Cloudflare check
                 # report the real problem.
-                print("  🔑 No cookies found and no usable X display — staying headless; "
-                      "Cloudflare will likely block. Use `xvfb-run`, or run "
-                      "interactively once to create cookies/indeed_cookies.json.")
+                print("  🔑 No cookies found and nobody to solve a challenge — staying "
+                      "headless; Cloudflare will likely block. Run interactively "
+                      "once to create cookies/indeed_cookies.json.")
 
         browser = await p.chromium.launch(
             headless=is_headless,
@@ -329,7 +355,7 @@ async def scrape_indeed(
             print("  ⚠️ Cloudflare verification detected!")
             
             # If we are headless, we must restart in non-headless mode to let user bypass it
-            if is_headless and not _headed_display_available():
+            if is_headless and not _can_solve_challenge():
                 # No reachable X server: chromium cannot start headed, so the
                 # relaunch below would die with "Target page, context or browser has
                 # been closed" and the caller's except would print a failure and exit
@@ -337,9 +363,11 @@ async def scrape_indeed(
                 # cron recorded success every night. Raise instead of returning [] so
                 # the caller can retry the coin flip rather than treating a challenge
                 # as "this search has no results".
-                print("  ⛔ Cloudflare challenge, and no usable X display for a headed "
-                      "retry. Wrap the command in `xvfb-run`, or run it interactively "
-                      "once to refresh cookies/indeed_cookies.json.")
+                why = ("no usable X display" if not _headed_display_available()
+                       else "no terminal, so nobody can solve the challenge")
+                print(f"  ⛔ Cloudflare challenge, and {why} for a headed retry. "
+                      "Run it interactively once to refresh "
+                      "cookies/indeed_cookies.json.")
                 await browser.close()
                 raise CloudflareBlocked(f"{keyword}/{location}: Cloudflare challenge, no headed fallback")
             if is_headless:
