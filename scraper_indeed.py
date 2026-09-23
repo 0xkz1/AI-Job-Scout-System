@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import os
+import sys
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -53,6 +54,19 @@ _CLOUDFLARE_RETRIES = 2
 _CLOUDFLARE_RETRY_PAUSE_SECONDS = 45
 
 
+class CloudflareUnattended(RuntimeError):
+    """A challenge appeared and this run has no way to answer it, ever.
+
+    Separate from CloudflareBlocked because the two need opposite handling. A
+    transient block is worth another attempt with a fresh session. This one is a
+    property of the run, not of the request: with no terminal there is nobody to
+    solve the interstitial, and the next search will meet the same wall. Retrying
+    it is how the first attempt at this fix made the night SLOWER -- the 30-second
+    wait it removed came back as 45-second retry pauses, and indeed went from
+    2,046s/exit 0 to 2,400s/exit 124. The caller stops the run instead.
+    """
+
+
 class CloudflareBlocked(RuntimeError):
     """The search listing served a challenge page that this run cannot solve.
 
@@ -60,6 +74,25 @@ class CloudflareBlocked(RuntimeError):
     timeout means Indeed is throttling and more requests make it worse, whereas
     a challenge is a coin flip that is worth flipping again.
     """
+
+
+def _a_human_is_watching() -> bool:
+    """Whether a Cloudflare interstitial has anyone who could answer it.
+
+    `_headed_display_available` says a window CAN open, which in cron on this
+    machine is true: the scheduler runs on the desktop and its X socket is live.
+    Nobody is sitting at it at 02:00. stdin is what separates the two — a person
+    running this by hand has a terminal, a cron job does not.
+    """
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
+def _can_solve_challenge() -> bool:
+    """A headed retry is only worth starting if a window can open AND be used."""
+    return _headed_display_available() and _a_human_is_watching()
 
 
 def _headed_display_available() -> bool:
@@ -284,7 +317,7 @@ async def scrape_indeed(
         force_bypass = False
         import os as _os
         if cookie_path and not _os.path.exists(cookie_path):
-            if _headed_display_available():
+            if _can_solve_challenge():
                 print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
                 is_headless = False
                 force_bypass = True
@@ -293,9 +326,9 @@ async def scrape_indeed(
                 # start without a reachable X server, so forcing it here would crash
                 # instead of falling back. Stay headless and let the Cloudflare check
                 # report the real problem.
-                print("  🔑 No cookies found and no usable X display — staying headless; "
-                      "Cloudflare will likely block. Use `xvfb-run`, or run "
-                      "interactively once to create cookies/indeed_cookies.json.")
+                print("  🔑 No cookies found and nobody to answer a challenge — staying "
+                      "headless; Cloudflare will likely block. Run interactively "
+                      "once to create cookies/indeed_cookies.json.")
 
         browser = await p.chromium.launch(
             headless=is_headless,
@@ -329,7 +362,7 @@ async def scrape_indeed(
             print("  ⚠️ Cloudflare verification detected!")
             
             # If we are headless, we must restart in non-headless mode to let user bypass it
-            if is_headless and not _headed_display_available():
+            if is_headless and not _can_solve_challenge():
                 # No reachable X server: chromium cannot start headed, so the
                 # relaunch below would die with "Target page, context or browser has
                 # been closed" and the caller's except would print a failure and exit
@@ -337,11 +370,13 @@ async def scrape_indeed(
                 # cron recorded success every night. Raise instead of returning [] so
                 # the caller can retry the coin flip rather than treating a challenge
                 # as "this search has no results".
-                print("  ⛔ Cloudflare challenge, and no usable X display for a headed "
-                      "retry. Wrap the command in `xvfb-run`, or run it interactively "
-                      "once to refresh cookies/indeed_cookies.json.")
+                why = ("no usable X display" if not _headed_display_available()
+                       else "no terminal, so nobody can answer the challenge")
+                print(f"  ⛔ Cloudflare challenge and {why}. Indeed cannot be read "
+                      "unattended; run it interactively to refresh "
+                      "cookies/indeed_cookies.json.")
                 await browser.close()
-                raise CloudflareBlocked(f"{keyword}/{location}: Cloudflare challenge, no headed fallback")
+                raise CloudflareUnattended(f"{keyword}/{location}: {why}")
             if is_headless:
                 print("  🔄 Headless mode blocked by Cloudflare. Relaunching in non-headless mode...")
                 await browser.close()
@@ -592,6 +627,7 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     # retries stop earning their keep and are switched off for the rest of the
     # run — the first searches still get their chances.
     consecutive_blocked = 0
+    unattended = False
     _RETRY_GIVE_UP_AFTER = 3
 
     for index, (kw, loc) in enumerate(searches):
@@ -606,6 +642,14 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
             try:
                 jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config,
                                            cache=cache)
+                break
+            except CloudflareUnattended as e:
+                # Structural, not transient: every remaining search meets the same
+                # wall, and walking them cost 36 x 49s measured under xvfb-run.
+                failures.append(f"{kw}/{loc}: {e}")
+                print(f"  ⛔ Indeed cannot be read unattended ({e}) — "
+                      f"skipping the remaining {len(searches) - index - 1} searches")
+                unattended = True
                 break
             except CloudflareBlocked as e:
                 if attempt == retries:
@@ -625,6 +669,8 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
                 failures.append(f"{kw}/{loc}: {e}")
                 print(f"  ⚠ Indeed search failed ({kw} in {loc}): {e}")
                 break
+        if unattended:
+            break
         if jobs is None:
             continue
         consecutive_blocked = 0
