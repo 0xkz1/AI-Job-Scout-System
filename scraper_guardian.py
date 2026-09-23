@@ -28,6 +28,17 @@ def sanitize_filename(text: str, max_len: int = 80) -> str:
     return safe[:max_len]
 
 
+def _search_url(keyword: str) -> str:
+    """The Guardian Jobs search URL for one keyword.
+
+    Split out because the parameter name is the whole defect: this board accepts
+    `keywords` and silently ignores `q`, so the scraper spent 65 nights fetching
+    the front page of /jobs/ under every one of its 81 keyword/location pairs.
+    Nothing in the output said so -- it returned a full page of rows every time.
+    """
+    return f"https://jobs.theguardian.com/jobs/?keywords={quote_plus(keyword)}"
+
+
 async def _extract_guardian_jobs(page) -> list[dict]:
     """Extract job listings from the current Guardian Jobs search results page."""
     try:
@@ -158,13 +169,23 @@ async def scrape_guardian(
     jobs = []
     seen_urls = set()
 
-    # Build search URL
-    kw_q = quote_plus(keyword)
-    loc_q = quote_plus(location) if location else ""
-    if loc_q:
-        search_url = f"https://jobs.theguardian.com/jobs/?q={kw_q}&location={loc_q}"
-    else:
-        search_url = f"https://jobs.theguardian.com/jobs/?q={kw_q}"
+    # Build search URL.
+    #
+    # The parameter is `keywords`, not `q`. Measured 2026-09-24: ?q=graphic+designer
+    # and ?q=nurse and ?q=accountant all return the same twenty listings, which are
+    # simply the front page of /jobs/ — "Examinations Officer (Dental)", "Director of
+    # Finance", "Chief Executive". Across 65 nights and 2,233 searches this board
+    # returned exactly 60 or exactly 100 rows every single time and never zero,
+    # because 60 is three pages of twenty and the query was never applied.
+    # ?keywords=zzqqxxnonsenseword returns 0 and ?keywords=nurse returns 9 nursing
+    # posts, so this one filters.
+    #
+    # `location` is dropped rather than renamed: location=, Location=,
+    # locationsearch= and radialsearch= were each measured against a fixed keyword
+    # and all four returned results identical to sending no location at all. The
+    # board has no URL-reachable location filter, so passing one only reads as if
+    # it were doing something.
+    search_url = _search_url(keyword)
 
     if not playwright_instance:
         raise ValueError("playwright_instance is required — call from scrape_guardian_all")
@@ -269,8 +290,17 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
     from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("guardian", config)
 
+    # One search per keyword, not per (keyword, location). Location does not reach
+    # this board at all (see scrape_guardian), so the five locations behind each
+    # keyword were five identical requests — 18 searches a night for 549 seconds,
+    # yielding 2 new postings.
+    searched: set[str] = set()
+
     async with async_playwright() as p:
         for kw, loc in search_pairs(config):
+            if kw in searched:
+                continue
+            searched.add(kw)
             jobs = await scrape_guardian(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
             for j in jobs:
                 dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
