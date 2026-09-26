@@ -25,6 +25,16 @@ def test_no_location_is_sent():
     assert not {"location", "Location", "locationsearch", "radialsearch"} & set(q)
 
 
+def test_later_pages_keep_the_keyword():
+    """Pagination still built the old ?q= URL from names the fix removed, so every
+    search died with NameError on page 2 and the whole board scraped nothing on
+    2026-09-25 and 2026-09-26."""
+    url = urlparse(_search_url("Graphic Designer", 2))
+    assert url.path == "/jobs/2/"
+    assert parse_qs(url.query) == {"keywords": ["Graphic Designer"]}
+    assert urlparse(_search_url("Designer", 1)).path == "/jobs/"
+
+
 def test_the_keyword_is_encoded():
     assert "Graphic+Designer" in _search_url("Graphic Designer")
     assert " " not in urlparse(_search_url("C# Developer")).query

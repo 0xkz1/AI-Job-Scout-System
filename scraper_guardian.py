@@ -28,15 +28,20 @@ def sanitize_filename(text: str, max_len: int = 80) -> str:
     return safe[:max_len]
 
 
-def _search_url(keyword: str) -> str:
-    """The Guardian Jobs search URL for one keyword.
+def _search_url(keyword: str, page: int = 1) -> str:
+    """The Guardian Jobs search URL for one keyword, at one results page.
 
     Split out because the parameter name is the whole defect: this board accepts
     `keywords` and silently ignores `q`, so the scraper spent 65 nights fetching
     the front page of /jobs/ under every one of its 81 keyword/location pairs.
     Nothing in the output said so -- it returned a full page of rows every time.
+
+    Later pages are a path segment, /jobs/2/?keywords=... (measured 2026-09-26:
+    twenty rows sharing none with page 1 or with the unfiltered /jobs/2/).
+    ?keywords=...&page=2 returns no rows at all.
     """
-    return f"https://jobs.theguardian.com/jobs/?keywords={quote_plus(keyword)}"
+    prefix = "https://jobs.theguardian.com/jobs/" + (f"{page}/" if page > 1 else "")
+    return f"{prefix}?keywords={quote_plus(keyword)}"
 
 
 async def _extract_guardian_jobs(page) -> list[dict]:
@@ -249,12 +254,8 @@ async def scrape_guardian(
         if page_num >= max_pages:
             break
 
-        next_url = None
-        # Guardian uses numbered pagination: /jobs/2/, /jobs/3/, ...
         current_page_num = page_num + 1
-        next_url = f"https://jobs.theguardian.com/jobs/{current_page_num}/?q={kw_q}"
-        if loc_q:
-            next_url += f"&location={loc_q}"
+        next_url = _search_url(keyword, current_page_num)
         try:
             await page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
