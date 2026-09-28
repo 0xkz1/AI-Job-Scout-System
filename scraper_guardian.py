@@ -263,6 +263,16 @@ async def scrape_guardian(
             print(f"  ⚠ Could not navigate to page {current_page_num}.")
             break
 
+    # Gate on the title and the listing's own snippet before paying ~4s a detail
+    # page. `keywords=` is a full-text match, so a working search returns mostly
+    # postings that only mention a keyword somewhere in the body: measured
+    # 2026-09-27, 503 postings for 10 keywords, 494 uncached — ~2,080s against the
+    # 1,500s cap — and 4 of the 503 titles held a configured keyword. The one
+    # posting of the 61 staged on 2026-09-28 to reach composite 0.70 (Interaction
+    # Designer, 0.76) passes this gate.
+    from scraper_indeed import filter_jobs_by_keywords
+    jobs = filter_jobs_by_keywords(jobs, (config or {}).get("keywords", []))
+
     # --- Fetch full descriptions from detail pages ---
     if jobs:
         if cache is None:

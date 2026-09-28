@@ -289,15 +289,9 @@ max_pages_per_site:
   indeed: 1
   linkedin: 3
 min_salary_gbp: 26000
-# guardian left the nightly 2026-09-28. Its search only started working on
-# 2026-09-26 (it had sent `q`, which the board ignores), and a working search
-# returned 503 postings for 10 keywords, 494 of them uncached at 4s a detail
-# fetch — ~2,080s against its 1,500s cap, killed with nothing staged. Only 4 of
-# the 503 titles contained a configured keyword (the rest mostly J.P. Morgan Java
-# roles), and in 65 earlier nights none of its 46 postings scored 0.70.
-# scraper_guardian.py still works by hand.
 sites:
 - reed
+- guardian
 - adzuna
 - remote_apis
 - indeed
