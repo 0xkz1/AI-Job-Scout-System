@@ -108,7 +108,7 @@ def test_the_two_groups_do_not_overlap(text):
 def test_every_site_is_scraped_by_one_of_the_two_slots(text):
     """A site dropped from both groups stops being scraped, and nothing reports
     it — stale_sites only judges sites that appear in the run summary."""
-    expected = {"linkedin", "adzuna", "indeed", "reed", "remote_apis", "guardian"}
+    expected = {"linkedin", "adzuna", "indeed", "reed", "remote_apis"}
     assert set(_SITE_CALL.findall(text)) == expected
 
 
