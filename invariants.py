@@ -392,7 +392,7 @@ SITE_TIMEOUT_SECONDS = 1500
 # absent here is judged against SITE_TIMEOUT_SECONDS.
 _SITE_TIMEOUT_OVERRIDES = {
     "reed": 2200,
-    "indeed": 2400,
+    "indeed": 3600,
     "linkedin": 2400,
 }
 
