@@ -5,6 +5,28 @@ means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
 Last verified: 2026-08-28
 
+## Dashboard integration — 2026-10-09
+
+- UI work is isolated on `feat/application-history-20261009` in
+  `10_output/_worktrees/application-history-20261009`. The user approved
+  integration on 2026-10-09. Existing loop-health dates below have not been
+  re-verified.
+- Adds a Streamlit application-history tab: monthly calendar, daily job list,
+  application/expiry totals, undated jobs, and Obsidian links across synced devices.
+- Reads Obsidian report flags and `_expiry_checks.json` without changing them.
+  Application dates remain the existing date-only estimates; automated expiry
+  timestamps mean confirmation time, not the site's actual deadline. Manual
+  checkbox timestamps are still unavailable; this candidate displays existing data.
+- Verified against the live records: 25 applications, 3,605 expired jobs after
+  exact-URL deduplication, 92 expired jobs without a known confirmation time.
+- Validation: 38 relevant tests pass; browser checks cover daily selection,
+  expiry view, the mobile calendar, and dark calendar colors. Streamlit refresh
+  checks cover an empty vault and checked/unchecked jobs. No source records
+  were rewritten.
+- Preview: `http://192.168.3.99:8510` (application-history tab). Other tabs use
+  copied preview data; the history tab reads live records through
+  `JIS_HISTORY_OUTPUT_DIR`.
+
 ## Loop health
 
 All times JST — the machine is `Asia/Tokyo`. UK equivalents in brackets, since

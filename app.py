@@ -226,9 +226,14 @@ def run_scraper(site="indeed", pages=5):
 # base and the #944040 accent.
 st.markdown('<h1 class="jis-title">AI Job Scout System</h1>', unsafe_allow_html=True)
 
-tab_scraper, tab_watched, tab_analysis, tab_review, tab_pdf = st.tabs(
-    ["🔍 Scraper", "👁 Saved", "🎯 Match Analysis", "🧐 Review", "📄 PDF"]
+tab_scraper, tab_watched, tab_analysis, tab_review, tab_pdf, tab_history = st.tabs(
+    ["🔍 Scraper", "👁 Saved", "🎯 Match Analysis", "🧐 Review", "📄 PDF", "📅 応募履歴"]
 )
+
+with tab_history:
+    from application_history_ui import render_application_history
+
+    render_application_history(OUTPUT_DIR)
 
 # ═══════════════════════════════════════════════════════════
 # Tab 1: Scraper
