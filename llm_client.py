@@ -80,6 +80,18 @@ def current_provider() -> str | None:
     """The provider that answered the most recent call *on this thread*."""
     return getattr(_provider_tls, "name", None) or last_provider
 
+
+def current_served_model() -> str | None:
+    """What the litellm-gateway actually ran for the last call on this thread.
+
+    "group:model", e.g. "zai-glm:openai/glm-4.5-flash". None when the last call
+    was not a gateway call. The gateway answers 200 whichever model its own
+    fallback chain ended on, so the name a caller asked for ("mistral-medium")
+    says nothing about who wrote the reply — from 2026-09-02 on, every request
+    for it was served by another model.
+    """
+    return getattr(_provider_tls, "served", None)
+
 # provider name -> env var holding its key. One Mistral account per key, each with
 # its own monthly allowance, so depth here is throughput: a single bulk day (182
 # reviews plus analysis) drained three keys, nvidia and stepfun.
@@ -437,8 +449,12 @@ def call_llm(
         is_last = i == len(chain) - 1
         started = time.time()
         try:
+            _provider_tls.served = None
             out = _call_provider(prov, messages, system_prompt, temperature, max_tokens,
                                  retries, model)
+            # gpt-oss writes U+2011 for hyphens in compounds; invisible on the
+            # page, but "systems-oriented" then no longer matches a keyword search.
+            out = out.replace("\u2011", "-")
             global last_provider
             last_provider = prov
             _provider_tls.name = prov
@@ -739,6 +755,10 @@ def _call_litellm_gateway(
             if not content.strip():
                 raise RuntimeError(
                     f"litellm-gateway/{model} returned empty content (max_tokens={max_tokens})")
+            # The deployment's own name, from the headers. The body's `model` echoes
+            # the group that was asked for on some routes, so it cannot be trusted.
+            _provider_tls.served = (f"{resp.headers.get('x-litellm-model-group', '?')}"
+                                    f":{resp.headers.get('x-litellm-model-name', '?')}")
             return content
         except (requests.RequestException, KeyError, json.JSONDecodeError, RuntimeError) as e:
             if attempt < retries and _retry_same_provider(e):

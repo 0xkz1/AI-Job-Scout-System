@@ -59,6 +59,7 @@ def test_defaults_to_the_gateway_url_and_model(monkeypatch):
 
     class Resp:
         status_code = 200
+        headers = {}
         def raise_for_status(self): pass
         def json(self): return {"choices": [{"message": {"content": "ok"}}]}
 
@@ -82,6 +83,7 @@ def test_an_explicit_model_override_is_honored(monkeypatch):
 
     class Resp:
         status_code = 200
+        headers = {}
         def raise_for_status(self): pass
         def json(self): return {"choices": [{"message": {"content": "ok"}}]}
 
@@ -124,3 +126,68 @@ def test_an_unresponsive_gateway_is_abandoned_after_one_attempt(monkeypatch):
     with pytest.raises(RuntimeError, match="after 1 attempts"):
         llm_client._call_litellm_gateway([{"role": "user", "content": "x"}], "", 0.1, 50, 2)
     assert len(attempts) == 1
+
+
+# --- which model actually answered ---
+
+def _served_resp(group="zai-glm", model="openai/glm-4.5-flash"):
+    class Resp:
+        status_code = 200
+        headers = {"x-litellm-model-group": group, "x-litellm-model-name": model}
+        def raise_for_status(self): pass
+        # body.model echoes the requested group on some routes: must be ignored
+        def json(self): return {"model": group, "choices": [{"message": {"content": "ok"}}]}
+    return Resp()
+
+
+def test_the_served_model_is_recorded_not_the_requested_one(monkeypatch):
+    """Asked for mistral-medium, answered by zai-glm: the gateway's fallback
+    chain returns 200 either way, so only its own headers say who answered."""
+    monkeypatch.setenv("LITELLM_GATEWAY_API_KEY", "sk-test")
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _served_resp())
+    llm_client._call_litellm_gateway([{"role": "user", "content": "x"}], "", 0.1, 50, 0)
+    assert llm_client.current_served_model() == "zai-glm:openai/glm-4.5-flash"
+
+
+def test_a_later_non_gateway_call_clears_the_served_model(monkeypatch):
+    """call_llm resets it per attempt, so a thread that last used the gateway
+    cannot stamp the gateway's answer onto a different provider's reply."""
+    llm_client._provider_tls.served = "zai-glm:openai/glm-4.5-flash"
+    monkeypatch.setattr(llm_client, "_call_provider", lambda *a, **k: "ok")
+    llm_client.call_llm([{"role": "user", "content": "x"}], "", provider="ollama",
+                        use_fallbacks=False)
+    assert llm_client.current_served_model() is None
+
+
+def test_review_model_names_the_served_model(monkeypatch, tmp_path):
+    import reviewer
+    monkeypatch.setattr(reviewer, "_review_chain",
+                        lambda: [("litellm-gateway", "mistral-medium")])
+    monkeypatch.setattr(reviewer, "_load_review_facts", lambda: "facts")
+    monkeypatch.setattr(reviewer, "_load_skills_md", lambda: "skills")
+    monkeypatch.setattr(reviewer, "_load_decisions", lambda: "decisions")
+    monkeypatch.setattr(reviewer, "REVIEWS_DIR", tmp_path)
+
+    def fake_llm(*_a, **_k):
+        llm_client._provider_tls.served = "zai-glm:openai/glm-4.5-flash"
+        return "### 総評\n問題なし\n"
+
+    monkeypatch.setattr(reviewer, "call_llm", fake_llm)
+    monkeypatch.setattr(reviewer, "_review_is_unusable", lambda *_: None)
+    doc = tmp_path / "X_CL.md"
+    doc.write_text("---\ntype: cl\n---\n\nDear Hiring Team,\n\nbody\n")
+
+    out = reviewer.run_review("CL", doc, {"company": "X", "title": "Y", "description": "d"})
+
+    text = out.read_text(encoding="utf-8")
+    assert 'review_model: "litellm-gateway/zai-glm:openai/glm-4.5-flash"' in text
+    assert "mistral-medium" not in text
+
+
+def test_non_breaking_hyphens_are_written_as_hyphens(monkeypatch):
+    """gpt-oss emits U+2011 inside compounds; 63 letters carried it by 2026-10-08."""
+    monkeypatch.setattr(llm_client, "_call_provider",
+                        lambda *a, **k: "a systems‑oriented approach")
+    out = llm_client.call_llm([{"role": "user", "content": "x"}], "", provider="ollama",
+                              use_fallbacks=False)
+    assert out == "a systems-oriented approach"

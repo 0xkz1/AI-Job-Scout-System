@@ -90,3 +90,69 @@ def test_every_provider_failing_raises_rather_than_storing_nothing(monkeypatch, 
 
     with pytest.raises(RuntimeError, match="All review providers failed"):
         reviewer.run_review("CL", doc, {"company": "X", "title": "Y", "description": "d"})
+
+
+# --- ❗事実 findings that cannot be a false statement in the document -----------
+
+CV_DOC = """# Kazuki Yunome
+## PROFILE
+Technical professional working across automation, data processing, and design.
+Built a bespoke design system around typography, design tokens and editorial rules.
+**Languages:** Japanese (native) · English (professional working)
+"""
+
+
+def _body(*bullets):
+    return "### ❗ 事実\n" + "\n".join(bullets) + "\n\n### 🎯 求人適合\n- x\n"
+
+
+def _blocks(body, doc=CV_DOC):
+    fixed, notes = reviewer.verify_fact_findings(body, doc)
+    return reviewer._extract_score(fixed)[1], fixed, notes
+
+
+def test_a_quote_of_the_job_posting_is_not_a_fabrication_in_the_cv():
+    """Wooden Books: the posting's requirement, quoted as if the CV had claimed it."""
+    blocked, fixed, notes = _blocks(_body(
+        '- **事実に反する記述**: CVに「ネイティブスピーカーの英語」と明記されていない。\n'
+        '  > "A native English speaker with good editorial senses"'))
+    assert not blocked
+    assert "※未検証（引用が本文に無い）" in fixed and notes
+
+
+def test_a_quote_that_is_in_the_document_still_blocks():
+    blocked, _, notes = _blocks(_body(
+        '- **事実に反する記述**: 検証済み事実にこの成果は無い。\n'
+        '  > "Built a bespoke design system around typography, design tokens and editorial rules."'))
+    assert blocked and not notes
+
+
+def test_curly_apostrophes_and_hyphen_variants_do_not_hide_a_real_quote():
+    doc = "I built the site’s front‑end by hand."
+    blocked, _, _ = _blocks(_body('- 事実に反する: "I built the site\'s front-end by hand."'), doc)
+    assert blocked
+
+
+@pytest.mark.parametrize("bullet", [
+    "- 記載なし",
+    "- **職歴の虚偽な記載なし**：個人プロジェクトとして記載されている。",
+    "- No factual inaccuracies found.",
+    "- 「Built a bespoke design system around typography」は検証済みです。",
+])
+def test_the_reviewers_all_clear_written_as_a_bullet_does_not_block(bullet):
+    assert not _blocks(_body(bullet))[0]
+
+
+def test_something_missing_is_a_fit_question_not_a_fabrication():
+    blocked, _, _ = _blocks(_body(
+        "- 求人票で要求される「UKセキュリティクリアランス」が、候補者の経歴には見当たらない。"))
+    assert not blocked
+
+
+def test_an_unquoted_claim_of_falsehood_still_blocks():
+    """Err toward blocking: a real fabrication let through is the worse error."""
+    assert _blocks(_body("- CVの年数表記は事実に反する。実際は4年である。"))[0]
+
+
+def test_a_finding_that_says_the_fact_is_false_is_not_demoted_for_being_phrased_as_absence():
+    assert _blocks(_body("- 検証済み事実に存在しない受賞歴が記載されている（記載なしではない）。"))[0]

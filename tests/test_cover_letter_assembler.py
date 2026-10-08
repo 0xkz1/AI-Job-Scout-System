@@ -1,6 +1,8 @@
 """Assembled cover letters: block selection, the one model-written block, and
 the gates around it. Every LLM call is mocked."""
 
+import pytest
+
 import cover_letter_generator as cl
 
 
@@ -160,6 +162,20 @@ def test_bridge_rejects_an_exit_plan(monkeypatch):
 
     assert not ok
     assert reason == "mentions an exit plan"
+
+
+def test_a_bridge_cut_off_mid_sentence_is_rejected(monkeypatch):
+    """A reasoning model spends part of max_tokens thinking and the reply stops
+    mid-sentence. Six letters went out ending "...visual assets for marketing"."""
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+    whole = ("Example's focus on clear systems feels relevant to the way I built "
+             "TAIFUNOME. I would bring that approach to your design work.")
+
+    assert cl._vet_bridge(whole, "", "Designer", "A posting.")[0]
+    ok, reason = cl._vet_bridge(whole[:-len(" your design work.")] + " creating assets for",
+                                "", "Designer", "A posting.")
+    assert not ok
+    assert reason == "cut off mid-sentence"
 
 
 def test_a_style_ban_is_forgiven_when_the_posting_uses_the_word(monkeypatch):
@@ -600,3 +616,74 @@ def test_no_connective_for_a_project_the_letter_has_already_named():
 
     assert paragraphs[1].startswith("Separately, ")
     assert paragraphs[2] == "I built the site with semantic HTML."
+
+
+# --- claims nothing backs: the gate missed them when they carried no "%" ------
+
+_POSTING = "A design role at Acme."
+
+
+def _gate(monkeypatch, bridge, posting=_POSTING):
+    monkeypatch.setattr(cl, "_verify_opening_claims", lambda *a, **k: None)
+    return cl._vet_bridge(bridge, "", "Designer", posting, None)
+
+
+@pytest.mark.parametrize("bridge, caught", [
+    ("Acme's focus on growth feels relevant to the way I built TAIFUNOME, which now serves "
+     "50,000 monthly readers. I would bring that approach to your product work.", "50,000"),
+    ("Acme's focus on leadership feels relevant to the way I scaled a design team of twelve "
+     "at my previous studio. I would bring that approach to your product work.", "team of twelve"),
+    ("Acme's focus on UX feels relevant to my ten years of senior UX leadership. "
+     "I would bring that experience to your design organisation.", "ten years"),
+    ("Acme's focus on tooling feels relevant to the way I built TAIFUNOME as a production "
+     "system trusted by enterprise clients. I would bring that approach to your product.", "trusted by"),
+])
+def test_an_invented_figure_or_audience_is_rejected(monkeypatch, bridge, caught):
+    ok, reason = _gate(monkeypatch, bridge)
+    assert not ok
+    assert caught in reason
+
+
+@pytest.mark.parametrize("bridge", [
+    "Acme's focus on design feels relevant to the world-class design system I architected "
+    "for TAIFUNOME. I would bring that mastery to your team.",
+    "Acme's focus on workflow feels relevant to the pioneering way I built TAIFUNOME. "
+    "I would bring that same groundbreaking approach to your team.",
+])
+def test_self_praise_is_rejected(monkeypatch, bridge):
+    ok, reason = _gate(monkeypatch, bridge)
+    assert not ok
+    assert "banned filler phrase" in reason
+
+
+def test_a_figure_the_posting_itself_gives_is_quotation_not_a_claim(monkeypatch):
+    bridge = ("Pennylane's focus on a design system that supports 40+ designers feels relevant "
+              "to the systems-oriented way I built TAIFUNOME. I would bring that approach to "
+              "your component documentation.")
+    assert _gate(monkeypatch, bridge, "We support 40+ designers across the company.")[0]
+    assert not _gate(monkeypatch, bridge, "We run a design system.")[0]
+
+
+def test_an_employers_superlative_is_forgiven_when_the_posting_uses_it(monkeypatch):
+    bridge = ("BBC Studios' focus on bringing world-class stories to life feels relevant to the "
+              "systems-oriented way I built TAIFUNOME. I would bring that approach to your "
+              "visual narratives.")
+    assert _gate(monkeypatch, bridge, "We bring world-class stories to life.")[0]
+    assert not _gate(monkeypatch, bridge, "A design role.")[0]
+
+
+@pytest.mark.parametrize("bridge", [
+    "Salt Search's work on AI-driven discovery feels relevant to the way I built TAIFUNOME. "
+    "I would design a structure that serves both users and AI agents.",
+    "The Scottish Government's focus on content feels relevant to the way I built TAIFUNOME, "
+    "where I structured research into a narrative that could be used by others. "
+    "I would bring that approach to your style guides.",
+])
+def test_describing_a_system_is_not_an_audience_claim(monkeypatch, bridge):
+    assert _gate(monkeypatch, bridge)[0]
+
+
+def test_the_fact_check_is_triggered_for_claim_verbs_it_used_to_skip():
+    for verb in ("scaled", "architected", "founded", "ran"):
+        assert cl._FIRST_PERSON_CLAIM.search(f"the product I {verb} at a studio")
+    assert cl._FIRST_PERSON_CLAIM.search("relevant to my ten years of UX leadership")

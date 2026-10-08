@@ -61,10 +61,68 @@ _SECTOR_TERMS = (
 # "I did this", not merely "I can" or "I am interested in".
 _FIRST_PERSON_CLAIM = re.compile(
     r"\b(?:I(?:'ve|’ve| have)?\s+"
-    r"(?:built|worked|designed|developed|delivered|led|created|shipped|managed|supported)"
-    r"|my\s+(?:experience|background|work|practice)\s+(?:in|with|across|for))\b",
+    r"(?:built|worked|designed|developed|delivered|led|created|shipped|managed|supported"
+    r"|scaled|architected|launched|ran|owned|founded|grew|directed|headed|engineered"
+    r"|established|spearheaded|pioneered|operated|deployed|won|published|produced"
+    r"|implemented|introduced|drove|increased|reduced|saved)"
+    r"|my\s+(?:experience|background|work|practice)\s+(?:in|with|across|for)"
+    # "my ten years of senior UX leadership": a claim with no verb at all.
+    r"|my\s+(?:\w+\s+){0,2}years?\b)",
     re.IGNORECASE,
 )
+
+# A number the bridge states about the candidate's work. The model is told never
+# to invent numbers, but the only gate was a check on "%" — "serves 50,000
+# monthly readers" and "a team of twelve" carry no percent sign and passed. A
+# figure is allowed only when the posting or the verification record has it
+# (an employer's "40+ designers" is quotation, not a claim).
+_NUMBER_WORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+                r"|fifteen|twenty|thirty|forty|fifty|sixty|hundred|thousand|million"
+                r"|billion|dozen|decade|decades)")
+_QUANTITY = re.compile(
+    r"(?<![\w.])\d[\d,.]*\s*(?:\+|%|[kKmM])?(?![\w])"
+    r"|\b" + _NUMBER_WORD + r"\b(?:\s+\w+){0,2}\s+"
+    r"(?:years?|months?|users|clients|customers|people|engineers|designers|members"
+    r"|readers|countries|studios|companies|employees)\b"
+    r"|\b(?:team|group|squad|studio|department)\s+of\s+(?:\d+|" + _NUMBER_WORD + r")\b",
+    re.IGNORECASE,
+)
+# "trusted by enterprise clients", "serving 10 countries": a claim about who
+# uses the candidate's work, which no record of it can support. Only sentences
+# in the first person count; an employer described as "used by thousands" is
+# the posting's own description.
+_AUDIENCE_CLAIM = re.compile(
+    r"\b(?:trusted|adopted|relied\s+(?:on|upon)|chosen)\s+by\b"
+    r"|\b(?:used|deployed)\s+by\s+(?:\d|thousands|millions|hundreds|dozens|many|enterprise|major"
+    r"|leading|global|top|large|fortune)\b"
+    r"|\bserv(?:es|ing|ed)\s+(?:\d|thousands|millions|hundreds|dozens|many|enterprise|global|major)\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_WORD = re.compile(r"\b(?:I|I['’](?:m|ve|d|ll)|my)\b")
+
+
+def _unsupported_figure(text: str, job_description: str) -> str | None:
+    """The quantity or audience claim this bridge makes that nothing backs, or None."""
+    posting = (job_description or "").lower()
+    record = (_load_verification_record() or "").lower()
+    for m in _QUANTITY.finditer(text):
+        figure = m.group(0).strip().lower()
+        digits = re.sub(r"[^\d]", "", figure)
+        if digits:
+            if re.search(r"(?<!\d)" + digits + r"(?!\d)", re.sub(r"[,.]", "", posting)) \
+                    or re.search(r"(?<!\d)" + digits + r"(?!\d)", re.sub(r"[,.]", "", record)):
+                continue
+        else:
+            word = re.search(_NUMBER_WORD, figure, re.IGNORECASE).group(0).lower()
+            if re.search(r"\b" + word + r"\b", posting) or re.search(r"\b" + word + r"\b", record):
+                continue
+        return m.group(0).strip()
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if _FIRST_PERSON_WORD.search(sentence):
+            m = _AUDIENCE_CLAIM.search(sentence)
+            if m:
+                return m.group(0).strip()
+    return None
 
 
 def _claims_unsupported_sector(text: str, persona: str) -> str | None:
@@ -508,6 +566,10 @@ _BRIDGE_NEVER_ECHO = (
     "contribute my skills and experience", "drive business growth",
     "drive business value", "directly addressed by", "delightful",
     "highly sophisticated",
+    # Self-praise. "mastery" is only ever a claim about the writer; the other
+    # superlatives sit in _BRIDGE_STYLE_BANS, where an employer's own word for
+    # itself is forgiven.
+    "mastery",
     # Overstated connectors. "mirrors" asserts that the employer's work and the
     # candidate's method have the same structure, which is more than either
     # party can know from a job ad. The letter is a filter, not a pitch: it can
@@ -532,6 +594,8 @@ _BRIDGE_STYLE_BANS = (
     "user satisfaction", "business efficiency", "exceptional ui", "exceptional ux",
     "high-leverage", "shared infrastructure", "cohesive framework",
     "scalable", "seamless", "cutting-edge", "intuitive and effective",
+    "world-class", "world class", "pioneering", "groundbreaking", "unparalleled",
+    "best-in-class", "revolutionary", "state-of-the-art",
 )
 
 
@@ -994,6 +1058,11 @@ def _vet_bridge(text: str, persona: str, job_title: str, job_description: str,
     stripped = text.strip()
     if not stripped:
         return False, "empty"
+    if not stripped.endswith((".", "!", "?")):
+        # A reasoning model spends part of max_tokens on hidden reasoning and the
+        # reply is cut mid-sentence; six letters shipped that way between
+        # 2026-09-21 and 10-08, none before the bridge moved to gpt-oss.
+        return False, "cut off mid-sentence"
     words = len(stripped.split())
     if words > _BRIDGE_MAX_WORDS:
         return False, f"too long ({words} words)"
@@ -1038,6 +1107,9 @@ def _vet_bridge(text: str, persona: str, job_title: str, job_description: str,
     stretched = _cites_narrow_craft_without_cause(stripped, job_description, job_title)
     if stretched:
         return False, f"{stretched} cited for a posting that does not ask for it"
+    figure = _unsupported_figure(stripped, job_description)
+    if figure:
+        return False, f"states a figure nothing backs ({figure})"
     pcts = re.findall(r"\d+(?:\.\d+)?\s*%", low)
     if pcts:
         record = (_load_verification_record() or "").lower()

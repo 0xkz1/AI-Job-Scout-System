@@ -18,7 +18,7 @@ import yaml
 from datetime import date
 from pathlib import Path
 
-from llm_client import call_llm
+from llm_client import call_llm, current_served_model
 from matcher import USER_PROFILE_DIR, _load_persona_summary
 
 ROOT = Path(__file__).resolve().parent
@@ -282,6 +282,92 @@ def _load_review_facts() -> str:
         "source files the CV is generated from) ---\n"
         f"{projects}"
     )
+
+
+# --- ❗事実 findings that cannot be a false statement in the document -----------
+
+# The section is for claims the document makes that are FALSE. The model fills it
+# with other things: its own all-clear written as a bullet ("記載なし", "矛盾する記述は
+# 存在しません", "No factual inaccuracies found"), requirements the document lacks
+# (which the prompt sends to 🎯 求人適合), and quotes of the JOB POSTING that it
+# presents as the CV's claim. Each of those set fact_block, and a Wooden Books CV
+# was marked ⛔ 事実要修正 for "InDesignとPhotoshopに精通している" — a sentence that
+# is in neither the CV nor the facts. 330 of 348 blocked reviews on disk (2026-10-08)
+# held nothing else.
+_FACT_CLEAN_RE = re.compile(
+    r"(記載なし|虚偽な?記載なし|誤記なし|不整合なし|誤認なし|相違なし"
+    r"|問題(は)?(ない|ありません|見当たらない)|指摘は不要|事実としては正しい"
+    r"|矛盾(する記述)?は(存在|見られ|あり)ません|と一致(?![しせ])|に合致"
+    r"|検証済み(です|であり|。)"
+    r"|no (?:factual )?(?:inaccuracies|issues|problems|errors)|none found"
+    r"|^\W*(?:なし|none)\W*$)", re.IGNORECASE)
+_FACT_VIOLATION_RE = re.compile(
+    r"(事実に反する|捏造|虚偽の(記載|記述)|存在しない|裏付け(が)?(ない|無い)|矛盾している)")
+_FACT_ABSENCE_RE = re.compile(
+    r"(見当たらない|見当たりません|不記載|記載(が|は)?(ない|なし|されていない|されていません|がありません)"
+    r"|明記されていない|含まれていない|言及(が|は)?(ない|されていない)|示されていない"
+    r"|触れていない|不明|確認できない|欠けている|満たして(い)?(ない|いません)"
+    r"|経験(が|は)?(ない|ありません|なし))")
+_FACT_QUOTE_RE = re.compile(
+    r'\*\*"(.+?)"\*\*|"([^"\n]{12,}?)"|“([^”\n]{12,}?)”|「([^」\n]{12,}?)」|^\s*>\s*(.+?)\s*$',
+    re.MULTILINE)
+_FOLD = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-",
+                       "\u2011": "-", "\u00a0": " "})
+
+
+def _fold(s: str) -> str:
+    return _norm(s.translate(_FOLD))
+
+
+def verify_fact_findings(body: str, document: str) -> tuple[str, list[str]]:
+    """Take ❗事実 bullets that cannot be a false statement out of fact_block.
+
+    A finding that the document says something untrue has to point at what the
+    document says, so a bullet is demoted when
+      - it is the reviewer's all-clear written as a bullet,
+      - every passage it quotes is absent from the document (typically the job
+        posting, quoted as though the CV had claimed it), or
+      - it quotes nothing and only says something is missing — an absence is a
+        fit question, not a fabrication.
+    A bullet that quotes the document stays whatever it concludes, and so does
+    an unquoted one that does not read as an absence: the error to avoid is a
+    real fabrication let through, not a review that blocks too often.
+
+    Demoted bullets keep their text, prefixed ※未検証 and without the bullet
+    marker, so the reader still sees them and _has_findings no longer counts them.
+    Returns (body, [notes]) — body unchanged when there is nothing to correct.
+    """
+    import re
+    match = re.search(r'(###\s*❗\s*事実)(.*?)(?=\n###|\Z)', body, re.DOTALL)
+    if not match:
+        return body, []
+    haystack = _fold(document)
+    lines = match.group(2).split("\n")
+    starts = [i for i, ln in enumerate(lines) if _ITEM_RE.match(ln)]
+    notes: list[str] = []
+    for n, i in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        end = next((j for j in range(i + 1, end) if not lines[j].strip()), end)
+        first, item = lines[i], "\n".join(lines[i:end])
+        if _NO_FINDING_RE.search(first) or not first.strip(" -*0123456789."):
+            continue
+        violation = _FACT_VIOLATION_RE.search(item)
+        quotes = [next(g for g in m if g).strip().strip('"“”「」`\'') for m in _FACT_QUOTE_RE.findall(item)]
+        reason = None
+        if _FACT_CLEAN_RE.search(first) and not violation:
+            reason = "指摘ではない記述"
+        elif quotes:
+            segments = [s.strip() for q in quotes for s in re.split(r"…|\.\.\.", q)]
+            if not any(len(s) >= 8 and _fold(s) in haystack for s in segments):
+                reason = "引用が本文に無い"
+        elif _FACT_ABSENCE_RE.search(item) and not violation:
+            reason = "欠落の指摘であり事実誤認ではない"
+        if reason:
+            lines[i] = _ITEM_RE.sub(f"※未検証（{reason}）: ", first, count=1)
+            notes.append(f"{reason}: {first.strip(' -*')[:50]}")
+    if not notes:
+        return body, []
+    return body[:match.start(2)] + "\n".join(lines) + body[match.end(2):], notes
 
 
 def _norm(s: str) -> str:
@@ -680,10 +766,17 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
             print(f"  ⚠ {prov} returned an unusable review ({unusable}); trying next")
             continue
         review_body = candidate
-        used_model = f"{prov}/{model}"
+        # `model` is what was asked for. The gateway answers 200 with whatever its
+        # fallback chain ended on, so for it the served name is the one that judged.
+        served = current_served_model() if prov == "litellm-gateway" else None
+        used_model = f"{prov}/{served or model}"
         break
     if review_body is None:
         raise RuntimeError("All review providers failed — " + "; ".join(errors))
+
+    review_body, unverified = verify_fact_findings(review_body, document)
+    for note in unverified:
+        print(f"  ⚠ 事実欄の指摘を未検証に降格 — {note}")
 
     if doc_kind == "CL":
         review_body = _mark_unusable_bridge_suggestions(review_body)
@@ -994,6 +1087,7 @@ def respond_to_annotations(doc_kind: str, md_path: Path, job: dict) -> Path:
 
     # Dialogue may withdraw findings or change the rubric — recompute the
     # score so the badge tracks the revised review, not the original.
+    new_body, _ = verify_fact_findings(new_body, md_path.read_text(encoding="utf-8"))
     score, fact_block, style_nits = _extract_score(new_body)
     ready = score is not None and not fact_block and score >= get_score_threshold()
     for key, val in (("submission_score", score if score is not None else "null"),
