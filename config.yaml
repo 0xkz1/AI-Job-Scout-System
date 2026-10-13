@@ -151,6 +151,15 @@ keywords:
 - Technical Support
 - QA Analyst
 - Research Software Engineer
+# 2026-10-12: local income work, requested alongside the professional search.
+- Administrator
+- Business Support
+- Operations Assistant
+- Warehouse Operative
+- Parcel Sorter
+- Removals Porter
+- Kitchen Porter
+- Stock Assistant
 # Manchester dropped 2026-08-07 to pay for two keywords since removed (see above). It is the weakest
 # location on the list for this candidate: Edinburgh-based, needs work now, and a
 # Manchester post is neither commutable nor a better relocation than London — which
@@ -184,8 +193,8 @@ locations:
 #   * "Web Developer" gives up Dundee, the smallest of the four markets for it.
 # Only "Creative Technologist" and "Digital Designer" keep every location — the two
 # best-measured performers.
-# Total: 42 pairs, ~1428s on reed. Two more pairs is the whole remaining headroom, so
-# a new term needs an entry here or an existing one has to give way.
+# Total: 44 pairs: 36 professional + 8 Edinburgh-only local searches.
+# Local searches do not inherit the LinkedIn Remote (Japan) expansion.
 keyword_locations:
   Technical Artist: [Edinburgh, Dundee, Glasgow, Remote]
   Web Developer: [Edinburgh, Glasgow, London, Remote]
@@ -195,6 +204,14 @@ keyword_locations:
   Technical Support: [Edinburgh, Glasgow, Remote]
   QA Analyst: [Edinburgh, Glasgow, Remote]
   Research Software Engineer: [Edinburgh, Glasgow, Remote]
+  Administrator: [Edinburgh]
+  Business Support: [Edinburgh]
+  Operations Assistant: [Edinburgh]
+  Warehouse Operative: [Edinburgh]
+  Parcel Sorter: [Edinburgh]
+  Removals Porter: [Edinburgh]
+  Kitchen Porter: [Edinburgh]
+  Stock Assistant: [Edinburgh]
 
 # Locations only ONE site can search, appended to every keyword's location list
 # for that site alone (selection.search_pairs). No other site sees them, so they
@@ -283,12 +300,34 @@ max_pages_per_search: 3
 # longer per-site timeout in job_scout_nightly.sh instead of more depth. Cache hits
 # cost nothing, so only the first night pays full price.
 max_pages_per_site:
-  reed: 3
+  # 44 searches at the measured rate need ~2578s at depth 3 (>2200s).
+  # Depth 2 needs ~1719s and retains every keyword/location.
+  reed: 2
   adzuna: 3
   guardian: 3
   indeed: 1
   linkedin: 3
 min_salary_gbp: 26000
+
+# The £26k career floor is not an hourly-work eligibility test. These title-only
+# profiles keep local admin/manual jobs, reference the authored shared CVs and
+# avoid spending the professional CV/CL budget on template copies. They do not
+# bypass seniority, driving, language or employment-type exclusions.
+local_job_locations: [Edinburgh, Leith, Muirhouse, Newbridge, Corstorphine, Inverleith, Sighthill]
+local_job_profiles:
+  business_administration:
+    title_keywords: [Administrator, Administrative Assistant, Admin Assistant, Business Support, Operations Assistant, Operations Support, Team Assistant]
+    exclude_title_keywords: [System, Systems, Network, Database, IT, Cloud, Salesforce, ServiceNow, Linux, Windows, Azure, SharePoint, CMS, DevOps, Infrastructure]
+    min_salary_gbp: 0
+    cv: career/cv/CV_Business-Administration
+  warehouse_manual:
+    title_keywords: [Warehouse Operative, Warehouse Assistant, Warehouse Worker, Warehouse Sorter, Parcel Sorter, Parcel Sorting, Parcel Sortation, Removals Porter, Removal Porter, Removal Assistant, Removals Assistant, Stock Assistant, Stock Replenishment, Replenishment Assistant, Picker/Packer, Picker Packer, Packing Operative, Dispatch Assistant, Festive Colleague]
+    min_salary_gbp: 0
+    cv: career/cv/CV_Stock-Replenishment
+  kitchen_porter:
+    title_keywords: [Kitchen Porter, Kitchen Assistant]
+    min_salary_gbp: 0
+    cv: career/cv/CV_Kitchen-Porter
 sites:
 - reed
 - guardian

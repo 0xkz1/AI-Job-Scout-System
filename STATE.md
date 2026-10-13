@@ -5,6 +5,98 @@ means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
 Last verified: 2026-08-28
 
+## Edinburgh local-work overnight follow-up — 2026-10-13
+
+- Checked actual early/late run evidence: LinkedIn timed out at 2400s after
+  repeated 429s; Indeed hit an unattended challenge and returned zero; Guardian
+  failed headed Chromium launch without DISPLAY but was recorded as success.
+  Reed returned 296 in 1761s, Adzuna 819 in 146s, remote APIs 64 in 31s.
+- Fixed in the existing L2 worktree and integrated: shared local metadata in
+  every report renderer, local exclusions before explicit regeneration/review
+  count limits, verified local CV facts and provenance in nightly rescoring,
+  headless Guardian launch without DISPLAY. Preserved current Jev code.
+- Restored only local_job_role/shared_cv lines in 162 existing reports; all
+  other bytes preserved. Backup and hash ledger:
+  `10_output/_local_followup_report_repair_20261013/`. All 173 local reports
+  now have a role. Filter-passed local jobs: 128 (admin80/manual9/kitchen39).
+- Intermediate validation: 427 passed. Final provenance refinement: 101 focused
+  tests passed, then 428 passed with none skipped (127.91s). That 428 was a
+  subset; the whole suite is ~1,370 tests and takes far longer.
+- Monitoring follow-up (same day, morning), integrated from worktree
+  `monitoring-fix-20261013`, not committed:
+  - `--scrape-only` exits 1 when every requested site failed, so a crashed
+    scraper is recorded as `error` instead of an `ok` zero. The nightly runs
+    one site per process.
+  - Indeed raises when no search succeeded.
+  - LinkedIn guest stops 180s before its own timeout and stages what it has.
+  - The UI Save writes only the changed keys and refuses on a clash
+    (`config_save.py`).
+  - A LinkedIn run that lost a search, request or description to its own
+    budget exits 124, the code the nightly recorded when its timeout killed
+    the scraper. `nightly_scout.py` already reads that as `timeout` (and
+    `partial` in the history when jobs were staged), so two rate-limited
+    nights are never an L2 dry target. Jobs are still staged and counted.
+  - Guardian is always headless, because the nightly inherits `DISPLAY=:20`
+    with no X server behind it. A real fetch under that env returned a
+    genuine 0 in 181–200s. With approval, the uncommitted debug diff of
+    unknown origin was removed: `scraper_guardian.py` is now HEAD plus a
+    4-line comment. The removed code is saved in
+    `docs/GUARDIAN_DEBUG_REMOVED_2026-10-13.patch`.
+  - Patch: `docs/MONITORING_FIX_2026-10-13.patch`.
+  - Full live suite after the 124 change: 1,373 passed, 2 failed (247.57s). Both failures are
+    pre-existing and come from `trial_jev_pipeline.py` (`test_doc_paths`,
+    `test_no_unguarded_report_writers`).
+- Open:
+  - Who added the Guardian debug diff is unknown (possibly an L2 worktree
+    leak around 10-08; a hypothesis only).
+  - Guardian is still a dry candidate, but `pick_site()` skips it: it has 2
+    of `MAX_ATTEMPTS_PER_SITE = 2` attempts in `_loop_repair_state.json`.
+    Clearing that file makes it a target again.
+  - A partial Indeed abort (at least one search succeeded) still exits 0, on
+    purpose: the challenge is intermittent, and its yield is above 0, so it
+    never becomes a dry target.
+  - Telegram's dry list (`dry_sites`) counts yields only, so two 0-job 124
+    nights show `linkedin(2晩連続0件)` next to the timeout. True; left as is.
+  - LinkedIn's full 2400s budget is safe: it runs first in the early slot
+    (DEADLINE 6600s), right after `scraper_saved.py`.
+  - A UI save still drops config comments.
+  - LinkedIn 429s and Indeed interactive verification remain.
+  - Full evidence and limits: `docs/EDINBURGH_LOCAL_WORK_FOLLOWUP_2026-10-13.md`.
+
+## Edinburgh local work — 2026-10-12
+
+- L2 explicitly enabled by the user. Implemented in
+  `/home/kz003/.codex/worktrees/52cd/Job-Intelligence-System`, branch
+  `loop/edinburgh-local-20261012`; integrated into the production working tree
+  after explicit human approval. The initial nine-file patch and the later
+  eight-file audit patch preserve unrelated changes;
+  rollback copies are in `/tmp/jis-local-integration-backup-20261012/`.
+  Post-integration validation: 337 related tests passed, none skipped
+  (126.80s). Existing nightly invokes this production directory and reads
+  its configuration, so no schedule change is required.
+- Added eight Edinburgh-only admin/manual/kitchen search terms (44 pairs total;
+  LinkedIn 54 including existing Japan searches). Reed depth is 2 to fit its
+  measured timeout budget; other site depths are unchanged.
+- Templates relocated to canonical `career/cv/` and `career/cover-letter/`
+  at the user's request; local profile paths now reference `career/cv/`.
+  Relocation check: 39 local-job tests passed; all 11 research-report local
+  links resolve. Legacy helper capture and PDF routing passed isolated smoke checks.
+- Title-scoped salary-floor exceptions and verified shared CV references keep
+  local work visible without consuming professional generation/review slots.
+  Seniority, driving and clinical exclusions remain enforced.
+- Validation: 328 related tests passed, 9 existing-data-dependent tests skipped.
+  No full live scrape, schedule change, push, merge or application submission.
+- Additional audit after the user's reliability question reproduced three gaps:
+  shared CVs missing from the standard CV/PDF views, missed festive/plural titles,
+  and distant local jobs admitted by location-blind search sources. Fixes were
+  prepared in the same worktree and integrated within the already-approved scope.
+  Worktree validation: 384 passed, 9 data-dependent skips. Production validation:
+  393 passed, none skipped (128.78s). A real Streamlit AppTest rendered the shared PDF download control
+  without exceptions. API local terms now use gb + where=Edinburgh; professional
+  multi-country searches retain their existing behaviour. Unknown locations still
+  require human checking. No full nightly/live-board run has been performed.
+- Details and task-only patch: `docs/EDINBURGH_LOCAL_WORK_2026-10-12.md`.
+
 ## Dashboard integration — 2026-10-09
 
 - UI work is isolated on `feat/application-history-20261009` in

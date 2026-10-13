@@ -628,6 +628,7 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     # run — the first searches still get their chances.
     consecutive_blocked = 0
     unattended = False
+    succeeded = 0
     _RETRY_GIVE_UP_AFTER = 3
 
     for index, (kw, loc) in enumerate(searches):
@@ -673,6 +674,7 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
             break
         if jobs is None:
             continue
+        succeeded += 1
         consecutive_blocked = 0
         for j in jobs:
             dedup_key = (j["title"], j["company"], j["location"])
@@ -683,9 +685,13 @@ async def scrape_indeed_all(config: dict) -> list[dict]:
     if failures:
         print(f"  ⚠ Indeed: {len(failures)} of {len(searches)} searches failed, "
               f"kept {len(all_jobs)} jobs")
-    if len(failures) == len(searches) and searches:
+    # Counted by successes, not failures: the unattended stop records one
+    # failure and skips the rest, so on 2026-10-13 a run that read nothing was
+    # "1 of 44 failed", returned [] and went into the yield file as a quiet 0.
+    if searches and not succeeded:
         raise RuntimeError(
-            f"all {len(searches)} Indeed searches failed; first: {failures[0]}")
+            f"no Indeed search succeeded ({len(failures)} failed, "
+            f"{len(searches) - len(failures)} skipped); first: {failures[0]}")
 
     # Indeed was the only site that skipped this, trusting its own search
     # relevance. It should not be trusted: measured 2026-08-05, 133 of the 296
@@ -744,11 +750,15 @@ def filter_jobs_by_keywords(jobs: list[dict], keywords: list[str]) -> list[dict]
     if not keywords:
         return jobs
     kw_lower = [k.lower() for k in keywords]
+    from selection import load_config
+    from local_jobs import local_job_role
+    config = load_config()
+    local_search = any(local_job_role(kw, config) for kw in keywords)
     kept = []
     removed = 0
     for j in jobs:
         text = f"{j.get('title', '')} {j.get('description', '')} {j.get('snippet', '')}".lower()
-        if any(kw in text for kw in kw_lower):
+        if any(kw in text for kw in kw_lower) or (local_search and local_job_role(j.get("title", ""), config)):
             kept.append(j)
         else:
             removed += 1

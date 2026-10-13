@@ -26,6 +26,7 @@ Usage:
   .venv/bin/python3 llm_context_backfill.py --force        # re-score everything
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -127,6 +128,7 @@ def main():
         print(f"❌ _analyzed.json を読めません: {e}")
         return 1
 
+    config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
     persona = _load_persona_summary()
     if not persona:
         print("❌ persona summary が空 — 中断")
@@ -145,7 +147,6 @@ def main():
     # re-buy the calls run.py just avoided.
     ranked = sorted(jobs, key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
     if not args.include_filtered:
-        config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
         before = len(ranked)
         ranked = [j for j in ranked if passes_filter(j, config)[0]]
         if before != len(ranked):
@@ -172,7 +173,9 @@ def main():
         try:
             # brief: score gates filtering; the long bilingual reasoning is
             # added lazily only to the high-match reports that display it.
-            ctx = _ollama_context_score(desc, persona, brief=True)
+            from local_jobs import local_persona_extra
+            extra = local_persona_extra(job, config)
+            ctx = _ollama_context_score(desc, persona + extra, brief=True)
         except Exception as e:
             failed += 1
             print(f"  ✗ {job.get('company','?')[:25]}: {str(e)[:60]}", flush=True)
@@ -180,6 +183,9 @@ def main():
         if ctx is None:
             failed += 1
             continue
+        if extra:
+            job["match"]["local_persona_sha256"] = hashlib.sha256(extra.encode()).hexdigest()
+            job["match"]["context_persona_chars"] = len(persona + extra)
         job["match"]["context_score"] = ctx["score"]
         job["match"]["context_reasoning"] = ctx.get("reasoning", "")
         job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")

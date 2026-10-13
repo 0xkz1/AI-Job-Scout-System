@@ -1,0 +1,397 @@
+--- a/config.yaml
++++ b/config.yaml
+@@ -313,6 +313,7 @@
+ # profiles keep local admin/manual jobs, reference the authored shared CVs and
+ # avoid spending the professional CV/CL budget on template copies. They do not
+ # bypass seniority, driving, language or employment-type exclusions.
++local_job_locations: [Edinburgh, Leith, Muirhouse, Newbridge, Corstorphine, Inverleith, Sighthill]
+ local_job_profiles:
+   business_administration:
+     title_keywords: [Administrator, Administrative Assistant, Admin Assistant, Business Support, Operations Assistant, Operations Support, Team Assistant]
+@@ -320,7 +321,7 @@
+     min_salary_gbp: 0
+     cv: career/cv/CV_Business-Administration
+   warehouse_manual:
+-    title_keywords: [Warehouse Operative, Warehouse Assistant, Warehouse Worker, Warehouse Sorter, Parcel Sorter, Parcel Sorting, Parcel Sortation, Removals Porter, Removal Porter, Removal Assistant, Removals Assistant, Stock Assistant, Stock Replenishment, Replenishment Assistant, Picker/Packer, Picker Packer, Packing Operative, Dispatch Assistant]
++    title_keywords: [Warehouse Operative, Warehouse Assistant, Warehouse Worker, Warehouse Sorter, Parcel Sorter, Parcel Sorting, Parcel Sortation, Removals Porter, Removal Porter, Removal Assistant, Removals Assistant, Stock Assistant, Stock Replenishment, Replenishment Assistant, Picker/Packer, Picker Packer, Packing Operative, Dispatch Assistant, Festive Colleague]
+     min_salary_gbp: 0
+     cv: career/cv/CV_Stock-Replenishment
+   kitchen_porter:
+--- a/local_jobs.py
++++ b/local_jobs.py
+@@ -10,7 +10,7 @@
+         config = load_config()
+     for role, profile in (config.get("local_job_profiles") or {}).items():
+         def matches(phrase: str) -> bool:
+-            return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)",
++            return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"s?(?!\w)",
+                                   title or "", re.IGNORECASE))
+         if any(matches(p) for p in profile.get("exclude_title_keywords", [])):
+             continue
+@@ -21,3 +21,23 @@
+ 
+ def local_job_cv(role: str | None, config: dict) -> str:
+     return (config.get("local_job_profiles", {}).get(role, {}).get("cv") or "")
++
++
++def local_job_location_allowed(location: str, config: dict) -> bool:
++    """Reject known distant locations; missing location still needs human checking."""
++    location = (location or "").strip()
++    if location.lower() in {"", "unknown", "not specified", "n/a"}:
++        return True
++    if any(re.search(r"(?<!\w)" + re.escape(place) + r"(?!\w)", location, re.IGNORECASE)
++           for place in config.get("local_job_locations", ["Edinburgh", "Leith", "Newbridge"])):
++        return True
++    return bool(re.search(r"\bEH(?:1[0-7]|28|29|30|[1-9])(?:\s*\d[A-Z]{2})?\b", location, re.IGNORECASE))
++
++
++def local_job_cv_file(role: str | None, config: dict):
++    """The verified shared CV file, when it exists in the profile vault."""
++    from pathlib import Path
++    from matcher import USER_PROFILE_DIR
++    cv = local_job_cv(role, config)
++    source = Path(USER_PROFILE_DIR) / (cv + ".md") if cv else None
++    return source if source and source.is_file() else None
+--- a/filter.py
++++ b/filter.py
+@@ -124,8 +124,10 @@
+     # and was dropped, though it annualises to roughly £67k. 33 postings in the DB
+     # carried a max under 100 — all of them hourly or daily rates.
+     min_salary = config.get("min_salary_gbp", 0)
+-    from local_jobs import local_job_role
++    from local_jobs import local_job_role, local_job_location_allowed
+     local_role = local_job_role(title, config)
++    if local_role and not local_job_location_allowed(job.get("location", ""), config):
++        return False, "local work is outside the Edinburgh commuting area"
+     if local_role:
+         min_salary = config["local_job_profiles"][local_role].get("min_salary_gbp", min_salary)
+     if min_salary > 0 and salary.get("max"):
+--- a/run.py
++++ b/run.py
+@@ -620,7 +620,7 @@
+     letter_dir = os.path.join(output_dir, "10_cover-letters")
+     os.makedirs(letter_dir, exist_ok=True)
+ 
+-    from local_jobs import local_job_role, local_job_cv
++    from local_jobs import local_job_role, local_job_cv, local_job_cv_file
+     # Local work uses the authored shared CVs; it does not consume the pool for
+     # tailored professional documents or generate a technical cover letter.
+     passed_jobs = [j for j in jobs if not j.get("_filter_reason")
+@@ -766,6 +766,8 @@
+         # ones whose links must never move.
+         cv_filename_link = cv_filename_md if os.path.exists(os.path.join(cv_dir, cv_filename_md)) else None
+         cl_filename_link = cl_filename_md if os.path.exists(os.path.join(letter_dir, cl_filename_md)) else None
++        if local_role and not cv_filename_link and local_job_cv_file(local_role, config):
++            cv_filename_link = local_job_cv(local_role, config) + ".md"
+ 
+         # Step 3: Generate match report (with links to CV/CL)
+         report_path = os.path.join(match_dir, f"{match_filename}.md")
+@@ -783,7 +785,7 @@
+             import json
+             shared_cv = local_job_cv(local_role, config)
+             local_meta = "local_job_role: " + json.dumps(local_role)
+-            if shared_cv:
++            if shared_cv and local_job_cv_file(local_role, config):
+                 local_meta += "\nshared_cv: " + json.dumps("[[" + shared_cv + "]]", ensure_ascii=False)
+                 report += "\n\n## 応募用の共有CV\n\n[[" + shared_cv + "]]\n"
+             report = report.replace("---\n", "---\n" + local_meta + "\n", 1)
+--- a/app.py
++++ b/app.py
+@@ -694,6 +694,8 @@
+         Uses pre-computed scores from _analyzed.json instead of re-running analyze_match
+         (which would invoke Ollama LLM for every job — extremely slow)."""
+         jobs = json.loads(jobs_json_str)
++        from selection import load_config
++        title_config = load_config()
+         results = []
+         for job in jobs:
+             match = job.get("match", {})
+@@ -711,7 +713,7 @@
+                 "loc_raw": match.get("location", {}).get("score", 0),
+                 "sal_raw": match.get("salary", {}).get("score", 0),
+                 "ctx_raw": match.get("context_score", 0.5),
+-                "title_relevance": calculate_title_relevance(job.get("title", "")),
++                "title_relevance": calculate_title_relevance(job.get("title", ""), config=title_config),
+                 "tier": match.get("tier", ""),
+                 "expired": bool(job.get("expired", False)),
+                 "source": job.get("source", ""),
+@@ -1039,6 +1041,9 @@
+ def ranked_job_rows(all_jobs: list[dict]) -> list[dict]:
+     """URL-deduped jobs with doc-file existence, date, expired status, and freshness.
+     Shared by the Review and PDF tabs."""
++    from selection import load_config
++    from local_jobs import local_job_role, local_job_cv_file
++    config = load_config()
+     job_map = {}
+     for j in all_jobs:
+         url = j.get("url", "")
+@@ -1048,7 +1053,9 @@
+     for url, j in job_map.items():
+         match = j.get("match", {})
+         base = resolve_doc_base(j.get("company", "company"), j.get("title", "job"), url)
+-        has_cv = (CV_DIR / f"{base}_CV.md").exists()
++        local_role = local_job_role(j.get("title", ""), config)
++        shared_cv = local_job_cv_file(local_role, config)
++        has_cv = bool(shared_cv) or (CV_DIR / f"{base}_CV.md").exists()
+         has_cl = (CL_DIR / f"{base}_CL.md").exists()
+         raw_date = j.get("scraped_at") or j.get("posted_date") or j.get("date") or ""
+         clean_date = raw_date[:10] if raw_date else ""
+@@ -1076,6 +1083,7 @@
+             "expired": expired,
+             "tier": match.get("tier", ""),
+             "base": base,
++            "local_job_role": local_role,
+             "has_cv": has_cv,
+             "has_cl": has_cl,
+             "has_docs": has_cv or has_cl,
+@@ -1303,6 +1311,22 @@
+                     st.error(f"再生成に失敗: {e}")
+ 
+ 
++def shared_cv_controls(role: str, key_prefix: str):
++    """Download the authored PDF; keep shared CVs outside job-specific regeneration."""
++    from selection import load_config
++    from local_jobs import local_job_cv_file
++    source = local_job_cv_file(role, load_config())
++    if source is None:
++        st.caption("共有CVが見つかりません")
++        return
++    pdf = source.parent / "pdf" / source.stem / "Kazuki Yunome CV.pdf"
++    if not pdf.is_file() or pdf.stat().st_mtime < source.stat().st_mtime:
++        st.caption("共有CVのPDFを更新してください")
++        return
++    st.download_button("共有CV PDF", data=pdf.read_bytes(), file_name=pdf.name,
++                       mime="application/pdf", key=f"shared_cv_{key_prefix}")
++
++
+ def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
+     """Inline convert-button + versioned download links for ONE document
+     (a CV or a CL). PDFs are saved to 10_output/20_pdfs/ with sequential
+@@ -1387,7 +1411,7 @@
+     with c_hide_exp:
+         review_hide_expired = st.checkbox("❌ 期限切れ除外", value=True, key="review_hide_expired")
+ 
+-    scoped_rows = [r for r in rows if r["score"] > 0]
++    scoped_rows = [r for r in rows if r["score"] > 0 and not r.get("local_job_role")]
+     if review_hide_expired:
+         scoped_rows = [r for r in scoped_rows if not r.get("expired", False)]
+     if review_period != "全期間":
+@@ -1565,7 +1589,10 @@
+             date_str = f" `{r.get('date')}`" if r.get('date') else ""
+             st.markdown(f"**{r['company']}** — {r['title'][:70]}{date_str}")
+         with c_cv:
+-            pdf_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", f"pdf_{r['url']}")
++            if r.get("local_job_role"):
++                shared_cv_controls(r["local_job_role"], f"pdf_{r['url']}")
++            else:
++                pdf_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", f"pdf_{r['url']}")
+         with c_cl:
+             pdf_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", f"pdf_{r['url']}")
+         st.divider()
+--- a/scraper_indeed.py
++++ b/scraper_indeed.py
+@@ -783,11 +783,15 @@
+     if not keywords:
+         return jobs
+     kw_lower = [k.lower() for k in keywords]
++    from selection import load_config
++    from local_jobs import local_job_role
++    config = load_config()
++    local_search = any(local_job_role(kw, config) for kw in keywords)
+     kept = []
+     removed = 0
+     for j in jobs:
+         text = f"{j.get('title', '')} {j.get('description', '')} {j.get('snippet', '')}".lower()
+-        if any(kw in text for kw in kw_lower):
++        if any(kw in text for kw in kw_lower) or (local_search and local_job_role(j.get("title", ""), config)):
+             kept.append(j)
+         else:
+             removed += 1
+--- a/scraper_adzuna.py
++++ b/scraper_adzuna.py
+@@ -337,7 +337,7 @@
+ 
+ 
+ def scrape_adzuna_api(keyword: str, country: str, app_id: str, app_key: str,
+-                      max_pages: int = 3, results_per_page: int = 50) -> list[dict]:
++                      max_pages: int = 3, results_per_page: int = 50, location: str = "") -> list[dict]:
+     """Query the Adzuna API for one keyword in one country. Non-UK queries are
+     biased toward remote (a UK YMS resident works these remotely, not on-site)."""
+     jobs = []
+@@ -353,6 +353,8 @@
+             "results_per_page": results_per_page,
+             "content-type": "application/json",
+         }
++        if location:
++            params["where"] = location
+         try:
+             r = requests.get(url, params=params, timeout=25)
+         except Exception as e:
+@@ -403,6 +405,7 @@
+     keywords = config.get("keywords", [])
+     countries = config.get("adzuna_countries", ["gb"])
+     from selection import max_pages_for
++    from local_jobs import local_job_role
+     # The API path multiplies by country as well as keyword, so it keeps its own
+     # cap of 3 on top of the per-site setting.
+     max_pages = min(max_pages_for("adzuna", config), 3)
+@@ -410,7 +413,11 @@
+     all_jobs = []
+     for country in countries:
+         for kw in keywords:
+-            for j in scrape_adzuna_api(kw, country, app_id, app_key, max_pages=max_pages):
++            local_role = local_job_role(kw, config)
++            if local_role and country != "gb":
++                continue
++            options = {"location": "Edinburgh"} if local_role else {}
++            for j in scrape_adzuna_api(kw, country, app_id, app_key, max_pages=max_pages, **options):
+                 key = (j["title"], j.get("company", ""), j.get("location", ""))
+                 if key not in seen:
+                     seen.add(key)
+--- /dev/null
++++ b/tests/test_local_job_audit.py
+@@ -0,0 +1,144 @@
++"""Exercise local listings through discovery, eligibility and document access."""
++import ast
++from datetime import datetime
++from pathlib import Path
++from types import SimpleNamespace
++import pytest
++import selection
++import matcher
++import run
++import filter as job_filter
++from local_jobs import local_job_role
++from scraper_indeed import filter_jobs_by_keywords
++
++ROOT=Path(__file__).resolve().parents[1]
++
++@pytest.fixture
++def config():return selection.load_config()
++
++def posting(title,location='Edinburgh'):
++    return {'title':title,'company':'Audit Fixture','location':location,
++            'url':'https://example.invalid/local-audit','scraped_at':datetime.now().isoformat(),
++            'description':'Receive deliveries and support the team. '*15,
++            'analysis':{'experience_level':'entry_level','employment_types':['part_time'],
++                        'salary':{'max':13.28,'period':'hourly'},'skills':['Manual Handling']},
++            'match':{'composite_score':0.75}}
++
++def app_function(name,namespace):
++    tree=ast.parse((ROOT/'app.py').read_text())
++    node=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name)
++    node.decorator_list=[]
++    exec(compile(ast.Module(body=[node],type_ignores=[]),str(ROOT/'app.py'),'exec'),namespace)
++    return namespace[name]
++
++@pytest.mark.parametrize('title',['Tesco Festive Colleague - Nights - Edinburgh Leith',
++                                  'Warehouse Operatives','Kitchen Porters'])
++def test_actual_title_variants_survive_discovery_and_salary_gate(title,config):
++    item=posting(title)
++    assert filter_jobs_by_keywords([item],config['keywords'])==[item]
++    assert local_job_role(title,config) is not None
++    assert job_filter.passes_filter(item,config)==(True,'')
++    assert matcher.calculate_title_relevance(title,config=config)==1.0
++
++@pytest.mark.parametrize('location',['London','Glasgow','Manchester','Tokyo, Japan','Remote'])
++def test_other_cities_do_not_enter_local_ranked_pool(location,config):
++    item=posting('Warehouse Operative',location)
++    assert not job_filter.passes_filter(item,config)[0]
++    assert selection.ranked_jobs(config,jobs=[item])==[]
++
++@pytest.mark.parametrize('location',['Edinburgh','Leith','Newbridge, Edinburgh','EH11 4XX'])
++def test_researched_locations_remain_eligible(location,config):
++    assert job_filter.passes_filter(posting('Warehouse Operative',location),config)==(True,'')
++
++def test_shared_cv_appears_in_standard_report_column(config,tmp_path):
++    item=posting('Warehouse Operative')
++    item['match']=matcher.analyze_match(item,config,skip_summary=True,skip_llm_context=True)
++    run.generate_outputs([item],config,str(tmp_path))
++    report=next((tmp_path/'00_matches').glob('*.md')).read_text()
++    assert '\ncv: "[[career/cv/CV_Stock-Replenishment]]"' in report
++
++def test_pdf_rows_recognise_shared_cv(config,tmp_path):
++    namespace={'Path':Path,'datetime':datetime,'CV_DIR':tmp_path/'cvs',
++               'CL_DIR':tmp_path/'letters','resolve_doc_base':lambda *a:'fixture'}
++    rows=app_function('ranked_job_rows',namespace)([posting('Warehouse Operative')])
++    assert rows[0]['has_cv'] and rows[0]['has_docs']
++    assert rows[0]['local_job_role']=='warehouse_manual'
++
++def test_adzuna_local_queries_are_uk_only_and_located(config,monkeypatch):
++    import scraper_adzuna as api
++    calls=[]
++    def search(keyword,country,*args,**kwargs):
++        calls.append((keyword,country,kwargs));return []
++    monkeypatch.setattr(api,'scrape_adzuna_api',search)
++    monkeypatch.setattr(api.time,'sleep',lambda *a:None)
++    cfg=dict(config,keywords=['Warehouse Operative','Web Developer'],adzuna_countries=['gb','us'])
++    api._scrape_adzuna_api_all(cfg,'dummy','dummy')
++    local=[x for x in calls if x[0]=='Warehouse Operative']
++    assert len(local)==1 and local[0][1]=='gb'
++    assert local[0][2]['location']=='Edinburgh'
++    assert len([x for x in calls if x[0]=='Web Developer'])==2
++
++
++def test_professional_only_keyword_search_does_not_admit_local_aliases():
++    assert filter_jobs_by_keywords([posting('Festive Colleague')],['Web Developer'])==[]
++
++
++def test_adzuna_request_includes_where(monkeypatch):
++    import scraper_adzuna as api
++    seen=[]
++    def get(url,params,timeout):
++        seen.append(params);return SimpleNamespace(status_code=200,json=lambda:{'results':[]})
++    monkeypatch.setattr(api.requests,'get',get)
++    api.scrape_adzuna_api('Warehouse Operative','gb','dummy','dummy',max_pages=1,location='Edinburgh')
++    assert seen[0]['where']=='Edinburgh'
++
++
++def test_shared_cv_download_uses_the_authored_pdf(config):
++    from local_jobs import local_job_cv_file
++    source=local_job_cv_file('warehouse_manual',config)
++    pdf=source.parent/'pdf'/source.stem/'Kazuki Yunome CV.pdf'
++    downloads=[]
++    ui=SimpleNamespace(download_button=lambda *args,**kwargs:downloads.append(kwargs),
++                       caption=lambda *args:pytest.fail('Expected an available authored PDF'))
++    controls=app_function('shared_cv_controls',{'st':ui})
++    controls('warehouse_manual','test_download')
++    assert len(downloads)==1 and downloads[0]['data']==pdf.read_bytes()
++    assert downloads[0]['mime']=='application/pdf'
++
++
++def test_stale_shared_pdf_is_not_offered_as_current(config,tmp_path,monkeypatch):
++    import os,local_jobs
++    source=tmp_path/'CV_Fixture.md';source.write_text('Updated verified CV')
++    pdf=tmp_path/'pdf'/source.stem/'Kazuki Yunome CV.pdf'
++    pdf.parent.mkdir(parents=True);pdf.write_bytes(b'older PDF')
++    os.utime(pdf,(1,1))
++    monkeypatch.setattr(local_jobs,'local_job_cv_file',lambda *args:source)
++    notices=[]
++    ui=SimpleNamespace(download_button=lambda *args,**kwargs:pytest.fail('Stale PDF was offered'),
++                       caption=lambda text:notices.append(text))
++    app_function('shared_cv_controls',{'st':ui})('warehouse_manual','test_stale')
++    assert notices
++
++
++def test_a_missing_shared_cv_does_not_create_a_dead_report_link(config,tmp_path,monkeypatch):
++    import local_jobs
++    monkeypatch.setattr(local_jobs,'local_job_cv_file',lambda *args:None)
++    item=posting('Warehouse Operative')
++    item['match']=matcher.analyze_match(item,config,skip_summary=True,skip_llm_context=True)
++    run.generate_outputs([item],config,str(tmp_path))
++    report=next((tmp_path/'00_matches').glob('*.md')).read_text()
++    assert '\ncv:' not in report
++    assert '\nshared_cv:' not in report
++
++
++def test_dashboard_title_scoring_reuses_one_config(monkeypatch):
++    import json
++    calls=[]
++    config=selection.load_config()
++    def load():calls.append(True);return config
++    monkeypatch.setattr(selection,'load_config',load)
++    seen=[]
++    def score(title,**kwargs):seen.append(kwargs['config']);return 1.0
++    namespace={'json':json,'calculate_title_relevance':score}
++    app_function('get_base_scores',namespace)(json.dumps([posting('Warehouse Operative'),posting('Kitchen Porter')]))
++    assert len(calls)==1 and all(c is config for c in seen)

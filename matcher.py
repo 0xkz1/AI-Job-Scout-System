@@ -2459,7 +2459,8 @@ def _runway_fit(contract_months, config: dict) -> str:
 
 
 def calculate_title_relevance(
-    title: str, context_score: float | None = None, context_source: str | None = None
+    title: str, context_score: float | None = None, context_source: str | None = None,
+    config: dict | None = None
 ) -> float:
     """
     Check if the job title is relevant to target roles.
@@ -2476,6 +2477,8 @@ def calculate_title_relevance(
         return 0.5
         
     title_lower = title.lower()
+    from local_jobs import local_job_role
+    local_role = local_job_role(title, config)
     
     # Target keywords representing the candidate's field
     target_words = {
@@ -2501,6 +2504,10 @@ def calculate_title_relevance(
     }
     
     construction_words = {"construction", "site manager", "quantity surveyor", "bricklayer", "plumber", "electrician", "carpenter"}
+    if local_role:
+        # Only requested local domains are unlocked; nurse/driver/etc. stay excluded.
+        exclusion_words -= {"warehouse", "retail", "receptionist", "delivery"}
+        has_target = True
     
     has_exclusion = any(w in exclusion_words for w in words) or any(cw in title_lower for cw in construction_words)
     # Substring, not token: Japanese is written without spaces, so there is no
@@ -2558,6 +2565,13 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
     """
     user_skills = load_user_skills()
     user_exp = load_user_experience()
+    from local_jobs import local_job_role, local_job_cv
+    local_role = local_job_role(job.get("title", ""), config)
+
+    def job_persona():
+        persona = _load_persona_summary()
+        from local_jobs import local_persona_extra
+        return persona + local_persona_extra(job, config)
 
     analysis = job.get("analysis", {})
     job_skills = analysis.get("skills", [])
@@ -2656,7 +2670,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         # here because the two errors are not equal — a false low is a job
         # that is never seen, a false high is a CV that the review then scores
         # and rejects for the price of generating it.
-        persona = _load_persona_summary()
+        persona = job_persona()
         new_ctx = _ollama_context_score(job_description, persona) if (persona and job_description) else None
         if new_ctx:
             # Keep the new draw's prose: it is the read that actually happened.
@@ -2675,7 +2689,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         ctx_match = legacy_ctx
     else:
         # Use LLM for context scoring (or TF-IDF fallback)
-        persona = _load_persona_summary()
+        persona = job_persona()
         llm_ctx = None
         attempted_llm = bool(persona and job_description and not skip_llm_context)
         if attempted_llm:
@@ -2726,7 +2740,8 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
 
     # Title relevance filter
     relevance = calculate_title_relevance(
-        job.get("title", ""), context_score=ctx_match.get("score"), context_source=ctx_source
+        job.get("title", ""), context_score=ctx_match.get("score"), context_source=ctx_source,
+        config=config
     )
     composite = composite * relevance
 
@@ -2797,6 +2812,7 @@ def analyze_match(job: dict, config: dict, weights: dict | None = None, skip_sum
         # apart from one produced by the intended model and refreshed on its own.
         "context_provider": ctx_match.get("provider"),
         "title_relevance": relevance,
+        "local_job_role": local_role,
         "weights": weights,
         "summary_en": summary_en,
         "summary_ja": summary_ja,
@@ -3020,7 +3036,7 @@ def _is_stretch_job(job: dict) -> bool:
 def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None,
                           expired: bool = False, applied: bool = False,
                           screening_passed: bool = False, interview_passed: bool = False,
-                          carried: list[str] | None = None) -> str:
+                          carried: list[str] | None = None, config: dict | None = None) -> str:
     """
     Generate a Markdown match report with YAML frontmatter for Obsidian Dataview.
     Optionally include links to generated CV and cover letter files.
@@ -3041,6 +3057,15 @@ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None
     save_match_report reads it off the previous report and hands it back for
     the same reason.
     """
+    from local_jobs import local_job_role, local_job_cv, local_job_cv_file
+    if config is None:
+        from selection import load_config
+        config = load_config()
+    local_role = local_job_role(job.get("title", ""), config)
+    shared_cv = local_job_cv(local_role, config) if local_job_cv_file(local_role, config) else ""
+    if shared_cv and not cv_filename:
+        cv_filename = shared_cv + ".md"
+
     title = job.get("title", "Unknown")
     company = job.get("company", "Unknown")
     location = job.get("location", "Unknown")
@@ -3154,6 +3179,13 @@ context_score: {int(match.get('context_score', 0) * 100)}{strategy_yaml}
 scoreable: {"false" if _is_summary_only(job) else "true"}
 url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
 ---"""
+
+    if local_role:
+        import json
+        local_meta = "local_job_role: " + json.dumps(local_role) + "\n"
+        if shared_cv:
+            local_meta += "shared_cv: " + json.dumps("[[" + shared_cv + "]]", ensure_ascii=False) + "\n"
+        frontmatter = frontmatter.replace("---\n", "---\n" + local_meta, 1)
 
     # The sponsorship quote goes in the BODY, never the frontmatter: it is a
     # sentence, and it is the entire justification for the flag above. A reader

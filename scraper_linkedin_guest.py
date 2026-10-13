@@ -55,6 +55,44 @@ def _sleep():
     time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
 
+# The nightly runs this under `timeout $LINKEDIN_TIMEOUT`, and a kill stages
+# nothing. On 2026-10-13 it was killed 54 searches and 922 postings in, 80
+# descriptions into the fetch, and the night's LinkedIn yield was zero where
+# stopping a minute earlier would have kept those 80 plus every cache hit. So
+# the scraper watches its own clock and returns what it has. The margin covers
+# process start-up, one request in flight (30s timeout) and staging the result.
+_STOP_MARGIN_SECONDS = 180
+
+# monotonic() time to stop by, set for the length of one
+# scrape_linkedin_guest_all call; None means no limit (the --dry-run CLI, tests).
+_deadline: float | None = None
+
+# Whether the last scrape_linkedin_guest_all call lost anything to the clock — a
+# search not run, a request or a description not fetched. run.py exits 124 on it,
+# the code the nightly recorded back when the timeout killed this scraper, so a
+# night spent waiting out 429s still reads as a timeout and not as a clean scrape
+# that found little: two clean empty nights make a site a "dry" repair target.
+stopped_short = False
+
+
+def _budget_seconds() -> float:
+    """LINKEDIN_GUEST_BUDGET if set, else the nightly's own per-site timeout."""
+    override = os.environ.get("LINKEDIN_GUEST_BUDGET")
+    if override:
+        return float(override)
+    from invariants import _site_timeout
+    return float(_site_timeout("linkedin"))
+
+
+def _out_of_time(wait: float = 0.0) -> bool:
+    # Every caller drops something when this is True, so it is the one place
+    # that knows the run was cut short.
+    global stopped_short
+    out = _deadline is not None and time.monotonic() + wait >= _deadline
+    stopped_short = stopped_short or out
+    return out
+
+
 def _get(url: str, params: dict | None = None) -> str | None:
     """GET with backoff. Returns the body, or None once the retries are spent.
 
@@ -68,6 +106,8 @@ def _get(url: str, params: dict | None = None) -> str | None:
     }
     backoff = 5.0
     for attempt in range(1, MAX_RETRIES + 1):
+        if _out_of_time():
+            return None
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=30)
         except requests.RequestException as e:
@@ -82,6 +122,9 @@ def _get(url: str, params: dict | None = None) -> str | None:
             return None  # posting withdrawn — not worth retrying
         if resp.status_code == 429 or resp.status_code >= 500:
             wait = float(resp.headers.get("Retry-After") or backoff)
+            if _out_of_time(wait):
+                print(f"    ⚠ HTTP {resp.status_code} — no time left to wait {wait:.0f}s")
+                return None
             print(f"    ⚠ HTTP {resp.status_code} — waiting {wait:.0f}s "
                   f"(retry {attempt}/{MAX_RETRIES})")
             time.sleep(wait)
@@ -370,7 +413,7 @@ def fill_descriptions(jobs: list[dict], cache: dict | None = None) -> None:
     company) skip the request entirely — the same mechanism the other scrapers
     use, so a posting already scraped elsewhere costs nothing here."""
     cache = cache if cache is not None else {}
-    fetched = skipped = dropped = 0
+    fetched = skipped = dropped = unfetched = 0
 
     for job in jobs:
         key = (job.get("title", "").strip().lower(), job.get("company", "").strip().lower())
@@ -383,6 +426,11 @@ def fill_descriptions(jobs: list[dict], cache: dict | None = None) -> None:
             skipped += 1
             continue
 
+        # Out of time: keep walking for the cache hits, which cost no request.
+        # The postings left undescribed are found again by tomorrow's search.
+        if _out_of_time():
+            unfetched += 1
+            continue
         html = _get(JOB_URL.format(job_id=job["job_id"]))
         _sleep()
         detail = _parse_job_html(html) if html else {}
@@ -398,6 +446,9 @@ def fill_descriptions(jobs: list[dict], cache: dict | None = None) -> None:
 
     print(f"  📄 descriptions: {fetched} fetched, {skipped} cache hits, "
           f"{dropped} unavailable (withdrawn/blocked)")
+    if unfetched:
+        print(f"  ⏱ time budget spent — {unfetched} postings left without a "
+              f"description, dropped for tonight")
 
 
 def search_terms(config: dict) -> list[str]:
@@ -444,31 +495,14 @@ def _drop_partial_remote(jobs: list[dict]) -> list[dict]:
 
 def scrape_linkedin_guest_all(config: dict) -> list[dict]:
     """Every keyword x location in config, deduped by posting id."""
-    from selection import max_pages_for, search_pairs
-    from scraper_helper import load_description_cache
-
-    max_pages = max_pages_for("linkedin", config)
-
-    all_jobs: list[dict] = []
-    seen_ids: set[str] = set()
-
-    # site="linkedin": this scraper is the only one that can search a
-    # site_only_locations entry (Remote (Japan)), so it is the only one that asks.
-    for kw, loc in search_pairs(config, site="linkedin"):
-        spec = _site_location(loc) or {}
-        for job in search(kw, loc, max_pages=spec.get("max_pages", max_pages)):
-            if job["job_id"] in seen_ids:
-                continue
-            seen_ids.add(job["job_id"])
-            all_jobs.append(job)
-
-    print(f"\n  🔗 {len(all_jobs)} unique postings before descriptions")
-    fill_descriptions(all_jobs, load_description_cache())
-
-    # A posting with no description cannot be scored (review_score treats a
-    # missing description as void), so it is dead weight in the pipeline.
-    all_jobs = [j for j in all_jobs if j.get("description")]
-    all_jobs = _drop_partial_remote(all_jobs)
+    global _deadline, stopped_short
+    started = time.monotonic()
+    _deadline = started + _budget_seconds() - _STOP_MARGIN_SECONDS
+    stopped_short = False
+    try:
+        all_jobs = _scrape_all(config, started)
+    finally:
+        _deadline = None
 
     # config.get, not a bare `keywords` — that NameError fired here, one line
     # after 502 descriptions had been fetched over the network, and took all
@@ -480,6 +514,41 @@ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
 
     print(f"  ✓ Total: {len(all_jobs)} jobs from LinkedIn (guest)")
     return all_jobs
+
+
+def _scrape_all(config: dict, started: float) -> list[dict]:
+    from selection import max_pages_for, search_pairs
+    from scraper_helper import load_description_cache
+
+    max_pages = max_pages_for("linkedin", config)
+
+    all_jobs: list[dict] = []
+    seen_ids: set[str] = set()
+
+    # site="linkedin": this scraper is the only one that can search a
+    # site_only_locations entry (Remote (Japan)), so it is the only one that asks.
+    pairs = search_pairs(config, site="linkedin")
+    for done, (kw, loc) in enumerate(pairs):
+        if _out_of_time():
+            print(f"  ⏱ time budget spent — {len(pairs) - done} of {len(pairs)} "
+                  f"searches not run")
+            break
+        spec = _site_location(loc) or {}
+        for job in search(kw, loc, max_pages=spec.get("max_pages", max_pages)):
+            if job["job_id"] in seen_ids:
+                continue
+            seen_ids.add(job["job_id"])
+            all_jobs.append(job)
+
+    print(f"\n  🔗 {len(all_jobs)} unique postings before descriptions "
+          f"({time.monotonic() - started:.0f}s searching)")
+    fill_descriptions(all_jobs, load_description_cache())
+    print(f"  ⏱ {time.monotonic() - started:.0f}s elapsed")
+
+    # A posting with no description cannot be scored (review_score treats a
+    # missing description as void), so it is dead weight in the pipeline.
+    all_jobs = [j for j in all_jobs if j.get("description")]
+    return _drop_partial_remote(all_jobs)
 
 
 async def scrape_linkedin_all(config: dict) -> list[dict]:

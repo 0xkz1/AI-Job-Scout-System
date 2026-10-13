@@ -1,0 +1,381 @@
+--- a/matcher.py
++++ b/matcher.py
+@@ -2570,12 +2570,8 @@
+ 
+     def job_persona():
+         persona = _load_persona_summary()
+-        cv = local_job_cv(local_role, config)
+-        if cv:
+-            source = USER_PROFILE_DIR / (cv + ".md")
+-            if source.is_file():
+-                persona += "\n--- LOCAL WORK: VERIFIED SHARED CV ---\n" + source.read_text(encoding="utf-8")
+-        return persona
++        from local_jobs import local_persona_extra
++        return persona + local_persona_extra(job, config)
+ 
+     analysis = job.get("analysis", {})
+     job_skills = analysis.get("skills", [])
+@@ -3040,7 +3036,7 @@
+ def generate_match_report(job: dict, match: dict, cv_filename: str | None = None, cl_filename: str | None = None,
+                           expired: bool = False, applied: bool = False,
+                           screening_passed: bool = False, interview_passed: bool = False,
+-                          carried: list[str] | None = None) -> str:
++                          carried: list[str] | None = None, config: dict | None = None) -> str:
+     """
+     Generate a Markdown match report with YAML frontmatter for Obsidian Dataview.
+     Optionally include links to generated CV and cover letter files.
+@@ -3061,6 +3057,15 @@
+     save_match_report reads it off the previous report and hands it back for
+     the same reason.
+     """
++    from local_jobs import local_job_role, local_job_cv, local_job_cv_file
++    if config is None:
++        from selection import load_config
++        config = load_config()
++    local_role = local_job_role(job.get("title", ""), config)
++    shared_cv = local_job_cv(local_role, config) if local_job_cv_file(local_role, config) else ""
++    if shared_cv and not cv_filename:
++        cv_filename = shared_cv + ".md"
++
+     title = job.get("title", "Unknown")
+     company = job.get("company", "Unknown")
+     location = job.get("location", "Unknown")
+@@ -3174,6 +3179,13 @@
+ scoreable: {"false" if _is_summary_only(job) else "true"}
+ url: "{url}"{cv_link}{cl_link}{carried_yaml}{review_yaml}
+ ---"""
++
++    if local_role:
++        import json
++        local_meta = "local_job_role: " + json.dumps(local_role) + "\n"
++        if shared_cv:
++            local_meta += "shared_cv: " + json.dumps("[[" + shared_cv + "]]", ensure_ascii=False) + "\n"
++        frontmatter = frontmatter.replace("---\n", "---\n" + local_meta, 1)
+ 
+     # The sponsorship quote goes in the BODY, never the frontmatter: it is a
+     # sentence, and it is the entire justification for the flag above. A reader
+--- a/run.py
++++ b/run.py
+@@ -779,16 +779,8 @@
+         report = generate_match_report(
+             job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link,
+             expired=read_expired_flag(Path(report_path)),
+-            applied=read_applied_flag(Path(report_path)),
++            applied=read_applied_flag(Path(report_path)), config=config,
+         )
+-        if local_role:
+-            import json
+-            shared_cv = local_job_cv(local_role, config)
+-            local_meta = "local_job_role: " + json.dumps(local_role)
+-            if shared_cv and local_job_cv_file(local_role, config):
+-                local_meta += "\nshared_cv: " + json.dumps("[[" + shared_cv + "]]", ensure_ascii=False)
+-                report += "\n\n## 応募用の共有CV\n\n[[" + shared_cv + "]]\n"
+-            report = report.replace("---\n", "---\n" + local_meta + "\n", 1)
+         # Reports are fully regenerated each run, but some frontmatter is owned
+         # by the WebUI rather than the analyzer — cv_pdf/cl_pdf are written at
+         # PDF-conversion time. Carry them over or they'd vanish on every
+--- a/local_jobs.py
++++ b/local_jobs.py
+@@ -41,3 +41,9 @@
+     cv = local_job_cv(role, config)
+     source = Path(USER_PROFILE_DIR) / (cv + ".md") if cv else None
+     return source if source and source.is_file() else None
++
++
++def local_persona_extra(job: dict, config: dict) -> str:
++    """Use the same verified local facts in initial scoring and later rescoring."""
++    source = local_job_cv_file(local_job_role(job.get("title", ""), config), config)
++    return "\n--- LOCAL WORK: VERIFIED SHARED CV ---\n" + source.read_text(encoding="utf-8") if source else ""
+--- a/regen_top_docs.py
++++ b/regen_top_docs.py
+@@ -97,7 +97,9 @@
+         return _pair_audit(config)
+ 
+     if args.limit is not None:
+-        top = ranked_jobs(config)[args.offset:args.offset + args.limit]
++        from local_jobs import local_job_role
++        professional = [j for j in ranked_jobs(config) if not local_job_role(j.get("title", ""), config)]
++        top = professional[args.offset:args.offset + args.limit]
+         scope = f"{args.offset + 1}〜{args.offset + len(top)}位"
+     else:
+         top = select_top("generation", config, percent=args.percent)
+--- a/rereview_top.py
++++ b/rereview_top.py
+@@ -58,7 +58,8 @@
+     config = yaml.safe_load((ROOT / "config.yaml").read_text()) or {}
+     from selection import ranked_jobs, select_top
+     if args.limit is not None:
+-        top = ranked_jobs(config)[:args.limit]
++        from local_jobs import local_job_role
++        top = [j for j in ranked_jobs(config) if not local_job_role(j.get("title", ""), config)][:args.limit]
+         scope = f"上位{args.limit}求人"
+     else:
+         top = select_top("review", config, percent=args.percent)
+--- a/scraper_guardian.py
++++ b/scraper_guardian.py
+@@ -371,7 +371,7 @@
+ 
+     p = playwright_instance
+     browser = await p.chromium.launch(
+-        headless=False,  # Show browser for debugging
++        headless=not bool(os.getenv("DISPLAY")),  # Cron has no X server.
+         args=[
+             "--disable-blink-features=AutomationControlled",
+             "--no-sandbox",
+--- a/rescore_context.py
++++ b/rescore_context.py
+@@ -32,6 +32,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import hashlib
+ import json
+ import shutil
+ import statistics
+@@ -86,13 +87,16 @@
+     never reaches a ranking — buying it a second opinion spends a call on an
+     answer nothing reads.
+     """
++    from local_jobs import local_persona_extra
+     out = []
+     for job in jobs:
+         m = job.get("match") or {}
+         if roles is not None and m.get("detected_role") not in roles:
+             continue
+-        if persona_chars is not None and not _is_stale(
+-                m.get("context_persona_chars"), persona_chars):
++        extra = local_persona_extra(job, config)
++        local_changed = bool(extra) and m.get("local_persona_sha256") != hashlib.sha256(extra.encode()).hexdigest()
++        if not local_changed and persona_chars is not None and not _is_stale(
++                m.get("context_persona_chars"), persona_chars + len(extra)):
+             continue
+         if m.get("context_score") is None:
+             continue
+@@ -123,6 +127,10 @@
+     m = job["match"]
+     before = m["composite_score"]
+     m["context_persona_chars"] = persona_chars
++    from local_jobs import local_persona_extra
++    extra = local_persona_extra(job, config)
++    if extra:
++        m["local_persona_sha256"] = hashlib.sha256(extra.encode()).hexdigest()
+     m["context_score"] = ctx["score"]
+     m["context_reasoning"] = ctx.get("reasoning", "")
+     m["context_reasoning_en"] = ctx.get("reasoning_en", "")
+@@ -206,7 +214,9 @@
+     for n, job in enumerate(todo, 1):
+         desc = job.get("description") or ""
+         try:
+-            ctx = _ollama_context_score(desc, persona, brief=True)
++            from local_jobs import local_persona_extra
++            job_persona = persona + local_persona_extra(job, config)
++            ctx = _ollama_context_score(desc, job_persona, brief=True)
+         except Exception as e:
+             print(f"  ⚠ {str(job.get('company',''))[:24]}: {str(e)[:60]}", flush=True)
+             failed += 1
+@@ -215,7 +225,7 @@
+         if not ctx:
+             failed += 1
+             continue
+-        before, after = apply(job, ctx, persona_chars, config)
++        before, after = apply(job, ctx, len(job_persona), config)
+         deltas.append(after - before)
+         done += 1
+         print(f"  [{n}/{len(todo)}] {str(job['match'].get('detected_role'))[:16]:16s} "
+--- a/llm_context_backfill.py
++++ b/llm_context_backfill.py
+@@ -26,6 +26,7 @@
+   .venv/bin/python3 llm_context_backfill.py --force        # re-score everything
+ """
+ import argparse
++import hashlib
+ import json
+ import os
+ import sys
+@@ -127,6 +128,7 @@
+         print(f"❌ _analyzed.json を読めません: {e}")
+         return 1
+ 
++    config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+     persona = _load_persona_summary()
+     if not persona:
+         print("❌ persona summary が空 — 中断")
+@@ -145,7 +147,6 @@
+     # re-buy the calls run.py just avoided.
+     ranked = sorted(jobs, key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
+     if not args.include_filtered:
+-        config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+         before = len(ranked)
+         ranked = [j for j in ranked if passes_filter(j, config)[0]]
+         if before != len(ranked):
+@@ -172,7 +173,9 @@
+         try:
+             # brief: score gates filtering; the long bilingual reasoning is
+             # added lazily only to the high-match reports that display it.
+-            ctx = _ollama_context_score(desc, persona, brief=True)
++            from local_jobs import local_persona_extra
++            extra = local_persona_extra(job, config)
++            ctx = _ollama_context_score(desc, persona + extra, brief=True)
+         except Exception as e:
+             failed += 1
+             print(f"  ✗ {job.get('company','?')[:25]}: {str(e)[:60]}", flush=True)
+@@ -180,6 +183,9 @@
+         if ctx is None:
+             failed += 1
+             continue
++        if extra:
++            job["match"]["local_persona_sha256"] = hashlib.sha256(extra.encode()).hexdigest()
++            job["match"]["context_persona_chars"] = len(persona + extra)
+         job["match"]["context_score"] = ctx["score"]
+         job["match"]["context_reasoning"] = ctx.get("reasoning", "")
+         job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
+--- a/regen_match_reports.py
++++ b/regen_match_reports.py
+@@ -84,6 +84,8 @@
+ 
+ 
+ def main():
++    from selection import load_config
++    config = load_config()
+     db = json.loads(DB_PATH.read_text())
+     by_url, by_title = {}, {}
+     for job in db:
+@@ -154,7 +156,7 @@
+             job, match, cv, cl,
+             expired=read_expired_flag(path),
+             applied=read_applied_flag(path),
+-            carried=read_carried_properties(path),
++            carried=read_carried_properties(path), config=config,
+         )
+         # Preserve the original file's trailing-newline convention so a pure
+         # newline delta never counts as a change (avoids churning 589 files
+--- /dev/null
++++ b/tests/test_local_job_followup.py
+@@ -0,0 +1,127 @@
++"""Keep local-work routing intact across nightly and manual entry points."""
++import ast,json,sys
++from pathlib import Path
++from types import SimpleNamespace
++import pytest
++import matcher,selection,run
++from local_jobs import local_persona_extra
++
++ROOT=Path(__file__).resolve().parents[1]
++
++@pytest.fixture
++def config():return selection.load_config()
++
++def item(title='Warehouse Operative'):
++    return {'title':title,'company':'Followup Fixture','location':'Edinburgh',
++            'url':'https://example.invalid/'+title.replace(' ','-'),
++            'description':'Receive and organise deliveries and work with the team. '*15,
++            'analysis':{'experience_level':'entry_level','employment_types':['part_time'],
++                        'salary':{'max':13.28,'period':'hourly'},'skills':['Manual Handling']}}
++
++def scored(config):
++    job=item();job['match']=matcher.analyze_match(job,config,skip_summary=True,skip_llm_context=True)
++    return job
++
++
++def test_core_renderer_and_save_entrypoint_retain_local_cv_metadata(config,tmp_path):
++    job=scored(config)
++    direct=matcher.generate_match_report(job,job['match'],config=config)
++    saved=Path(matcher.save_match_report(job,job['match'],str(tmp_path))).read_text()
++    for text in [direct,saved]:
++        assert text.count('local_job_role: "warehouse_manual"')==1
++        assert '\ncv: "[[career/cv/CV_Stock-Replenishment]]"' in text
++        assert '\nshared_cv: "[[career/cv/CV_Stock-Replenishment]]"' in text
++
++
++def test_nightly_regeneration_keeps_local_fields(config,tmp_path,monkeypatch):
++    import regen_match_reports as regen
++    job=scored(config);folder=tmp_path/'matches';folder.mkdir()
++    report=folder/(matcher.make_safe_name(job['company'],job['title'])+'.md')
++    report.write_text(matcher.generate_match_report(job,job['match'],config=config))
++    db=tmp_path/'jobs.json';db.write_text(json.dumps([job]))
++    monkeypatch.setattr(regen,'DB_PATH',db);monkeypatch.setattr(regen,'MATCH_DIR',folder)
++    monkeypatch.setattr(regen,'APPLY',True)
++    regen.main()
++    assert report.read_text().count('local_job_role: "warehouse_manual"')==1
++    assert 'shared_cv:' in report.read_text()
++
++
++def test_explicit_regeneration_limit_does_not_select_or_count_local_work(config,tmp_path,monkeypatch,capsys):
++    import regen_top_docs as regen
++    jobs=[dict(item(),match={'composite_score':0.99}),
++          dict(item('Junior Web Developer'),match={'composite_score':0.80})]
++    monkeypatch.setattr(regen,'ranked_jobs',lambda *a:jobs)
++    monkeypatch.setattr(regen.gen_version if hasattr(regen,'gen_version') else __import__('gen_version'),'pair_lock_reason',lambda *a:None)
++    monkeypatch.setattr(sys,'argv',['regen_top_docs.py','--limit','1','--dry-run'])
++    assert regen.main()==0
++    output=capsys.readouterr().out
++    assert 'Junior_Web_Developer' in output and 'Warehouse_Operative' not in output
++
++
++def test_explicit_review_limit_does_not_select_or_count_local_work(config,tmp_path,monkeypatch):
++    import rereview_top as review
++    jobs=[dict(item(),match={'composite_score':0.99}),
++          dict(item('Junior Web Developer'),match={'composite_score':0.80})]
++    docs=tmp_path/'cvs';docs.mkdir()
++    for job in jobs:(docs/(matcher.make_safe_name(job['company'],job['title'])+'_CV.md')).write_text('CV fixture')
++    verdict=tmp_path/'verdict.md';verdict.write_text('No findings.')
++    calls=[]
++    monkeypatch.setattr(selection,'ranked_jobs',lambda *a:jobs)
++    monkeypatch.setattr(review,'CV_DIR',docs);monkeypatch.setattr(review.gen_version,'is_locked',lambda *a:False)
++    monkeypatch.setattr(review,'run_review',lambda kind,path,job:(calls.append(job['title']) or verdict))
++    monkeypatch.setattr(review,'_extract_score',lambda text:(80,False,0))
++    monkeypatch.setattr(sys,'argv',['rereview_top.py','--limit','1','--kind','CV'])
++    assert review.main()==0
++    assert calls==['Junior Web Developer']
++
++
++@pytest.mark.parametrize('module_name',['llm_context_backfill','rescore_context'])
++def test_nightly_rescoring_receives_verified_local_cv(module_name,config,tmp_path,monkeypatch):
++    import importlib
++    module=importlib.import_module(module_name)
++    job=scored(config);job['match'].pop('context_persona_chars',None)
++    job['match']['context_source']='tfidf';job['match']['summary_en']='Existing summary'
++    db=tmp_path/'jobs.json';db.write_text(json.dumps([job]))
++    seen=[]
++    def score(description,persona,**kwargs):seen.append(persona);return {'score':0.4}
++    monkeypatch.setattr(matcher,'_load_persona_summary',lambda:'Professional profile')
++    monkeypatch.setattr(matcher,'_ollama_context_score',score)
++    monkeypatch.setattr(module.time,'sleep',lambda *a:None)
++    if module_name=='llm_context_backfill':
++        monkeypatch.setattr(module,'ANALYZED_PATH',db)
++        monkeypatch.setattr(module,'_load_persona_summary',lambda:'Professional profile')
++        monkeypatch.setattr(module,'_ollama_context_score',score)
++    else:monkeypatch.setattr(module,'ANALYZED',db)
++    monkeypatch.setattr(sys,'argv',[module_name+'.py','--limit','1'])
++    module.main()
++    assert len(seen)==1 and 'Hikkoshi-sha' in seen[0] and '2015–2017' in seen[0]
++    if module_name=='rescore_context':
++        result=json.loads(db.read_text())[0]
++        assert result['match']['context_persona_chars']==len(seen[0])
++
++
++def test_local_persona_stamp_does_not_create_an_endless_rescore(config):
++    import rescore_context
++    job=scored(config);base='Professional profile'
++    rescore_context.apply(job,{'score':0.4},len(base+local_persona_extra(job,config)),config)
++    assert rescore_context.due([job],config,persona_chars=len(base))==[]
++
++
++def test_guardian_can_launch_without_a_display(monkeypatch):
++    import scraper_guardian as guardian
++    import asyncio
++    seen=[]
++    class StopAfterLaunch(Exception):pass
++    async def launch(**kwargs):seen.append(kwargs);raise StopAfterLaunch
++    monkeypatch.delenv('DISPLAY',raising=False)
++    browser=SimpleNamespace(chromium=SimpleNamespace(launch=launch))
++    with pytest.raises(StopAfterLaunch):
++        asyncio.run(guardian.scrape_guardian('Kitchen Porter','Edinburgh',max_pages=1,playwright_instance=browser))
++    assert seen[0]['headless'] is True
++
++
++def test_old_professional_stamp_cannot_hide_missing_local_cv(config):
++    import rescore_context
++    job=scored(config)
++    job['match']['context_persona_chars']=50000
++    assert rescore_context.due([job],config,persona_chars=50000)==[job]

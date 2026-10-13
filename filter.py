@@ -124,6 +124,12 @@ def passes_filter(job: dict, config: dict) -> tuple[bool, str]:
     # and was dropped, though it annualises to roughly £67k. 33 postings in the DB
     # carried a max under 100 — all of them hourly or daily rates.
     min_salary = config.get("min_salary_gbp", 0)
+    from local_jobs import local_job_role, local_job_location_allowed
+    local_role = local_job_role(title, config)
+    if local_role and not local_job_location_allowed(job.get("location", ""), config):
+        return False, "local work is outside the Edinburgh commuting area"
+    if local_role:
+        min_salary = config["local_job_profiles"][local_role].get("min_salary_gbp", min_salary)
     if min_salary > 0 and salary.get("max"):
         annual = _annualise(salary["max"], salary.get("period"))
         if annual is not None and annual < min_salary:

@@ -32,6 +32,7 @@ moves.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import statistics
@@ -86,13 +87,16 @@ def due(jobs: list[dict], config: dict, roles: set[str] | None = None,
     never reaches a ranking — buying it a second opinion spends a call on an
     answer nothing reads.
     """
+    from local_jobs import local_persona_extra
     out = []
     for job in jobs:
         m = job.get("match") or {}
         if roles is not None and m.get("detected_role") not in roles:
             continue
-        if persona_chars is not None and not _is_stale(
-                m.get("context_persona_chars"), persona_chars):
+        extra = local_persona_extra(job, config)
+        local_changed = bool(extra) and m.get("local_persona_sha256") != hashlib.sha256(extra.encode()).hexdigest()
+        if not local_changed and persona_chars is not None and not _is_stale(
+                m.get("context_persona_chars"), persona_chars + len(extra)):
             continue
         if m.get("context_score") is None:
             continue
@@ -123,6 +127,10 @@ def apply(job: dict, ctx: dict, persona_chars: int, config: dict) -> tuple[float
     m = job["match"]
     before = m["composite_score"]
     m["context_persona_chars"] = persona_chars
+    from local_jobs import local_persona_extra
+    extra = local_persona_extra(job, config)
+    if extra:
+        m["local_persona_sha256"] = hashlib.sha256(extra.encode()).hexdigest()
     m["context_score"] = ctx["score"]
     m["context_reasoning"] = ctx.get("reasoning", "")
     m["context_reasoning_en"] = ctx.get("reasoning_en", "")
@@ -206,7 +214,9 @@ def main() -> None:
     for n, job in enumerate(todo, 1):
         desc = job.get("description") or ""
         try:
-            ctx = _ollama_context_score(desc, persona, brief=True)
+            from local_jobs import local_persona_extra
+            job_persona = persona + local_persona_extra(job, config)
+            ctx = _ollama_context_score(desc, job_persona, brief=True)
         except Exception as e:
             print(f"  ⚠ {str(job.get('company',''))[:24]}: {str(e)[:60]}", flush=True)
             failed += 1
@@ -215,7 +225,7 @@ def main() -> None:
         if not ctx:
             failed += 1
             continue
-        before, after = apply(job, ctx, persona_chars, config)
+        before, after = apply(job, ctx, len(job_persona), config)
         deltas.append(after - before)
         done += 1
         print(f"  [{n}/{len(todo)}] {str(job['match'].get('detected_role'))[:16]:16s} "

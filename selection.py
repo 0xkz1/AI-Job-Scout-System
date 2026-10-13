@@ -138,9 +138,11 @@ def search_pairs(config: dict | None = None, site: str | None = None) -> list[tu
     per_keyword = config.get("keyword_locations") or {}
     extra = list((config.get("site_only_locations") or {}).get(site) or []) if site else []
     pairs: list[tuple[str, str]] = []
+    from local_jobs import local_job_role
     for kw in keywords:
         locs = list(per_keyword.get(kw) or locations)
-        locs += [loc for loc in extra if loc not in locs]
+        if not local_job_role(kw, config):
+            locs += [loc for loc in extra if loc not in locs]
         pairs += [(kw, loc) for loc in locs]
     return pairs
 
@@ -433,6 +435,8 @@ def select_top(
     CLI --limit-style override that is expressed as a percentage)."""
     config = config if config is not None else load_config()
     ranked = ranked_jobs(config, jobs)
+    from local_jobs import local_job_role
+    ranked = [j for j in ranked if not local_job_role(j.get("title", ""), config)]
     pct = percent if percent is not None else stage_percent(config, stage)
     k = top_percent_count(len(ranked), pct)
 

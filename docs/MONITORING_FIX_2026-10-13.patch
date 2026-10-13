@@ -1,0 +1,728 @@
+--- a/run.py
++++ b/run.py
+@@ -35,6 +35,7 @@
+ # scraper_linkedin.py is still used by scraper_saved.py for the user's own
+ # saved jobs, which genuinely need the account.
+ from scraper_linkedin_guest import scrape_linkedin_all
++import scraper_linkedin_guest  # .stopped_short, read after each run
+ from scraper_reed import scrape_reed_all
+ from scraper_guardian import scrape_guardian_all
+ from scraper_adzuna import scrape_adzuna_all
+@@ -1426,6 +1427,9 @@
+         # line in a log nobody reads. Collected here and turned into a non-zero exit
+         # at the end when EVERY requested site failed.
+         scraper_failures: list[str] = []
++        # Sites that stopped on their own time budget with part of the work
++        # undone. Their jobs are kept; --scrape-only exits 124 for them.
++        scraper_cut_short: list[str] = []
+ 
+         if "indeed" in sites:
+             print(f"\n{'='*60}")
+@@ -1450,6 +1454,8 @@
+                 print(f"  → {len(linkedin_jobs)} jobs from LinkedIn")
+                 save_raw_to_saved(linkedin_jobs, "linkedin")
+                 all_jobs.extend(linkedin_jobs)
++                if scraper_linkedin_guest.stopped_short:
++                    scraper_cut_short.append("linkedin")
+             except Exception as e:
+                 print(f"  ❌ LinkedIn scraper failed: {e}")
+                 scraper_failures.append("linkedin")
+@@ -1535,7 +1541,20 @@
+             if scraper_failures:
+                 print(f"  ⚠ failed: {', '.join(scraper_failures)}")
+             print(f"{'='*60}")
+-            return
++            # The nightly calls every site through this path, one site per
++            # process, so the exit code at the end of main() never ran for it:
++            # Guardian's headed browser died with no X server on 2026-10-13 and
++            # the run summary recorded rc 0. Same rule as there.
++            if scraper_failures and len(set(scraper_failures)) >= len(set(sites)):
++                print(f"  ❌ every requested site failed: {', '.join(sorted(set(scraper_failures)))}")
++                return 1
++            # 124 is what the run summary got when the nightly's timeout killed
++            # a site, and nightly_scout already reads it: "timeout" on the night,
++            # "partial" in the history when jobs were staged, never a dry site.
++            if scraper_cut_short:
++                print(f"  ⏱ stopped on its time budget: {', '.join(scraper_cut_short)}")
++                return 124
++            return 0
+ 
+     if not _from_saved_mode:
+         # Always ingest staged jobs (url-list.md extracts, raw staging, manual
+--- a/scraper_indeed.py
++++ b/scraper_indeed.py
+@@ -667,6 +667,7 @@
+     # run — the first searches still get their chances.
+     consecutive_blocked = 0
+     unattended = False
++    succeeded = 0
+     _RETRY_GIVE_UP_AFTER = 3
+ 
+     for index, (kw, loc) in enumerate(searches):
+@@ -712,6 +713,7 @@
+             break
+         if jobs is None:
+             continue
++        succeeded += 1
+         consecutive_blocked = 0
+         for j in jobs:
+             dedup_key = (j["title"], j["company"], j["location"])
+@@ -722,9 +724,13 @@
+     if failures:
+         print(f"  ⚠ Indeed: {len(failures)} of {len(searches)} searches failed, "
+               f"kept {len(all_jobs)} jobs")
+-    if len(failures) == len(searches) and searches:
++    # Counted by successes, not failures: the unattended stop records one
++    # failure and skips the rest, so on 2026-10-13 a run that read nothing was
++    # "1 of 44 failed", returned [] and went into the yield file as a quiet 0.
++    if searches and not succeeded:
+         raise RuntimeError(
+-            f"all {len(searches)} Indeed searches failed; first: {failures[0]}")
++            f"no Indeed search succeeded ({len(failures)} failed, "
++            f"{len(searches) - len(failures)} skipped); first: {failures[0]}")
+ 
+     # Indeed was the only site that skipped this, trusting its own search
+     # relevance. It should not be trusted: measured 2026-08-05, 133 of the 296
+--- a/scraper_linkedin_guest.py
++++ b/scraper_linkedin_guest.py
+@@ -55,6 +55,44 @@
+     time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+ 
+ 
++# The nightly runs this under `timeout $LINKEDIN_TIMEOUT`, and a kill stages
++# nothing. On 2026-10-13 it was killed 54 searches and 922 postings in, 80
++# descriptions into the fetch, and the night's LinkedIn yield was zero where
++# stopping a minute earlier would have kept those 80 plus every cache hit. So
++# the scraper watches its own clock and returns what it has. The margin covers
++# process start-up, one request in flight (30s timeout) and staging the result.
++_STOP_MARGIN_SECONDS = 180
++
++# monotonic() time to stop by, set for the length of one
++# scrape_linkedin_guest_all call; None means no limit (the --dry-run CLI, tests).
++_deadline: float | None = None
++
++# Whether the last scrape_linkedin_guest_all call lost anything to the clock — a
++# search not run, a request or a description not fetched. run.py exits 124 on it,
++# the code the nightly recorded back when the timeout killed this scraper, so a
++# night spent waiting out 429s still reads as a timeout and not as a clean scrape
++# that found little: two clean empty nights make a site a "dry" repair target.
++stopped_short = False
++
++
++def _budget_seconds() -> float:
++    """LINKEDIN_GUEST_BUDGET if set, else the nightly's own per-site timeout."""
++    override = os.environ.get("LINKEDIN_GUEST_BUDGET")
++    if override:
++        return float(override)
++    from invariants import _site_timeout
++    return float(_site_timeout("linkedin"))
++
++
++def _out_of_time(wait: float = 0.0) -> bool:
++    # Every caller drops something when this is True, so it is the one place
++    # that knows the run was cut short.
++    global stopped_short
++    out = _deadline is not None and time.monotonic() + wait >= _deadline
++    stopped_short = stopped_short or out
++    return out
++
++
+ def _get(url: str, params: dict | None = None) -> str | None:
+     """GET with backoff. Returns the body, or None once the retries are spent.
+ 
+@@ -68,6 +106,8 @@
+     }
+     backoff = 5.0
+     for attempt in range(1, MAX_RETRIES + 1):
++        if _out_of_time():
++            return None
+         try:
+             resp = requests.get(url, params=params, headers=headers, timeout=30)
+         except requests.RequestException as e:
+@@ -82,6 +122,9 @@
+             return None  # posting withdrawn — not worth retrying
+         if resp.status_code == 429 or resp.status_code >= 500:
+             wait = float(resp.headers.get("Retry-After") or backoff)
++            if _out_of_time(wait):
++                print(f"    ⚠ HTTP {resp.status_code} — no time left to wait {wait:.0f}s")
++                return None
+             print(f"    ⚠ HTTP {resp.status_code} — waiting {wait:.0f}s "
+                   f"(retry {attempt}/{MAX_RETRIES})")
+             time.sleep(wait)
+@@ -370,7 +413,7 @@
+     company) skip the request entirely — the same mechanism the other scrapers
+     use, so a posting already scraped elsewhere costs nothing here."""
+     cache = cache if cache is not None else {}
+-    fetched = skipped = dropped = 0
++    fetched = skipped = dropped = unfetched = 0
+ 
+     for job in jobs:
+         key = (job.get("title", "").strip().lower(), job.get("company", "").strip().lower())
+@@ -383,6 +426,11 @@
+             skipped += 1
+             continue
+ 
++        # Out of time: keep walking for the cache hits, which cost no request.
++        # The postings left undescribed are found again by tomorrow's search.
++        if _out_of_time():
++            unfetched += 1
++            continue
+         html = _get(JOB_URL.format(job_id=job["job_id"]))
+         _sleep()
+         detail = _parse_job_html(html) if html else {}
+@@ -398,6 +446,9 @@
+ 
+     print(f"  📄 descriptions: {fetched} fetched, {skipped} cache hits, "
+           f"{dropped} unavailable (withdrawn/blocked)")
++    if unfetched:
++        print(f"  ⏱ time budget spent — {unfetched} postings left without a "
++              f"description, dropped for tonight")
+ 
+ 
+ def search_terms(config: dict) -> list[str]:
+@@ -444,6 +495,28 @@
+ 
+ def scrape_linkedin_guest_all(config: dict) -> list[dict]:
+     """Every keyword x location in config, deduped by posting id."""
++    global _deadline, stopped_short
++    started = time.monotonic()
++    _deadline = started + _budget_seconds() - _STOP_MARGIN_SECONDS
++    stopped_short = False
++    try:
++        all_jobs = _scrape_all(config, started)
++    finally:
++        _deadline = None
++
++    # config.get, not a bare `keywords` — that NameError fired here, one line
++    # after 502 descriptions had been fetched over the network, and took all
++    # 726 postings down with it. Every other scraper reads the list the same
++    # way (see scraper_linkedin.scrape_linkedin_all); this one never did, so
++    # LinkedIn returned nothing on every run that reached this line.
++    from scraper_indeed import filter_jobs_by_keywords
++    all_jobs = filter_jobs_by_keywords(all_jobs, search_terms(config))
++
++    print(f"  ✓ Total: {len(all_jobs)} jobs from LinkedIn (guest)")
++    return all_jobs
++
++
++def _scrape_all(config: dict, started: float) -> list[dict]:
+     from selection import max_pages_for, search_pairs
+     from scraper_helper import load_description_cache
+ 
+@@ -454,7 +527,12 @@
+ 
+     # site="linkedin": this scraper is the only one that can search a
+     # site_only_locations entry (Remote (Japan)), so it is the only one that asks.
+-    for kw, loc in search_pairs(config, site="linkedin"):
++    pairs = search_pairs(config, site="linkedin")
++    for done, (kw, loc) in enumerate(pairs):
++        if _out_of_time():
++            print(f"  ⏱ time budget spent — {len(pairs) - done} of {len(pairs)} "
++                  f"searches not run")
++            break
+         spec = _site_location(loc) or {}
+         for job in search(kw, loc, max_pages=spec.get("max_pages", max_pages)):
+             if job["job_id"] in seen_ids:
+@@ -462,24 +540,15 @@
+             seen_ids.add(job["job_id"])
+             all_jobs.append(job)
+ 
+-    print(f"\n  🔗 {len(all_jobs)} unique postings before descriptions")
++    print(f"\n  🔗 {len(all_jobs)} unique postings before descriptions "
++          f"({time.monotonic() - started:.0f}s searching)")
+     fill_descriptions(all_jobs, load_description_cache())
++    print(f"  ⏱ {time.monotonic() - started:.0f}s elapsed")
+ 
+     # A posting with no description cannot be scored (review_score treats a
+     # missing description as void), so it is dead weight in the pipeline.
+     all_jobs = [j for j in all_jobs if j.get("description")]
+-    all_jobs = _drop_partial_remote(all_jobs)
+-
+-    # config.get, not a bare `keywords` — that NameError fired here, one line
+-    # after 502 descriptions had been fetched over the network, and took all
+-    # 726 postings down with it. Every other scraper reads the list the same
+-    # way (see scraper_linkedin.scrape_linkedin_all); this one never did, so
+-    # LinkedIn returned nothing on every run that reached this line.
+-    from scraper_indeed import filter_jobs_by_keywords
+-    all_jobs = filter_jobs_by_keywords(all_jobs, search_terms(config))
+-
+-    print(f"  ✓ Total: {len(all_jobs)} jobs from LinkedIn (guest)")
+-    return all_jobs
++    return _drop_partial_remote(all_jobs)
+ 
+ 
+ async def scrape_linkedin_all(config: dict) -> list[dict]:
+--- a/app.py
++++ b/app.py
+@@ -18,6 +18,7 @@
+ import re
+ import sys
+ import glob
++import copy
+ import yaml
+ from datetime import datetime, timedelta
+ from pathlib import Path
+@@ -102,6 +103,7 @@
+ )
+ from filter import passes_filter
+ from doc_paths import md_files
++from config_save import save_settings
+ 
+ MIN_SALARY_GBP = 30000
+ 
+@@ -197,10 +199,6 @@
+     with open(CONFIG_PATH) as f:
+         return yaml.safe_load(f)
+ 
+-def save_config(cfg):
+-    with open(CONFIG_PATH, "w") as f:
+-        yaml.dump(cfg, f, allow_unicode=True)
+-
+ def run_scraper(site="indeed", pages=5):
+     """Run scraper and stream output."""
+     # sys.executable, not "python3": the venv is not on PATH, so a bare
+@@ -242,9 +240,17 @@
+ with tab_scraper:
+     st.header("🔍 Job Scraper Control Panel")
+ 
+-    # Load current config
+-    if "config" not in st.session_state:
++    # Load current config. `config_loaded` is what the widgets were built from,
++    # untouched by the preset button below; Save compares against it to tell
++    # what was changed on this screen. Keyed on it rather than on `config` so a
++    # session older than it loads afresh instead of failing at Save.
++    if "config_loaded" not in st.session_state:
+         st.session_state.config = load_config()
++        st.session_state.config_loaded = copy.deepcopy(st.session_state.config)
++        st.session_state.config_mtime = CONFIG_PATH.stat().st_mtime_ns
++    if CONFIG_PATH.stat().st_mtime_ns != st.session_state.config_mtime:
++        st.warning("⚠ この画面を開いた後に config.yaml が更新されています。"
++                   "ページを再読み込みすると最新の設定で表示されます。")
+ 
+     # === Section 1: Config Form ===
+     st.subheader("🔧 Search Configuration")
+@@ -351,9 +357,10 @@
+         )
+ 
+     if st.button("💾 Save Configuration"):
+-        # Merge onto the existing config so keys not exposed here (weights,
+-        # cv_generation_limit, output_dir, …) are preserved, not dropped.
+-        st.session_state.config.update({
++        # Only what changed on this screen is written, onto config.yaml as it
++        # is now: keys not exposed here and edits made elsewhere since this
++        # screen opened are kept. See config_save.
++        saved, clashes = save_settings(CONFIG_PATH, st.session_state.config_loaded, {
+             "keywords": [k.strip() for k in keywords_text.split("\n") if k.strip()],
+             "locations": [l.strip() for l in locations_text.split("\n") if l.strip()],
+             "sites": sites,
+@@ -368,8 +375,17 @@
+             "match_score_threshold": cv_threshold,
+             "review_score_threshold": review_threshold,
+         })
+-        save_config(st.session_state.config)
+-        st.success("✅ 保存しました。適用するにはターミナルで `python3 run.py --reanalyze` を実行。")
++        if clashes:
++            st.error("⚠ 保存していません。この画面を開いた後に、同じ項目が config.yaml 側でも変更されています: "
++                     f"{', '.join(clashes)}。ページを再読み込みしてから変更し直してください。")
++        else:
++            st.session_state.config = saved
++            st.session_state.config_loaded = copy.deepcopy(saved)
++            st.session_state.config_mtime = CONFIG_PATH.stat().st_mtime_ns
++            # A keyed widget keeps its own value over `value=`; drop it so the
++            # field shows what was saved, a list kept from the file included.
++            st.session_state.pop("exclude_title_text", None)
++            st.success("✅ 保存しました。適用するにはターミナルで `python3 run.py --reanalyze` を実行。")
+ 
+     # === Section 2: Run Scraper ===
+     st.subheader("🚀 Run Scraper")
+--- a/scraper_guardian.py
++++ b/scraper_guardian.py
+@@ -197,6 +197,10 @@
+ 
+     p = playwright_instance
+     browser = await p.chromium.launch(
++        # Always headless. The nightly inherits DISPLAY (:20) from the desktop
++        # session that started the scheduler while no X server listens there, so
++        # a headed launch died on 2026-10-10..13 and keying on DISPLAY does not
++        # help. Only Indeed needs a headed browser, and it gets xvfb-run.
+         headless=True,
+         args=[
+             "--disable-blink-features=AutomationControlled",
+--- a/tests/test_indeed_pane.py
++++ b/tests/test_indeed_pane.py
+@@ -245,5 +245,5 @@
+ 
+     _patch_all(monkeypatch, [TimeoutError("blocked")] * 4)
+ 
+-    with pytest.raises(RuntimeError, match="all 4 Indeed searches failed"):
++    with pytest.raises(RuntimeError, match=r"no Indeed search succeeded \(4 failed, 0 skipped\)"):
+         run(scrape_indeed_all(_all_config()))
+--- a/tests/test_indeed_unattended_challenge.py
++++ b/tests/test_indeed_unattended_challenge.py
+@@ -67,3 +67,53 @@
+             raise CloudflareUnattended("no terminal")
+         except CloudflareBlocked:  # must NOT catch it
+             pytest.fail("the retry handler swallowed a structural block")
++
++
++# ---- what the whole run reports when the wall stops it -------------------------
++# On 2026-10-13 the first search met the unattended wall, the rest were skipped,
++# and the run returned [] — "1 of 44 failed", a quiet 0 in the yield file.
++
++import asyncio
++
++import selection
++
++_JOB = {"title": "Warehouse Operative", "company": "X", "location": "Edinburgh",
++        "url": "https://uk.indeed.com/viewjob?jk=1"}
++
++
++@pytest.fixture
++def three_searches(monkeypatch):
++    monkeypatch.setattr(selection, "search_pairs",
++                        lambda config: [("A", "Edinburgh"), ("B", "Edinburgh"), ("C", "Edinburgh")])
++    monkeypatch.setattr(selection, "max_pages_for", lambda site, config: 1)
++    monkeypatch.setattr(scraper_indeed, "load_description_cache", lambda: {})
++    monkeypatch.setattr(scraper_indeed, "filter_jobs_by_keywords", lambda jobs, keywords: jobs)
++    monkeypatch.setattr(scraper_indeed, "_SEARCH_PAUSE_SECONDS", 0)
++
++
++def _searches_answer(monkeypatch, *answers):
++    replies = iter(answers)
++
++    async def scrape_indeed(kw, loc, max_pages, config, cache):
++        answer = next(replies)
++        if isinstance(answer, Exception):
++            raise answer
++        return answer
++    monkeypatch.setattr(scraper_indeed, "scrape_indeed", scrape_indeed)
++
++
++def test_a_wall_at_the_first_search_is_a_failed_run(monkeypatch, three_searches):
++    _searches_answer(monkeypatch, CloudflareUnattended("no terminal"))
++    with pytest.raises(RuntimeError, match="no Indeed search succeeded"):
++        asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]}))
++
++
++def test_a_wall_after_a_search_succeeded_keeps_what_was_read(monkeypatch, three_searches):
++    _searches_answer(monkeypatch, [_JOB], CloudflareUnattended("no terminal"))
++    jobs = asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]}))
++    assert jobs == [_JOB]
++
++
++def test_searches_that_ran_and_found_nothing_are_not_a_failure(monkeypatch, three_searches):
++    _searches_answer(monkeypatch, [], [], [])
++    assert asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]})) == []
+--- /dev/null
++++ b/config_save.py
+@@ -0,0 +1,36 @@
++"""Saving the Scraper tab's settings into config.yaml.
++
++The tab builds its widgets from config.yaml once per browser session, and Save
++used to write that whole in-memory copy back: a tab left open reverted every
++edit made to the file since it was opened, settings it does not even show
++included (the Edinburgh local-work entries added on 2026-10-13 were exposed to
++this). Save now writes only what was changed on screen, onto the file as it is
++at that moment.
++"""
++from pathlib import Path
++
++import yaml
++
++
++def save_settings(path: Path, loaded: dict, settings: dict) -> tuple[dict | None, list[str]]:
++    """Write the settings changed since `loaded` onto the config file at `path`.
++
++    `loaded` is the config the screen was built from. A setting still equal to
++    its loaded value was not touched on screen, so the file keeps what it holds
++    now. A setting changed both on screen and in the file to different values
++    is a clash: nothing is written and the clashing keys come back, so the
++    screen can ask for a reload instead of picking a winner.
++
++    Returns (config as now on disk, []) or (None, clashing keys).
++    """
++    current = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
++    changed = {k: v for k, v in settings.items() if v != loaded.get(k)}
++    clashes = sorted(k for k, v in changed.items() if current.get(k) not in (loaded.get(k), v))
++    if clashes:
++        return None, clashes
++    # yaml.dump drops the file's comments, so do not rewrite it for nothing.
++    if changed:
++        current.update(changed)
++        with open(path, "w") as f:
++            yaml.dump(current, f, allow_unicode=True)
++    return current, []
+--- /dev/null
++++ b/tests/test_scrape_only_exit_code.py
+@@ -0,0 +1,76 @@
++"""--scrape-only reports a failed site in its exit code.
++
++The nightly runs every site as `run.py --site X --scrape-only` and writes the
++exit code into the run summary. That path returned before main()'s own
++exit-code rule, so on 2026-10-13 Guardian's browser died at launch and the
++summary recorded rc 0 — a failure the notification called a clean night.
++"""
++import asyncio
++import sys
++
++import pytest
++
++import run
++import scraper_linkedin_guest
++
++
++@pytest.fixture
++def staged(monkeypatch):
++    """Nothing reaches 00_saved or the yield file; what would have is recorded."""
++    calls = {"saved": [], "yield": []}
++    monkeypatch.setattr(run, "save_raw_to_saved",
++                        lambda jobs, source: calls["saved"].append((source, len(jobs))))
++    monkeypatch.setattr(run, "record_site_yield",
++                        lambda site, count: calls["yield"].append((site, count)))
++    return calls
++
++
++def _scrape_only(monkeypatch, site):
++    monkeypatch.setattr(sys, "argv", ["run.py", "--site", site, "--scrape-only"])
++    return asyncio.run(run.main())
++
++
++async def _dead(config):
++    raise RuntimeError("BrowserType.launch: headed browser without an X server")
++
++
++async def _two_jobs(config):
++    return [{"title": "A", "company": "X", "url": "https://example.com/1"},
++            {"title": "B", "company": "Y", "url": "https://example.com/2"}]
++
++
++def test_the_only_site_failing_exits_non_zero(monkeypatch, staged):
++    monkeypatch.setattr(run, "scrape_guardian_all", _dead)
++    assert _scrape_only(monkeypatch, "guardian") == 1
++    # And it leaves no yield row: a 0 there reads as "ran, found nothing".
++    assert staged["yield"] == []
++
++
++def test_a_site_that_scraped_exits_zero_and_records_its_yield(monkeypatch, staged):
++    monkeypatch.setattr(run, "scrape_guardian_all", _two_jobs)
++    assert _scrape_only(monkeypatch, "guardian") == 0
++    assert staged["saved"] == [("guardian", 2)]
++    assert staged["yield"] == [("guardian", 2)]
++
++
++def test_a_site_that_ran_clean_and_found_nothing_is_still_success(monkeypatch, staged):
++    async def nothing(config):
++        return []
++    monkeypatch.setattr(run, "scrape_guardian_all", nothing)
++    assert _scrape_only(monkeypatch, "guardian") == 0
++    assert staged["yield"] == [("guardian", 0)]
++
++
++@pytest.mark.parametrize("cut_short, code", [(True, 124), (False, 0)])
++def test_a_site_stopped_by_its_own_budget_exits_as_a_timeout(monkeypatch, staged,
++                                                             cut_short, code):
++    # LinkedIn used to be killed by the nightly's timeout, which the run summary
++    # recorded as 124. Stopping itself keeps the jobs; it must not also turn the
++    # night into a clean one, or two rate-limited nights read as a dry site.
++    async def linkedin(config):
++        monkeypatch.setattr(scraper_linkedin_guest, "stopped_short", cut_short)
++        return await _two_jobs(config)
++    monkeypatch.setattr(run, "scrape_linkedin_all", linkedin)
++    assert _scrape_only(monkeypatch, "linkedin") == code
++    assert staged["saved"] == [("linkedin", 2)]
++    assert staged["yield"] == [("linkedin", 2)]
+--- /dev/null
++++ b/tests/test_config_save.py
+@@ -0,0 +1,67 @@
++"""The Scraper tab's Save writes only what was changed on screen.
++
++It used to write its whole in-memory copy of config.yaml, loaded when the tab
++opened, so a tab left open reverted every edit made to the file since.
++"""
++import yaml
++
++from config_save import save_settings
++
++BASE = {"keywords": ["Designer"], "min_salary_gbp": 0, "local_job_roles": {}}
++
++
++def _file(tmp_path, data):
++    path = tmp_path / "config.yaml"
++    path.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
++    return path
++
++
++def test_an_untouched_setting_keeps_the_newer_value_on_disk(tmp_path):
++    newer = {**BASE, "keywords": ["Designer", "Warehouse Operative"],
++             "local_job_roles": {"warehouse": ["Warehouse Operative"]}}
++    path = _file(tmp_path, newer)
++
++    saved, clashes = save_settings(path, BASE, {"keywords": ["Designer"], "min_salary_gbp": 25000})
++
++    assert clashes == []
++    on_disk = yaml.safe_load(path.read_text(encoding="utf-8"))
++    assert on_disk == saved
++    assert on_disk["keywords"] == ["Designer", "Warehouse Operative"]
++    assert on_disk["local_job_roles"] == {"warehouse": ["Warehouse Operative"]}
++    assert on_disk["min_salary_gbp"] == 25000
++
++
++def test_a_setting_changed_in_both_places_is_not_saved(tmp_path):
++    path = _file(tmp_path, {**BASE, "keywords": ["Designer", "Kitchen Porter"]})
++    before = path.read_bytes()
++
++    saved, clashes = save_settings(path, BASE, {"keywords": ["Designer", "Removals"],
++                                                "min_salary_gbp": 25000})
++
++    assert saved is None
++    assert clashes == ["keywords"]
++    assert path.read_bytes() == before
++
++
++def test_the_same_change_made_in_both_places_is_not_a_clash(tmp_path):
++    path = _file(tmp_path, {**BASE, "keywords": ["Designer", "Kitchen Porter"]})
++
++    saved, clashes = save_settings(path, BASE, {"keywords": ["Designer", "Kitchen Porter"]})
++
++    assert clashes == []
++    assert saved["keywords"] == ["Designer", "Kitchen Porter"]
++
++
++def test_saving_with_nothing_changed_leaves_the_file_alone(tmp_path):
++    # yaml.dump drops comments; a no-op Save must not cost the file its notes.
++    path = tmp_path / "config.yaml"
++    path.write_text("# why this keyword is here\nkeywords:\n- Designer\nmin_salary_gbp: 0\n",
++                    encoding="utf-8")
++    before = path.read_bytes()
++
++    saved, clashes = save_settings(path, {"keywords": ["Designer"], "min_salary_gbp": 0},
++                                   {"keywords": ["Designer"], "min_salary_gbp": 0})
++
++    assert clashes == []
++    assert saved["keywords"] == ["Designer"]
++    assert path.read_bytes() == before
+--- /dev/null
++++ b/tests/test_linkedin_guest_time_budget.py
+@@ -0,0 +1,122 @@
++"""LinkedIn stops on its own clock and keeps what it has.
++
++The nightly kills it at LINKEDIN_TIMEOUT, and a killed process stages nothing:
++on 2026-10-13 it died 54 searches and 922 postings in, 80 descriptions into the
++fetch, and the night's LinkedIn yield was zero. The clock is faked here — the
++module reads time.monotonic() and time.sleep() through its `time` attribute.
++"""
++from types import SimpleNamespace
++
++import pytest
++
++import invariants
++import scraper_indeed
++import scraper_linkedin_guest as guest
++
++_LONG = "x" * 700  # over the cache's 600-char minimum
++
++
++@pytest.fixture
++def clock(monkeypatch):
++    now = [1000.0]
++    slept = []
++    monkeypatch.setattr(guest, "time", SimpleNamespace(
++        monotonic=lambda: now[0], sleep=lambda s: slept.append(s)))
++    monkeypatch.setattr(guest, "_sleep", lambda: None)
++    # Restored afterwards, so a run cut short here cannot leak into run.py's tests.
++    monkeypatch.setattr(guest, "stopped_short", False)
++    return SimpleNamespace(now=now, slept=slept)
++
++
++def _no_request(*args, **kwargs):
++    raise AssertionError("made a request with no time left")
++
++
++def _posting(job_id, title):
++    return {"job_id": job_id, "title": title, "company": "A", "location": "Edinburgh"}
++
++
++def test_out_of_time_the_fetch_keeps_cache_hits_and_requests_nothing(monkeypatch, clock):
++    monkeypatch.setattr(guest, "_deadline", clock.now[0] - 1)
++    monkeypatch.setattr(guest, "_get", _no_request)
++    jobs = [_posting("1", "Product Designer"), _posting("2", "Kitchen Porter")]
++    cache = {("product designer", "a"): {"description": _LONG}}
++
++    guest.fill_descriptions(jobs, cache)
++
++    assert jobs[0]["description"] == _LONG
++    assert "description" not in jobs[1]
++
++
++def test_a_429_wait_that_would_overrun_gives_up_without_sleeping(monkeypatch, clock):
++    monkeypatch.setattr(guest, "_deadline", clock.now[0] + 100)
++    monkeypatch.setattr(guest.requests, "get", lambda *a, **k: SimpleNamespace(
++        status_code=429, headers={"Retry-After": "600"}, text=""))
++
++    assert guest._get("https://example.com") is None
++    assert clock.slept == []
++    assert guest.stopped_short
++
++
++def test_the_search_loop_stops_when_the_budget_is_spent(monkeypatch, clock):
++    monkeypatch.setenv("LINKEDIN_GUEST_BUDGET", "2400")  # stop at +2220s
++    searched = []
++
++    def search(kw, loc, max_pages):
++        searched.append(kw)
++        clock.now[0] += 1500
++        return [_posting(kw, f"{kw} Designer")]
++
++    monkeypatch.setattr(guest, "search", search)
++    monkeypatch.setattr(guest, "_get", _no_request)
++    monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
++    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [
++        ("A", "Edinburgh"), ("B", "Edinburgh"), ("C", "Edinburgh")])
++    monkeypatch.setattr("scraper_helper.load_description_cache", lambda: {
++        ("a designer", "a"): {"description": _LONG}})
++    monkeypatch.setattr(scraper_indeed, "filter_jobs_by_keywords", lambda jobs, keywords: jobs)
++
++    out = guest.scrape_linkedin_guest_all({"keywords": ["Designer"]})
++
++    assert searched == ["A", "B"]
++    # B's posting had no cached text and no time to fetch it; A's survives.
++    assert [j["job_id"] for j in out] == ["A"]
++    assert guest._deadline is None
++    assert guest.stopped_short
++
++
++def test_a_run_that_finishes_in_time_is_not_cut_short(monkeypatch, clock):
++    monkeypatch.setattr(guest, "stopped_short", True)  # left over from a past run
++    monkeypatch.setattr(guest, "search", lambda kw, loc, max_pages: [_posting(kw, f"{kw} Designer")])
++    monkeypatch.setattr(guest, "_get", _no_request)
++    monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
++    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [("A", "Edinburgh")])
++    monkeypatch.setattr("scraper_helper.load_description_cache", lambda: {
++        ("a designer", "a"): {"description": _LONG}})
++    monkeypatch.setattr(scraper_indeed, "filter_jobs_by_keywords", lambda jobs, keywords: jobs)
++
++    out = guest.scrape_linkedin_guest_all({"keywords": ["Designer"]})
++
++    assert [j["job_id"] for j in out] == ["A"]
++    assert not guest.stopped_short
++
++
++def test_the_deadline_is_cleared_when_the_run_raises(monkeypatch, clock):
++    def search(kw, loc, max_pages):
++        raise RuntimeError("boom")
++
++    monkeypatch.setattr(guest, "search", search)
++    monkeypatch.setattr("selection.max_pages_for", lambda site, config: 1)
++    monkeypatch.setattr("selection.search_pairs", lambda config, site=None: [("A", "Edinburgh")])
++
++    with pytest.raises(RuntimeError):
++        guest.scrape_linkedin_guest_all({"keywords": ["Designer"]})
++    # Left set, it would cut short the --dry-run CLI and every later test.
++    assert guest._deadline is None
++
++
++def test_the_budget_is_the_nightly_timeout_unless_overridden(monkeypatch):
++    monkeypatch.delenv("LINKEDIN_GUEST_BUDGET", raising=False)
++    assert guest._budget_seconds() == invariants._site_timeout("linkedin")
++    monkeypatch.setenv("LINKEDIN_GUEST_BUDGET", "600")
++    assert guest._budget_seconds() == 600.0

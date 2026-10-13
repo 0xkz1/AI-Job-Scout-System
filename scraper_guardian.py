@@ -197,6 +197,10 @@ async def scrape_guardian(
 
     p = playwright_instance
     browser = await p.chromium.launch(
+        # Always headless. The nightly inherits DISPLAY (:20) from the desktop
+        # session that started the scheduler while no X server listens there, so
+        # a headed launch died on 2026-10-10..13 and keying on DISPLAY does not
+        # help. Only Indeed needs a headed browser, and it gets xvfb-run.
         headless=True,
         args=[
             "--disable-blink-features=AutomationControlled",

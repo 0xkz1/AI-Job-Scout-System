@@ -1,0 +1,374 @@
+diff --git a/scraper_guardian.py b/scraper_guardian.py
+index 511cd6d..0ef086d 100644
+--- a/scraper_guardian.py
++++ b/scraper_guardian.py
+@@ -49,38 +49,177 @@ async def _extract_guardian_jobs(page) -> list[dict]:
+     try:
+         jobs = await page.evaluate("""() => {
+             const results = [];
+-            const items = document.querySelectorAll('li.lister__item');
++            
++            // Try multiple selectors for job list items
++            const selectors = [
++                'li.lister__item',
++                'div.lister__item',
++                'div.job-card',
++                'div.job-item', 
++                'div.job-listing',
++                'div.card',
++                'article',
++                'div[class*="job"]',
++                'div[class*="list"]',
++                'li[class*="job"]',
++                'li[class*="list"]',
++                'div[class*="result"]',
++                'div[class*="item"]'
++            ];
++            
++            let items = [];
++            for (const selector of selectors) {
++                const found = document.querySelectorAll(selector);
++                if (found.length > 0) {
++                    items = Array.from(found);
++                    console.log(`Found ${items.length} items with selector: ${selector}`);
++                    break;
++                }
++            }
+ 
+-            items.forEach(li => {
+-                // Title from h3 heading link
+-                const titleEl = li.querySelector('h3.lister__header a span');
+-                if (!titleEl) return;
+-                const title = (titleEl.textContent || '').trim();
++            items.forEach(item => {
++                // Try multiple selectors for title
++                let title = '';
++                let titleLink = null;
++                const titleSelectors = [
++                    'h3.lister__header a span',
++                    'h3.lister__header a',
++                    'h3 a span',
++                    'h3 a',
++                    'h2 a span',
++                    'h2 a',
++                    'h1 a span',
++                    'h1 a',
++                    'a h3',
++                    'a h2',
++                    'a h1',
++                    'a span',
++                    'a',
++                    '[class*="title"] a span',
++                    '[class*="title"] a'
++                ];
++                
++                for (const sel of titleSelectors) {
++                    const el = item.querySelector(sel);
++                    if (el && el.textContent && el.textContent.trim()) {
++                        title = el.textContent.trim();
++                        titleLink = el.closest('a') || el.querySelector('a');
++                        break;
++                    }
++                }
++                
+                 if (!title) return;
+ 
+-                // Job URL from the title link
+-                const titleLink = li.querySelector('h3.lister__header a');
+-                const url = titleLink ? (titleLink.href || '') : '';
++                // Job URL
++                let url = '';
++                if (titleLink) {
++                    url = titleLink.href || '';
++                }
++                if (!url) {
++                    // Try other URL selectors
++                    const urlSelectors = [
++                        'a[href*="/job/"]',
++                        'a[href*="/jobs/"]',
++                        'a[href*="/careers/"]',
++                        'a[href*="/vacancy/"]',
++                        'a[href*="theguardian.com"]'
++                    ];
++                    for (const sel of urlSelectors) {
++                        const el = item.querySelector(sel);
++                        if (el && el.href) {
++                            url = el.href;
++                            break;
++                        }
++                    }
++                }
+ 
+-                // Location
++                // Location - try multiple selectors
+                 let location = '';
+-                const locationEl = li.querySelector('li.lister__meta-item--location');
+-                if (locationEl) location = locationEl.textContent.trim();
++                const locationSelectors = [
++                    'li.lister__meta-item--location',
++                    'div[class*="location"]',
++                    'span[class*="location"]',
++                    'div.location',
++                    'span.location',
++                    '[class*="location"]',
++                    'div.meta-item--location',
++                    'span.meta-item--location'
++                ];
++                for (const sel of locationSelectors) {
++                    const el = item.querySelector(sel);
++                    if (el && el.textContent) {
++                        location = el.textContent.trim();
++                        break;
++                    }
++                }
+ 
+-                // Salary
++                // Salary - try multiple selectors
+                 let salary = '';
+-                const salaryEl = li.querySelector('li.lister__meta-item--salary');
+-                if (salaryEl) salary = salaryEl.textContent.trim();
++                const salarySelectors = [
++                    'li.lister__meta-item--salary',
++                    'div[class*="salary"]',
++                    'span[class*="salary"]',
++                    'div.salary',
++                    'span.salary',
++                    '[class*="salary"]',
++                    'div.meta-item--salary',
++                    'span.meta-item--salary'
++                ];
++                for (const sel of salarySelectors) {
++                    const el = item.querySelector(sel);
++                    if (el && el.textContent) {
++                        salary = el.textContent.trim();
++                        break;
++                    }
++                }
+ 
+-                // Company (recruiter)
++                // Company (recruiter) - try multiple selectors
+                 let company = '';
+-                const companyEl = li.querySelector('li.lister__meta-item--recruiter');
+-                if (companyEl) company = companyEl.textContent.trim();
++                const companySelectors = [
++                    'li.lister__meta-item--recruiter',
++                    'div[class*="company"]',
++                    'span[class*="company"]',
++                    'div.company',
++                    'span.company',
++                    '[class*="company"]',
++                    'div.recruiter',
++                    'span.recruiter',
++                    'div.employer',
++                    'span.employer'
++                ];
++                for (const sel of companySelectors) {
++                    const el = item.querySelector(sel);
++                    if (el && el.textContent) {
++                        company = el.textContent.trim();
++                        break;
++                    }
++                }
+ 
+-                // Description snippet
++                // Description snippet - try multiple selectors
+                 let snippet = '';
+-                const descEl = li.querySelector('p.lister__description');
+-                if (descEl) snippet = descEl.textContent.trim().slice(0, 500);
++                const descSelectors = [
++                    'p.lister__description',
++                    'div[class*="description"]',
++                    'span[class*="description"]',
++                    'div.description',
++                    'span.description',
++                    'p[class*="desc"]',
++                    'div[class*="desc"]',
++                    'span[class*="desc"]',
++                    'div.summary',
++                    'span.summary',
++                    'div.excerpt',
++                    'span.excerpt',
++                    'div.teaser',
++                    'span.teaser'
++                ];
++                for (const sel of descSelectors) {
++                    const el = item.querySelector(sel);
++                    if (el && el.textContent) {
++                        snippet = el.textContent.trim().slice(0, 500);
++                        break;
++                    }
++                }
+ 
+                 results.push({
+                     title: title,
+@@ -111,39 +250,74 @@ async def _fetch_job_description(page, job_url: str) -> str:
+         await page.wait_for_timeout(2000)
+ 
+         desc = await page.evaluate("""() => {
+-            // Guardian's job page uses an mds-tabs component with a
+-            // "Job Details" tab (id=\"job-description\") and a hidden
+-            // \"Company\" tab (id=\"company-information\") — a generic
+-            // 'main section:last-child' selector used to grab whichever
+-            // section happened to be last in the DOM, which was often the
+-            // hidden company blurb, not the actual job posting.
++            // Try multiple selectors for job description
+             const selectors = [
+                 '#job-description',
+-                '[data-qa=\"job-description\"]',
++                '[data-qa="job-description"]',
+                 '.job-detail__description',
+                 '.job-description__content',
+-                '[class*=\"job-description\"]',
+-                'article [class*=\"body\"]',
+-                'article [class*=\"content\"]',
++                '[class*="job-description"]',
++                '[class*="job-detail"]',
++                '[class*="description"]',
++                'article [class*="body"]',
++                'article [class*="content"]',
+                 '.lister__description--full',
+-                '[class*=\"description\"]',
++                'main [class*="description"]',
++                'main [class*="content"]',
++                'section [class*="description"]',
++                'section [class*="content"]',
++                'div [class*="description"]',
++                'div [class*="content"]',
++                'p [class*="description"]',
++                'p [class*="content"]'
+             ];
++            
+             for (const sel of selectors) {
+                 const els = document.querySelectorAll(sel);
+                 for (const el of els) {
++                    // Skip company information tab
+                     if (el.id === 'company-information') continue;
+                     if (/hidden/i.test(el.className)) continue;
+-                    if (el.textContent.trim().length > 100) {
++                    if (/tab/i.test(el.className)) continue;
++                    
++                    // Skip if the content is too short (likely not a real description)
++                    if (el.textContent && el.textContent.trim().length > 100) {
+                         return el.textContent.trim().slice(0, 5000);
+                     }
+                 }
+             }
+-            // Fallback: grab main content
+-            const main = document.querySelector('main');
+-            if (main) {
+-                const text = main.textContent.trim();
+-                if (text.length > 200) return text.slice(0, 5000);
++            
++            // Fallback: grab main content area
++            const mainSelectors = [
++                'main',
++                'main article',
++                'main section',
++                'main div',
++                'article',
++                'section',
++                'div.main',
++                'div.content',
++                'div.container'
++            ];
++            
++            for (const sel of mainSelectors) {
++                const main = document.querySelector(sel);
++                if (main) {
++                    const text = main.textContent.trim();
++                    if (text.length > 200) return text.slice(0, 5000);
++                }
++            }
++            
++            // Last resort: get the longest text content on the page
++            const allTexts = Array.from(document.querySelectorAll('p, div, article, section'))
++                .map(el => el.textContent)
++                .filter(text => text && text.trim().length > 50)
++                .sort((a, b) => b.length - a.length);
++            
++            if (allTexts.length > 0) {
++                return allTexts[0].slice(0, 5000);
+             }
++            
+             return '';
+         }""")
+         return desc or ""
+@@ -197,6 +371,10 @@ async def scrape_guardian(
+ 
+     p = playwright_instance
+     browser = await p.chromium.launch(
++        # Always headless. The nightly inherits DISPLAY (:20) from the desktop
++        # session that started the scheduler while no X server listens there, so
++        # a headed launch died on 2026-10-10..13 and keying on DISPLAY does not
++        # help. Only Indeed needs a headed browser, and it gets xvfb-run.
+         headless=True,
+         args=[
+             "--disable-blink-features=AutomationControlled",
+@@ -218,9 +396,22 @@ async def scrape_guardian(
+     page = await context.new_page()
+ 
+     print(f"🔍 Guardian Jobs: searching '{keyword}' in '{location}'...")
++    search_url = _search_url(keyword)
++    print(f"URL: {search_url}")
+     try:
+         await page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+-        await page.wait_for_timeout(2000)
++        await page.wait_for_timeout(3000)  # Longer wait for debugging
++        
++        # Take screenshot for debugging
++        await page.screenshot(path=f"/tmp/guardian_debug_{keyword}.png", full_page=True)
++        print(f"📸 Screenshot saved to /tmp/guardian_debug_{keyword}.png")
++        
++        # Log page title and URL
++        title = await page.title()
++        print(f"Page title: {title}")
++        current_url = page.url
++        print(f"Current URL: {current_url}")
++        
+     except Exception as e:
+         print(f"  ⚠ Navigation error for '{keyword}' in '{location}': {e}")
+         try:
+@@ -244,6 +435,17 @@ async def scrape_guardian(
+         # Extract jobs from current page
+         page_jobs = await _extract_guardian_jobs(page)
+         print(f"  Page {page_num}: found {len(page_jobs)} job cards")
++        if len(page_jobs) == 0:
++            print(f"  ⚠ No jobs found on page {page_num}, checking page structure...")
++            # Debug: log page structure
++            page_info = await page.evaluate("""() => {
++                const title = document.title;
++                const body = document.body.textContent.slice(0, 200);
++                const h1 = document.querySelector('h1')?.textContent || 'No h1';
++                const jobCount = document.querySelector('[class*="count"], [class*="jobs"], [class*="result"]')?.textContent || 'No count found';
++                return {title, body: body.trim(), h1, jobCount};
++            }""")
++            print(f"    Page info: {page_info}")
+ 
+         for j in page_jobs:
+             if j["url"] and j["url"] not in seen_urls:
+@@ -329,12 +531,21 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
+ # ── CLI ──
+ if __name__ == "__main__":
+     import yaml
+-
++    
+     config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+     with open(config_path) as f:
+         cfg = yaml.safe_load(f)
+-
+-    jobs = asyncio.run(scrape_guardian_all(cfg))
++    
++    # Test with just one keyword to debug
++    test_config = {
++        "keywords": cfg.get("keywords", [])[:1],  # Just first keyword
++        "locations": cfg.get("locations", []),
++        "max_pages_per_search": 1
++    }
++    
++    print("🧪 Testing Guardian scraper with single keyword...")
++    print("Config:", test_config)
++    jobs = asyncio.run(scrape_guardian_all(test_config))
+     from scraper_indeed import save_jobs
+     save_jobs(jobs)
+-    print(f"\n✅ Done! {len(jobs)} jobs scraped from Guardian Jobs.")
++    print(f"\n✅ Test complete! {len(jobs)} jobs scraped from Guardian Jobs.")

@@ -84,6 +84,8 @@ def _document_on_disk(base: str, kind: str) -> str | None:
 
 
 def main():
+    from selection import load_config
+    config = load_config()
     db = json.loads(DB_PATH.read_text())
     by_url, by_title = {}, {}
     for job in db:
@@ -154,7 +156,7 @@ def main():
             job, match, cv, cl,
             expired=read_expired_flag(path),
             applied=read_applied_flag(path),
-            carried=read_carried_properties(path),
+            carried=read_carried_properties(path), config=config,
         )
         # Preserve the original file's trailing-newline convention so a pure
         # newline delta never counts as a change (avoids churning 589 files

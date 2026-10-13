@@ -337,7 +337,7 @@ def _fmt_adzuna_salary(smin, smax, country: str) -> str:
 
 
 def scrape_adzuna_api(keyword: str, country: str, app_id: str, app_key: str,
-                      max_pages: int = 3, results_per_page: int = 50) -> list[dict]:
+                      max_pages: int = 3, results_per_page: int = 50, location: str = "") -> list[dict]:
     """Query the Adzuna API for one keyword in one country. Non-UK queries are
     biased toward remote (a UK YMS resident works these remotely, not on-site)."""
     jobs = []
@@ -353,6 +353,8 @@ def scrape_adzuna_api(keyword: str, country: str, app_id: str, app_key: str,
             "results_per_page": results_per_page,
             "content-type": "application/json",
         }
+        if location:
+            params["where"] = location
         try:
             r = requests.get(url, params=params, timeout=25)
         except Exception as e:
@@ -403,6 +405,7 @@ def _scrape_adzuna_api_all(config: dict, app_id: str, app_key: str) -> list[dict
     keywords = config.get("keywords", [])
     countries = config.get("adzuna_countries", ["gb"])
     from selection import max_pages_for
+    from local_jobs import local_job_role
     # The API path multiplies by country as well as keyword, so it keeps its own
     # cap of 3 on top of the per-site setting.
     max_pages = min(max_pages_for("adzuna", config), 3)
@@ -410,7 +413,11 @@ def _scrape_adzuna_api_all(config: dict, app_id: str, app_key: str) -> list[dict
     all_jobs = []
     for country in countries:
         for kw in keywords:
-            for j in scrape_adzuna_api(kw, country, app_id, app_key, max_pages=max_pages):
+            local_role = local_job_role(kw, config)
+            if local_role and country != "gb":
+                continue
+            options = {"location": "Edinburgh"} if local_role else {}
+            for j in scrape_adzuna_api(kw, country, app_id, app_key, max_pages=max_pages, **options):
                 key = (j["title"], j.get("company", ""), j.get("location", ""))
                 if key not in seen:
                     seen.add(key)

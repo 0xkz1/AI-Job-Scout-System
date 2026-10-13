@@ -97,7 +97,9 @@ def main():
         return _pair_audit(config)
 
     if args.limit is not None:
-        top = ranked_jobs(config)[args.offset:args.offset + args.limit]
+        from local_jobs import local_job_role
+        professional = [j for j in ranked_jobs(config) if not local_job_role(j.get("title", ""), config)]
+        top = professional[args.offset:args.offset + args.limit]
         scope = f"{args.offset + 1}〜{args.offset + len(top)}位"
     else:
         top = select_top("generation", config, percent=args.percent)

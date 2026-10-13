@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import glob
+import copy
 import yaml
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -102,6 +103,7 @@ from matcher import (
 )
 from filter import passes_filter
 from doc_paths import md_files
+from config_save import save_settings
 
 MIN_SALARY_GBP = 30000
 
@@ -197,10 +199,6 @@ def load_config():
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
 
-def save_config(cfg):
-    with open(CONFIG_PATH, "w") as f:
-        yaml.dump(cfg, f, allow_unicode=True)
-
 def run_scraper(site="indeed", pages=5):
     """Run scraper and stream output."""
     # sys.executable, not "python3": the venv is not on PATH, so a bare
@@ -242,9 +240,17 @@ with tab_history:
 with tab_scraper:
     st.header("🔍 Job Scraper Control Panel")
 
-    # Load current config
-    if "config" not in st.session_state:
+    # Load current config. `config_loaded` is what the widgets were built from,
+    # untouched by the preset button below; Save compares against it to tell
+    # what was changed on this screen. Keyed on it rather than on `config` so a
+    # session older than it loads afresh instead of failing at Save.
+    if "config_loaded" not in st.session_state:
         st.session_state.config = load_config()
+        st.session_state.config_loaded = copy.deepcopy(st.session_state.config)
+        st.session_state.config_mtime = CONFIG_PATH.stat().st_mtime_ns
+    if CONFIG_PATH.stat().st_mtime_ns != st.session_state.config_mtime:
+        st.warning("⚠ この画面を開いた後に config.yaml が更新されています。"
+                   "ページを再読み込みすると最新の設定で表示されます。")
 
     # === Section 1: Config Form ===
     st.subheader("🔧 Search Configuration")
@@ -351,9 +357,10 @@ with tab_scraper:
         )
 
     if st.button("💾 Save Configuration"):
-        # Merge onto the existing config so keys not exposed here (weights,
-        # cv_generation_limit, output_dir, …) are preserved, not dropped.
-        st.session_state.config.update({
+        # Only what changed on this screen is written, onto config.yaml as it
+        # is now: keys not exposed here and edits made elsewhere since this
+        # screen opened are kept. See config_save.
+        saved, clashes = save_settings(CONFIG_PATH, st.session_state.config_loaded, {
             "keywords": [k.strip() for k in keywords_text.split("\n") if k.strip()],
             "locations": [l.strip() for l in locations_text.split("\n") if l.strip()],
             "sites": sites,
@@ -368,8 +375,17 @@ with tab_scraper:
             "match_score_threshold": cv_threshold,
             "review_score_threshold": review_threshold,
         })
-        save_config(st.session_state.config)
-        st.success("✅ 保存しました。適用するにはターミナルで `python3 run.py --reanalyze` を実行。")
+        if clashes:
+            st.error("⚠ 保存していません。この画面を開いた後に、同じ項目が config.yaml 側でも変更されています: "
+                     f"{', '.join(clashes)}。ページを再読み込みしてから変更し直してください。")
+        else:
+            st.session_state.config = saved
+            st.session_state.config_loaded = copy.deepcopy(saved)
+            st.session_state.config_mtime = CONFIG_PATH.stat().st_mtime_ns
+            # A keyed widget keeps its own value over `value=`; drop it so the
+            # field shows what was saved, a list kept from the file included.
+            st.session_state.pop("exclude_title_text", None)
+            st.success("✅ 保存しました。適用するにはターミナルで `python3 run.py --reanalyze` を実行。")
 
     # === Section 2: Run Scraper ===
     st.subheader("🚀 Run Scraper")
@@ -694,6 +710,8 @@ with tab_analysis:
         Uses pre-computed scores from _analyzed.json instead of re-running analyze_match
         (which would invoke Ollama LLM for every job — extremely slow)."""
         jobs = json.loads(jobs_json_str)
+        from selection import load_config
+        title_config = load_config()
         results = []
         for job in jobs:
             match = job.get("match", {})
@@ -711,7 +729,7 @@ with tab_analysis:
                 "loc_raw": match.get("location", {}).get("score", 0),
                 "sal_raw": match.get("salary", {}).get("score", 0),
                 "ctx_raw": match.get("context_score", 0.5),
-                "title_relevance": calculate_title_relevance(job.get("title", "")),
+                "title_relevance": calculate_title_relevance(job.get("title", ""), config=title_config),
                 "tier": match.get("tier", ""),
                 "expired": bool(job.get("expired", False)),
                 "source": job.get("source", ""),
@@ -1039,6 +1057,9 @@ def resolve_doc_base(company: str, title: str, url: str = "") -> str:
 def ranked_job_rows(all_jobs: list[dict]) -> list[dict]:
     """URL-deduped jobs with doc-file existence, date, expired status, and freshness.
     Shared by the Review and PDF tabs."""
+    from selection import load_config
+    from local_jobs import local_job_role, local_job_cv_file
+    config = load_config()
     job_map = {}
     for j in all_jobs:
         url = j.get("url", "")
@@ -1048,7 +1069,9 @@ def ranked_job_rows(all_jobs: list[dict]) -> list[dict]:
     for url, j in job_map.items():
         match = j.get("match", {})
         base = resolve_doc_base(j.get("company", "company"), j.get("title", "job"), url)
-        has_cv = (CV_DIR / f"{base}_CV.md").exists()
+        local_role = local_job_role(j.get("title", ""), config)
+        shared_cv = local_job_cv_file(local_role, config)
+        has_cv = bool(shared_cv) or (CV_DIR / f"{base}_CV.md").exists()
         has_cl = (CL_DIR / f"{base}_CL.md").exists()
         raw_date = j.get("scraped_at") or j.get("posted_date") or j.get("date") or ""
         clean_date = raw_date[:10] if raw_date else ""
@@ -1076,6 +1099,7 @@ def ranked_job_rows(all_jobs: list[dict]) -> list[dict]:
             "expired": expired,
             "tier": match.get("tier", ""),
             "base": base,
+            "local_job_role": local_role,
             "has_cv": has_cv,
             "has_cl": has_cl,
             "has_docs": has_cv or has_cl,
@@ -1303,6 +1327,22 @@ def show_review(label: str, md_path: Path, job: dict | None = None):
                     st.error(f"再生成に失敗: {e}")
 
 
+def shared_cv_controls(role: str, key_prefix: str):
+    """Download the authored PDF; keep shared CVs outside job-specific regeneration."""
+    from selection import load_config
+    from local_jobs import local_job_cv_file
+    source = local_job_cv_file(role, load_config())
+    if source is None:
+        st.caption("共有CVが見つかりません")
+        return
+    pdf = source.parent / "pdf" / source.stem / "Kazuki Yunome CV.pdf"
+    if not pdf.is_file() or pdf.stat().st_mtime < source.stat().st_mtime:
+        st.caption("共有CVのPDFを更新してください")
+        return
+    st.download_button("共有CV PDF", data=pdf.read_bytes(), file_name=pdf.name,
+                       mime="application/pdf", key=f"shared_cv_{key_prefix}")
+
+
 def pdf_doc_controls(label: str, md_path: Path, key_prefix: str):
     """Inline convert-button + versioned download links for ONE document
     (a CV or a CL). PDFs are saved to 10_output/20_pdfs/ with sequential
@@ -1387,7 +1427,7 @@ with tab_review:
     with c_hide_exp:
         review_hide_expired = st.checkbox("❌ 期限切れ除外", value=True, key="review_hide_expired")
 
-    scoped_rows = [r for r in rows if r["score"] > 0]
+    scoped_rows = [r for r in rows if r["score"] > 0 and not r.get("local_job_role")]
     if review_hide_expired:
         scoped_rows = [r for r in scoped_rows if not r.get("expired", False)]
     if review_period != "全期間":
@@ -1565,7 +1605,10 @@ with tab_pdf:
             date_str = f" `{r.get('date')}`" if r.get('date') else ""
             st.markdown(f"**{r['company']}** — {r['title'][:70]}{date_str}")
         with c_cv:
-            pdf_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", f"pdf_{r['url']}")
+            if r.get("local_job_role"):
+                shared_cv_controls(r["local_job_role"], f"pdf_{r['url']}")
+            else:
+                pdf_doc_controls("CV", CV_DIR / f"{r['base']}_CV.md", f"pdf_{r['url']}")
         with c_cl:
             pdf_doc_controls("CL", CL_DIR / f"{r['base']}_CL.md", f"pdf_{r['url']}")
         st.divider()

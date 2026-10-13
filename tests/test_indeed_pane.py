@@ -245,5 +245,5 @@ def test_a_wholly_failed_run_still_raises(monkeypatch):
 
     _patch_all(monkeypatch, [TimeoutError("blocked")] * 4)
 
-    with pytest.raises(RuntimeError, match="all 4 Indeed searches failed"):
+    with pytest.raises(RuntimeError, match=r"no Indeed search succeeded \(4 failed, 0 skipped\)"):
         run(scrape_indeed_all(_all_config()))

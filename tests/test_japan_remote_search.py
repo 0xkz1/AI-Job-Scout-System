@@ -327,7 +327,9 @@ def test_the_shipped_aliases_cover_the_keywords_the_japan_search_walks():
     if not (config.get("site_only_locations") or {}).get("linkedin"):
         pytest.skip("no site-only location configured")
     aliases = config.get("keyword_aliases") or {}
-    missing = [k for k in (config.get("keywords") or []) if not aliases.get(k)]
+    searched_in_japan = [k for k, loc in selection.search_pairs(config, site="linkedin")
+                         if loc == "Remote (Japan)"]
+    missing = [k for k in searched_in_japan if not aliases.get(k)]
     assert not missing, f"no Japanese alias for: {missing}"
 
 

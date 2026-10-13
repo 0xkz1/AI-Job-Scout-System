@@ -35,6 +35,7 @@ from scraper_indeed import scrape_indeed_all, save_jobs as save_indeed
 # scraper_linkedin.py is still used by scraper_saved.py for the user's own
 # saved jobs, which genuinely need the account.
 from scraper_linkedin_guest import scrape_linkedin_all
+import scraper_linkedin_guest  # .stopped_short, read after each run
 from scraper_reed import scrape_reed_all
 from scraper_guardian import scrape_guardian_all
 from scraper_adzuna import scrape_adzuna_all
@@ -620,7 +621,11 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
     letter_dir = os.path.join(output_dir, "10_cover-letters")
     os.makedirs(letter_dir, exist_ok=True)
 
-    passed_jobs = [j for j in jobs if not j.get("_filter_reason")]
+    from local_jobs import local_job_role, local_job_cv, local_job_cv_file
+    # Local work uses the authored shared CVs; it does not consume the pool for
+    # tailored professional documents or generate a technical cover letter.
+    passed_jobs = [j for j in jobs if not j.get("_filter_reason")
+                   and not local_job_role(j.get("title", ""), config)]
 
     cv_threshold = config.get("match_score_threshold", 0.50)
     # CV/CL generation is the expensive part (one LLM pass each), so it acts only
@@ -677,6 +682,7 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
         match = job.get("match", {})
         if not match:
             continue
+        local_role = local_job_role(job.get("title", ""), config)
         is_filtered = bool(job.get("_filter_reason"))
         base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
         # Distinct jobs can share company+title (dedupe keeps them separate when
@@ -710,6 +716,8 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
         wants_documents = is_stretch or (
             within_limit and composite_score >= cv_threshold and not is_filtered
         )
+        if local_role:
+            wants_documents = False
         # A job ticked applied or expired is frozen (see gen_version). Both
         # steps below only write when the file is absent, so what this stops is
         # a FIRST CV/CL — which is the whole point for `expired`: a closed
@@ -759,6 +767,8 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
         # ones whose links must never move.
         cv_filename_link = cv_filename_md if os.path.exists(os.path.join(cv_dir, cv_filename_md)) else None
         cl_filename_link = cl_filename_md if os.path.exists(os.path.join(letter_dir, cl_filename_md)) else None
+        if local_role and not cv_filename_link and local_job_cv_file(local_role, config):
+            cv_filename_link = local_job_cv(local_role, config) + ".md"
 
         # Step 3: Generate match report (with links to CV/CL)
         report_path = os.path.join(match_dir, f"{match_filename}.md")
@@ -770,7 +780,7 @@ def generate_outputs(jobs: list[dict], config: dict, output_dir: str):
         report = generate_match_report(
             job, match, cv_filename=cv_filename_link, cl_filename=cl_filename_link,
             expired=read_expired_flag(Path(report_path)),
-            applied=read_applied_flag(Path(report_path)),
+            applied=read_applied_flag(Path(report_path)), config=config,
         )
         # Reports are fully regenerated each run, but some frontmatter is owned
         # by the WebUI rather than the analyzer — cv_pdf/cl_pdf are written at
@@ -1417,6 +1427,9 @@ async def main():
         # line in a log nobody reads. Collected here and turned into a non-zero exit
         # at the end when EVERY requested site failed.
         scraper_failures: list[str] = []
+        # Sites that stopped on their own time budget with part of the work
+        # undone. Their jobs are kept; --scrape-only exits 124 for them.
+        scraper_cut_short: list[str] = []
 
         if "indeed" in sites:
             print(f"\n{'='*60}")
@@ -1441,6 +1454,8 @@ async def main():
                 print(f"  → {len(linkedin_jobs)} jobs from LinkedIn")
                 save_raw_to_saved(linkedin_jobs, "linkedin")
                 all_jobs.extend(linkedin_jobs)
+                if scraper_linkedin_guest.stopped_short:
+                    scraper_cut_short.append("linkedin")
             except Exception as e:
                 print(f"  ❌ LinkedIn scraper failed: {e}")
                 scraper_failures.append("linkedin")
@@ -1526,7 +1541,20 @@ async def main():
             if scraper_failures:
                 print(f"  ⚠ failed: {', '.join(scraper_failures)}")
             print(f"{'='*60}")
-            return
+            # The nightly calls every site through this path, one site per
+            # process, so the exit code at the end of main() never ran for it:
+            # Guardian's headed browser died with no X server on 2026-10-13 and
+            # the run summary recorded rc 0. Same rule as there.
+            if scraper_failures and len(set(scraper_failures)) >= len(set(sites)):
+                print(f"  ❌ every requested site failed: {', '.join(sorted(set(scraper_failures)))}")
+                return 1
+            # 124 is what the run summary got when the nightly's timeout killed
+            # a site, and nightly_scout already reads it: "timeout" on the night,
+            # "partial" in the history when jobs were staged, never a dry site.
+            if scraper_cut_short:
+                print(f"  ⏱ stopped on its time budget: {', '.join(scraper_cut_short)}")
+                return 124
+            return 0
 
     if not _from_saved_mode:
         # Always ingest staged jobs (url-list.md extracts, raw staging, manual

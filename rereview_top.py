@@ -58,7 +58,8 @@ def main():
     config = yaml.safe_load((ROOT / "config.yaml").read_text()) or {}
     from selection import ranked_jobs, select_top
     if args.limit is not None:
-        top = ranked_jobs(config)[:args.limit]
+        from local_jobs import local_job_role
+        top = [j for j in ranked_jobs(config) if not local_job_role(j.get("title", ""), config)][:args.limit]
         scope = f"上位{args.limit}求人"
     else:
         top = select_top("review", config, percent=args.percent)

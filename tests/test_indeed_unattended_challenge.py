@@ -67,3 +67,53 @@ def test_unattended_is_not_retryable():
             raise CloudflareUnattended("no terminal")
         except CloudflareBlocked:  # must NOT catch it
             pytest.fail("the retry handler swallowed a structural block")
+
+
+# ---- what the whole run reports when the wall stops it -------------------------
+# On 2026-10-13 the first search met the unattended wall, the rest were skipped,
+# and the run returned [] — "1 of 44 failed", a quiet 0 in the yield file.
+
+import asyncio
+
+import selection
+
+_JOB = {"title": "Warehouse Operative", "company": "X", "location": "Edinburgh",
+        "url": "https://uk.indeed.com/viewjob?jk=1"}
+
+
+@pytest.fixture
+def three_searches(monkeypatch):
+    monkeypatch.setattr(selection, "search_pairs",
+                        lambda config: [("A", "Edinburgh"), ("B", "Edinburgh"), ("C", "Edinburgh")])
+    monkeypatch.setattr(selection, "max_pages_for", lambda site, config: 1)
+    monkeypatch.setattr(scraper_indeed, "load_description_cache", lambda: {})
+    monkeypatch.setattr(scraper_indeed, "filter_jobs_by_keywords", lambda jobs, keywords: jobs)
+    monkeypatch.setattr(scraper_indeed, "_SEARCH_PAUSE_SECONDS", 0)
+
+
+def _searches_answer(monkeypatch, *answers):
+    replies = iter(answers)
+
+    async def scrape_indeed(kw, loc, max_pages, config, cache):
+        answer = next(replies)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    monkeypatch.setattr(scraper_indeed, "scrape_indeed", scrape_indeed)
+
+
+def test_a_wall_at_the_first_search_is_a_failed_run(monkeypatch, three_searches):
+    _searches_answer(monkeypatch, CloudflareUnattended("no terminal"))
+    with pytest.raises(RuntimeError, match="no Indeed search succeeded"):
+        asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]}))
+
+
+def test_a_wall_after_a_search_succeeded_keeps_what_was_read(monkeypatch, three_searches):
+    _searches_answer(monkeypatch, [_JOB], CloudflareUnattended("no terminal"))
+    jobs = asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]}))
+    assert jobs == [_JOB]
+
+
+def test_searches_that_ran_and_found_nothing_are_not_a_failure(monkeypatch, three_searches):
+    _searches_answer(monkeypatch, [], [], [])
+    assert asyncio.run(scraper_indeed.scrape_indeed_all({"keywords": ["Warehouse"]})) == []
