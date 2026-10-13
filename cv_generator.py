@@ -785,12 +785,13 @@ STATIC_EXPERIENCE = {
         "taifunome-research-platform",
         "portfolio_website",
         "ai-job-scout-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
     ],
-    # web_developer's list with the agent-orchestration entry swapped for Asset
-    # Weaver: Hermes is backend evidence, and Asset Weaver is the one record that
-    # is TypeScript and Node.js AND names interface work — onboarding, progress
-    # feedback, error recovery — which is what a front-end post is reading for.
+    # web_developer's list with the agent-environment entry swapped for Asset
+    # Weaver: the agent environment is backend evidence, and Asset Weaver is the
+    # one record that is TypeScript and Node.js AND names interface work —
+    # onboarding, progress feedback, error recovery — which is what a front-end
+    # post is reading for.
     "frontend_developer": [
         "taifunome-research-platform",
         "portfolio_website",
@@ -800,7 +801,7 @@ STATIC_EXPERIENCE = {
     "development_support": [
         "taifunome-research-platform",
         "ai-job-scout-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
         "ai-asset-tagger-system",
     ],
     "data_analysis": [
@@ -855,7 +856,7 @@ STATIC_EXPERIENCE = {
     "implementation_specialist": [
         "taifunome-research-platform",
         "ai-job-scout-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
         "portfolio_website",
     ],
     "product_ops": [
@@ -867,18 +868,18 @@ STATIC_EXPERIENCE = {
     "qa_engineer": [
         "ai-job-scout-system",
         "taifunome-research-platform",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
         "portfolio_website",
     ],
     "research_engineer": [
         "taifunome-research-platform",
         "ai-job-scout-system",
         "ai-asset-tagger-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
     ],
     "technical_support": [
         "ai-job-scout-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
         "taifunome-research-platform",
         "web3-node-ops",
     ],
@@ -892,7 +893,7 @@ STATIC_EXPERIENCE = {
         "taifunome-research-platform",
         "web3-node-ops",
         "ai-job-scout-system",
-        "hermes-ai-agent-orchestration-system",
+        "atelier-multi-agent-environment",
     ],
     # The general profile also carries the longest PROFILE text, so its four
     # write-ups have to be the short ones or the CV spills onto a third page.
@@ -1666,7 +1667,7 @@ def generate_experience(job_title: str = "", job_description: str = "", role_typ
     return _finish_experience(_experience_body(job_title, job_description, role_type))
 
 
-def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "", lang: str = "en") -> str:
+def generate_cv(role_type: str = "general", job_title: str = "", company: str = "", job_description: str = "", match_filename: str = "", cl_filename: str = "", lang: str = "en", selected_project_ids: list[str] | None = None) -> str:
     """Generate a complete CV for a specific role type and job.
 
     lang="ja" assembles the CV from the "## 和訳" half of every source record
@@ -1675,7 +1676,23 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     model contributes is which four projects to lead with (see
     _ids_from_experience_body). A record with no 和訳 is omitted rather than
     printed in English.
+
+    Explicit selected_project_ids bypass model selection and page-filling
+    additions. The normal trimming rules still apply; omitted projects appear
+    in the existing Other projects line. This route is used by isolated previews.
     """
+    from jev_document_trial import enabled, choose_projects
+    trial_selection = None
+    if selected_project_ids is None and enabled():
+        trial_selection = choose_projects({"title": job_title, "description": job_description,
+                                           "role_type": role_type})
+        selected_project_ids = trial_selection["selected_ids"]
+    if selected_project_ids is not None:
+        eligible = {p["id"] for p in PROJECTS if p.get("type") == "project"}
+        if (not 1 <= len(selected_project_ids) <= 4
+                or len(set(selected_project_ids)) != len(selected_project_ids)
+                or any(pid not in eligible for pid in selected_project_ids)):
+            raise ValueError("Explicit selection requires 1..4 unique known project IDs.")
     from pathlib import Path
     base_dir = Path(__file__).resolve().parent.parent
     profile_path = base_dir / "cv" / "profile" / f"{role_type}.md"
@@ -1697,7 +1714,8 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
     profile = get_profile(role_type, lang)
     strengths = get_strengths(role_type)
     toolkit = get_toolkit(role_type)
-    exp_body = _experience_body(job_title, job_description, role_type, lang)
+    exp_body = (_experience_body(job_title, job_description, role_type, lang)
+                if selected_project_ids is None else _render_entries(selected_project_ids, lang))
     role_title = get_header(role_type)
     template = MASTER_CV_JA if lang == "ja" else MASTER_CV
 
@@ -1730,7 +1748,7 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
         # for by promoting another project. Re-uses the LLM's own ordering — no
         # second model call.
         shortfall = _CV_TARGET_WORDS - _budget_words(cv_body)
-        if shortfall > 0:
+        if shortfall > 0 and selected_project_ids is None:
             padded = _pad_experience_body(exp_body, shortfall, role_type)
             if padded != exp_body:
                 exp_body = padded
@@ -1758,6 +1776,8 @@ def generate_cv(role_type: str = "general", job_title: str = "", company: str = 
             
     import json
     source_projects_yaml = f"\nsource_projects: {json.dumps(used_projects, ensure_ascii=False)}" if used_projects else ""
+    if trial_selection is not None:
+        source_projects_yaml += "\nreview_required: true\njev_cv_selection: " + json.dumps(trial_selection, ensure_ascii=False)
 
     # Which keywords picked this profile, recorded per CV. A misroute used to be
     # invisible unless someone read the headline and thought "that is the wrong

@@ -63,6 +63,55 @@ Last verified: 2026-08-28
   - LinkedIn 429s and Indeed interactive verification remain.
   - Full evidence and limits: `docs/EDINBURGH_LOCAL_WORK_FOLLOWUP_2026-10-13.md`.
 
+## Jev production-source confirmation — 2026-10-13
+
+- Confirmed all 13 installed files match the installation ledger hashes in
+  `10_output/_jev_pipeline_trial_20261012/installed_sources.json`.
+  The production checkout contains the tested Jev trial implementation.
+- Installation is separate from activation: the default remains `legacy`, and
+  the production `.env` has no `JIS_DOCUMENT_MODE` setting. Jev requires
+  `JIS_DOCUMENT_MODE=jev` for that execution; no permanent activation was made.
+- The 93.33s → 2.77s measurement is a document/report batch for 11 jobs:
+  22 documents versus 21, with one CL withheld. It is not a single-letter time.
+  See [production status and evidence](docs/JEV_PIPELINE_TRIAL_2026-10-12.md).
+
+## Jev document trial integration — 2026-10-12
+
+- The user authorised testing Jev through the JIS system rather than only as a
+  standalone component. Developed and checked on `experiment/jev-pipeline-trial-20261012`
+  in `10_output/_worktrees/jev-pipeline-trial-20261012`, then installed the tested
+  sources in this checkout. Normal CV/CL entrypoints accept the opt-in
+  `JIS_DOCUMENT_MODE=jev`; the default and scheduled operation remain legacy.
+- CV project IDs and prepared CL paragraph IDs are selected by pinned Jev.
+  Bodies are assembled from source text. Out-of-scope CLs are withheld; uncertain
+  choices use a labelled neutral draft. Every trial document requires review.
+- Found and fixed first-load cache races in CL identity/facts during parallel
+  generation. Regression and integration checks: 157 passed in the worktree;
+  149 post-installation checks plus 53 local-job/Japanese-CV checks passed here.
+- Same frozen 40 saved postings and settings, three workers, fixed runtime code:
+  filter and match results equal for all 40. Generation/report stage 93.33s
+  legacy versus 2.77s Jev. CVs 11 versus 11; CLs 11 versus 10, with one physical
+  product role deliberately withheld. This is not equal-quality 11-pair speedup.
+  Jev: 21 pinned responses, zero generation LLM calls, eight selected bridges
+  and two uncertain/neutral. All 11 CV and 10 CL bodies match source reassembly.
+- Actual-root replay also completed two GLM-5.3 reviews per mode. Generation
+  62.27s versus 2.70s; review 208.20s versus 76.44s; total 272.34s versus 81.24s.
+  Review latency varied without a reviewer change; do not attribute the entire
+  wall-time difference to Jev. A configured phone was flagged as lacking a
+  review reference; human fit labels remain zero, so no quality accuracy claimed.
+- Added the existing user-maintained CV contact values to reviewer factual
+  references. Related combined post-fix tests: **208 passed**. A real re-review
+  of the same CV removed the phone finding (`fact_block: false`, score 58), but
+  took 482.54s and completed via GLM-5.3 key 4. This extra validation is separate
+  from the benchmark and confirms substantial upstream/retry latency remains.
+- Prior source backups, frozen input, installation hashes and audit records:
+  `10_output/_jev_pipeline_trial_20261012/`. Fixed-code measurements are in the
+  worktree's `10_output/pipeline_fixed_{legacy,jev}_20261012/`. Trial outputs and
+  quarantine state are isolated. No application document replacement, schedule
+  switch, Kanban write, commit, push or merge. Live scraping/new enrichment/full
+  review throughput and ordinary nightly operation were not measured.
+- Details: [trial integration and measurements](docs/JEV_PIPELINE_TRIAL_2026-10-12.md).
+
 ## Edinburgh local work — 2026-10-12
 
 - L2 explicitly enabled by the user. Implemented in

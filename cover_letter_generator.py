@@ -874,7 +874,7 @@ def _load_canonical_narrative() -> str:
     global _canonical_narrative_cache
     if _canonical_narrative_cache is not None:
         return _canonical_narrative_cache
-    _canonical_narrative_cache = ""
+    loaded_narrative = ""
     directory = _cover_letter_dir()
     if directory is None:
         print("  ⚠ CL canonical narrative: cover-letter directory not found")
@@ -895,15 +895,18 @@ def _load_canonical_narrative() -> str:
         # The letter is not: a paragraph is one line, or it sits in the output
         # next to the unwrapped evidence blocks looking like two different
         # documents stapled together.
-        _canonical_narrative_cache = "\n\n".join(
+        loaded_narrative = "\n\n".join(
             " ".join(para.split())
             for para in re.split(r"\n\s*\n", section) if para.strip()
         )
-        if not _canonical_narrative_cache:
+        if not loaded_narrative:
             print("  ⚠ CL canonical narrative: no '## Narrative' section")
     except Exception as e:
         print(f"  ⚠ CL canonical narrative load failed ({e})")
-    return _canonical_narrative_cache
+    # Publish only complete data; concurrent document workers must not see
+    # the temporary empty value while another worker is loading the assets.
+    _canonical_narrative_cache = loaded_narrative
+    return loaded_narrative
 
 
 def _load_letter_facts() -> list[dict]:
@@ -917,7 +920,7 @@ def _load_letter_facts() -> list[dict]:
     global _letter_facts_cache
     if _letter_facts_cache is not None:
         return _letter_facts_cache
-    _letter_facts_cache = []
+    loaded_facts = []
     directory = _cover_letter_dir()
     if directory is None:
         return []
@@ -934,7 +937,7 @@ def _load_letter_facts() -> list[dict]:
             fact = " ".join(str(item.get("fact") or "").split())
             if not source_id or not fact:
                 continue
-            _letter_facts_cache.append({
+            loaded_facts.append({
                 "source_id": source_id,
                 "fact": fact,
                 "tier": str(item.get("tier") or "core").strip().lower(),
@@ -944,7 +947,8 @@ def _load_letter_facts() -> list[dict]:
             })
     except Exception as e:
         print(f"  ⚠ CL letter facts load failed ({e})")
-        _letter_facts_cache = []
+        loaded_facts = []
+    _letter_facts_cache = loaded_facts
     return _letter_facts_cache
 
 
@@ -1337,7 +1341,7 @@ def _vet_letter_body(text: str) -> tuple[bool, str]:
 
 
 def generate_cover_letter(job_title: str, company: str, job_location: str = "Edinburgh",
-                          job_description: str = "") -> tuple[str, str]:
+                          job_description: str = "", *, _trial_metadata: dict | None = None) -> tuple[str, str]:
     """Assemble a cover letter.
 
     Returns (letter_text, source), where source is ``assembled`` when the
@@ -1365,17 +1369,30 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
         raise RuntimeError("cover letter: canonical narrative unavailable")
 
     role_type = detect_role_type(job_title, job_description)
-    evidence = _select_evidence(job_title, job_description, role_type)
+    from jev_document_trial import enabled, choose_bridge
+    selection = None
+    if enabled():
+        resolved, evidence, selection = choose_bridge(
+            {"title": job_title, "company": company, "description": job_description}, canonical)
+        role_type = resolved["role_type"]
+        bridge, bridge_source = selection["text"], "jev"
+        if _trial_metadata is not None:
+            _trial_metadata.update(selection)
+    else:
+        evidence = _select_evidence(job_title, job_description, role_type)
     if not evidence:
         raise RuntimeError("cover letter: no evidence available for this role")
     evidence = _fit_evidence_to_budget(job_title, company, canonical, evidence)
 
-    bridge, bridge_source = _build_context_bridge(job_title, company, job_description,
-                                                  canonical, evidence)
+    if selection is None:
+        bridge, bridge_source = _build_context_bridge(job_title, company, job_description,
+                                                      canonical, evidence)
     letter_body = _assemble_letter_body(job_title, company, canonical, evidence, bridge)
 
     ok, reason = _vet_letter_body(letter_body)
     if not ok:
+        if selection is not None:
+            raise ValueError("prepared letter outside structural limits: " + reason)
         # The assembled body is authored text plus a vetted bridge, so a failure
         # here means an asset drifted out of budget rather than that the letter
         # is unsafe. Say so loudly and still return it; a human reviews every
@@ -1396,7 +1413,9 @@ def generate_cover_letter(job_title: str, company: str, job_location: str = "Edi
         job_location=recipient_location,
         letter_body=letter_body,
     )
-    return letter, ("assembled" if bridge_source == "llm" else "assembled-static")
+    source = "assembled-jev-" + selection["status"] if selection is not None else (
+        "assembled" if bridge_source == "llm" else "assembled-static")
+    return letter, source
 
 
 def save_cover_letter(job_title: str, company: str, job_location: str, job_description: str, output_dir: str, match_filename: str = "", cv_filename: str = "", override_body: str = "") -> str:
@@ -1406,6 +1425,7 @@ def save_cover_letter(job_title: str, company: str, job_location: str, job_descr
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     role_type = detect_role_type(job_title, job_description)
+    trial_metadata = {}
 
     if override_body:
         recipient_location = job_location.split(",")[0].strip() or job_location
@@ -1420,7 +1440,13 @@ def save_cover_letter(job_title: str, company: str, job_location: str, job_descr
         )
         opening_source = "override"
     else:
-        letter, opening_source = generate_cover_letter(job_title, company, job_location, job_description)
+        from jev_document_trial import enabled
+        if enabled():
+            letter, opening_source = generate_cover_letter(job_title, company, job_location, job_description,
+                                                          _trial_metadata=trial_metadata)
+            role_type = trial_metadata["role_type"]
+        else:
+            letter, opening_source = generate_cover_letter(job_title, company, job_location, job_description)
 
     from matcher import make_safe_name
     filename = f"{make_safe_name(company, job_title)}_CL.md"
@@ -1445,6 +1471,12 @@ generation_mode: "assembler"
     # No big H1 title — it's a letter; it opens with the sender block.
     # The company/role stays in the frontmatter `title:` for Obsidian.
     content = f"{frontmatter}\n{letter}"
+    if trial_metadata:
+        import json
+        lines = ("review_required: true\nneeds_new_candidate: "
+                 + json.dumps(trial_metadata["needs_new_candidate"])
+                 + "\njev_bridge_selection: " + json.dumps(trial_metadata, ensure_ascii=False) + "\n")
+        content = content.replace("\n---\n", "\n" + lines + "---\n", 1)
     
     filepath.write_text(content, encoding="utf-8")
     return str(filepath)

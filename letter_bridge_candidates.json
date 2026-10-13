@@ -1,0 +1,224 @@
+{
+  "version": "letter-bridge-bank-v3",
+  "review_status": "assistant-reviewed prototype; human review still required",
+  "scope": "Future contribution only. No new claims about past clients, employers, sectors, metrics or delivered results.",
+  "neutral_text": "The work described here is the experience I would bring to this role, and I would want to establish where it is useful and where further learning is needed. I would use that discussion to agree concrete responsibilities with the team and understand how my contribution would be assessed.",
+  "candidates": [
+    {
+      "id": "interactive_prototypes",
+      "roles": [
+        "creative_technologist",
+        "product_designer",
+        "product_engineer",
+        "web_developer",
+        "frontend_developer",
+        "technical_artist",
+        "general"
+      ],
+      "job_pattern": "prototyp|interactive|creative coding|digital experience|experiential|play-test|interaktiv|試作|プロトタイ(?:プ|ピング)|インタラクティブ",
+      "sources": {
+        "taifunome-research-platform": "interactive|Canvas",
+        "portfolio_website": "JavaScript|scroll"
+      },
+      "text": "I would use small interactive experiments to make early design choices tangible. Testing those experiments with the team would help me refine the experience before committing to a larger build.",
+      "focuses": [
+        "interactive",
+        "product_interface",
+        "web"
+      ]
+    },
+    {
+      "id": "interface_feedback",
+      "roles": [
+        "creative_technologist",
+        "product_designer",
+        "product_engineer",
+        "web_developer",
+        "frontend_developer",
+        "implementation_specialist",
+        "general"
+      ],
+      "job_pattern": "user interface|\\bUI\\b|\\bUX\\b|interaction|onboarding|customer.centred|user experience|conversational|ユーザー|インタラクション|画面|ユーザビリティ|Benutzeroberfl|Nutzererlebnis|Interaktion",
+      "sources": {
+        "asset-weaver-obsidian-plugin": "onboarding|error.recovery",
+        "portfolio_website": "reading experience|modal"
+      },
+      "text": "I would focus on making each interaction understandable, including the feedback people receive while a task is running or when it fails. Testing the paths into and through the experience would help me identify friction and improve the interface with the team.",
+      "focuses": [
+        "conversation",
+        "product_interface",
+        "web",
+        "interactive",
+        "implementation"
+      ]
+    },
+    {
+      "id": "accessible_interactions",
+      "roles": [
+        "creative_technologist",
+        "product_designer",
+        "product_engineer",
+        "web_developer",
+        "frontend_developer",
+        "graphic_designer",
+        "general"
+      ],
+      "job_pattern": "accessib|inclusive design|screen reader|アクセシビリティ|スクリーンリーダー|barrierefrei|zugänglich",
+      "sources": {
+        "portfolio_website": "aria.modal|accessible",
+        "taifunome-research-platform": "reduced.motion"
+      },
+      "text": "I would pay particular attention to navigation, readable structure and feedback that people can follow when an interaction becomes difficult. I would test those details alongside the main user journey, so accessibility is considered while the experience is taking shape.",
+      "focuses": [
+        "conversation",
+        "product_interface",
+        "web",
+        "interactive",
+        "visual"
+      ]
+    },
+    {
+      "id": "ai_workflow_testing",
+      "roles": [
+        "creative_technologist",
+        "product_engineer",
+        "research_engineer",
+        "platform_engineer",
+        "development_support",
+        "implementation_specialist",
+        "data_analysis",
+        "technical_support",
+        "general"
+      ],
+      "job_pattern": "\\bLLMs?\\b|generative AI|artificial intelligence|\\bAI\\b|machine learning|人工知能|大規模言語モデル|\\bKI\\b",
+      "sources": {
+        "ai-job-scout-system": "LLM|fallback",
+        "asset-weaver-obsidian-plugin": "LLM|Vision.Language",
+        "personal-priority-orchestrator": "inference|Retrieval",
+        "ai-asset-tagger-system": "Vision Language|Vision.Language"
+      },
+      "text": "I would start with a small, observable workflow and test how its model outputs and failure paths behave before extending it. That would give the team concrete evidence for refining the system, rather than relying on a convincing demonstration alone.",
+      "focuses": [
+        "ai_workflow",
+        "research",
+        "interactive",
+        "implementation"
+      ]
+    },
+    {
+      "id": "brand_consistency",
+      "roles": [
+        "graphic_designer",
+        "product_designer",
+        "creative_technologist",
+        "web_developer",
+        "frontend_developer",
+        "general"
+      ],
+      "job_pattern": "brand|design system|visual identity|typography|editorial design|グラフィック|ブランド|ビジュアル|タイポグラフィ|デザインシステム|marken|grafik|typograf|visuell",
+      "sources": {
+        "taifunome-research-platform": "design system|identity",
+        "logo-design-for-myself": "identity|logo",
+        "portfolio_website": "narrative"
+      },
+      "text": "I would begin by understanding which visual and editorial decisions need to stay consistent across the work. I would then make those decisions explicit in a shared system, while leaving room for the individual piece to communicate clearly to its audience.",
+      "focuses": [
+        "visual",
+        "product_interface"
+      ]
+    },
+    {
+      "id": "reading_sequence",
+      "roles": [
+        "graphic_designer",
+        "product_designer",
+        "creative_technologist",
+        "web_developer",
+        "frontend_developer",
+        "content_analyst",
+        "general"
+      ],
+      "job_pattern": "editorial|storytell|narrative|content design|visual communication|publication|publishing|編集|物語|情報設計|redaktion|erzäh",
+      "sources": {
+        "portfolio_website": "narrative|reading experience",
+        "taifunome-research-platform": "editorial|readable",
+        "feral-bestiary-plate-001": "visual language|illustration",
+        "taifunome_studio": "editorial"
+      },
+      "text": "I would organise the material around what a reader needs at each step, so the sequence and presentation work together. I would refine both against the intended audience and the purpose of the piece, checking where the message becomes difficult to follow.",
+      "focuses": [
+        "visual",
+        "research",
+        "editorial"
+      ]
+    },
+    {
+      "id": "reliable_integrations",
+      "roles": [
+        "platform_engineer",
+        "product_engineer",
+        "research_engineer",
+        "development_support",
+        "implementation_specialist",
+        "technical_support",
+        "general"
+      ],
+      "job_pattern": "integrat|reliab|observab|incident|maintain|failure|resilien|\\bDevOps\\b|連携|統合|障害|可観測|監視|運用|zuverläss|überwach|betrieb",
+      "sources": {
+        "ai-job-scout-system": "fallback|Integration",
+        "web3-node-ops": "monitor|maintain|uptime",
+        "personal-priority-orchestrator": "infrastructure|orchestrate",
+        "independent_development": "integration|diagnos"
+      },
+      "text": "I would make the behaviour of integrations and failure paths visible early, so problems can be reproduced and investigated. I would use that evidence to improve recovery and agree practical operating expectations with the team before extending the system further.",
+      "focuses": [
+        "infrastructure",
+        "ai_workflow",
+        "implementation"
+      ]
+    },
+    {
+      "id": "conversation_testing",
+      "roles": [
+        "creative_technologist",
+        "product_designer",
+        "product_engineer",
+        "implementation_specialist",
+        "general"
+      ],
+      "job_pattern": "conversational|conversation design|dialogue management|virtual assistant|voice channel|会話|対話|チャットボット|dialogdesign|konversation|sprachassistent",
+      "sources": {
+        "portfolio_website": "reading experience|modal",
+        "asset-weaver-obsidian-plugin": "onboarding|error.recovery",
+        "ai-job-scout-system": "LLM|pipeline"
+      },
+      "text": "I would start by mapping the intended conversation and the points where it should hand over to a person. I would then test the wording and edge cases with the team, using the findings to refine the assistant rather than treating its first plausible response as the finished experience.",
+      "focuses": [
+        "conversation"
+      ]
+    },
+    {
+      "id": "research_interfaces",
+      "roles": [
+        "research_engineer",
+        "creative_technologist",
+        "product_designer",
+        "data_analysis",
+        "content_analyst",
+        "general"
+      ],
+      "job_pattern": "research|dashboard|data visuali[sz]|information architecture|investigat|\\bmaps?\\b|timeline|調査|研究|情報設計|可視化|リサーチ|forschung|datenvisual|Recherche",
+      "sources": {
+        "taifunome-research-platform": "Dashboard|maps|research interface",
+        "taifunome_studio": "research|verification",
+        "ai-job-scout-system": "queryable|reports"
+      },
+      "text": "I would work from the questions people need to answer, then shape the information and interface around those decisions. I would make the route back to the underlying material clear, so findings can be checked and the presentation improved as the research develops.",
+      "focuses": [
+        "research",
+        "product_interface",
+        "editorial"
+      ]
+    }
+  ]
+}
