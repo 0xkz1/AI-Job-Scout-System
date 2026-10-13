@@ -27,3 +27,32 @@ report 100/100 over a repo where no loop had ever run.
 ## Recent Runs
 
 <!-- Loop appends below this line -->
+```json
+{
+ "run_id": "2026-10-09T07:00:50",
+ "pattern": "scraper-repair",
+ "owner": "kz003",
+ "site": "guardian",
+ "duration_s": 1446,
+ "attempt": 2,
+ "verified_jobs": 0,
+ "rounds": 3,
+ "outcome": "no-op",
+ "detail": "agent changed nothing"
+}
+```
+
+```json
+{
+ "run_id": "2026-10-08T07:00:42",
+ "pattern": "scraper-repair",
+ "owner": "kz003",
+ "site": "guardian",
+ "duration_s": 1064,
+ "attempt": 1,
+ "verified_jobs": 0,
+ "rounds": 3,
+ "outcome": "no-op",
+ "detail": "agent changed nothing"
+}
+```

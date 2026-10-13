@@ -146,6 +146,31 @@ Last verified: 2026-08-28
   require human checking. No full nightly/live-board run has been performed.
 - Details and task-only patch: `docs/EDINBURGH_LOCAL_WORK_2026-10-12.md`.
 
+## Conservative expiry checker — 2026-10-12
+
+- The user explicitly enabled L2 for the expiry-checker implementation.
+  Code and tests are isolated on `loop/expiry-safe-20261012` in
+  `10_output/_worktrees/expiry-safe-20261012`; no production integration or
+  schedule change has been made.
+- Default execution is a dry run. `--apply` requires two fresh observations
+  of the same dedicated, exact closure notice on LinkedIn, Reed or Guardian.
+  Generic 404/410, access failures, redirects, quotes/negations, contradictory
+  Apply controls and legacy `listing_removed`/cache flags cannot expire a job.
+  Other sources remain manual. Only repeated access failures stop a source;
+  healthy inconclusive pages do not halt the sweep.
+- Applying saves evidence and original reports under `_expiry_runs/`, updates
+  only an unchanged report's `expired` line, preserves cache history and leaves
+  `_analyzed.json` alone. An apply lock prevents concurrent runs of this script.
+- Validation: 230 relevant tests pass. A read-only 12-posting live sample found
+  4 confirmed closures and 8 unknowns, with 0 ticks. All Markdown bytes under
+  `00_matches`, expiry state and analyzed data have matching before/after hashes.
+  Details: `10_output/_expiry_validation_20261012/` and the worktree's
+  `docs/EXPIRED_CHECK_SAFE_2026-10-12.md`. These are confirmation timestamps,
+  not actual deadlines; website correctness or future reopening is not guaranteed.
+- Run the new script from the repository root with the existing `.venv/bin/python`
+  and `--data-dir 10_output`; the default data path inside the worktree is empty.
+  Existing production `check_expired.py` remains the old implementation.
+
 ## GLM-5.3 key fallback — 2026-10-10
 
 - The user requested the existing Mistral-style key fallback for GLM-5.3.

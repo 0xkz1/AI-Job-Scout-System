@@ -16,6 +16,31 @@ Three scheduled things run against this repo. Only one of them writes code, and
 none of them finishes a decision — every path ends at a human or at a file a
 human reads. Times are JST; the machine is `Asia/Tokyo`.
 
+俺が今こうやって指摘したわけだけど、このループエンジニアリングの中で、例えば今回の俺の指摘と同じような指摘をするループエンジニアリングであってほしいわけよ。
+
+つまり、同じような内容に気づいて、そのオブジェクトのノートを読んでシステムの作りとどんな乖離があるのかを調べて、違和感を覚えたらそれをジョブとして発行するみたいな。そういう作りにまだなってないってことだよね。
+
+俺が今指摘して初めて君はこのシステムの欠陥に気づいたわけだから、本当は俺と同じくらいか、もしくは俺よりもっと早く自分で気づくような仕組みになってほしいわけよ。
+
+
+
+
+
+
+
+Loop Engiと言えるのか、それともGraph Engineering?
+これ、xxx Engineering in TAIFUNOME という１つの作品として、ポートフォリオサイトに載せるのはアリだよね？
+
+
+
+
+
+Loop Engineering, 止まっているセッションを、atelier/00_Kazuki/のVaultやatelier/taifunome/vaultの情報をもとに、返答する仕組みを作るのはriskyか？？
+
+
+
+
+
 ```mermaid
 flowchart TB
     classDef clock fill:#1f2937,stroke:#4b5563,color:#f9fafb

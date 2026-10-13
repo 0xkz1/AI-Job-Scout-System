@@ -637,7 +637,7 @@ analysis_chunk_size: 200
 # was the limit, not the keys.
 #
 # 1 restores the old serial pass.
-analysis_workers: 8
+analysis_workers: 3
 
 # Review a document as soon as it is written, instead of leaving every review to
 # nightly_scout at the end of the pipeline.

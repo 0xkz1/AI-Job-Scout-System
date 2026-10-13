@@ -33,7 +33,7 @@ The pipeline:
 5. **Selects** the top-ranked slice (top N%, capped) and **generates** a tailored CV + cover letter *only* for those — quality over spray-and-pray, human review before anything is sent
 6. **Outputs** Obsidian-ready Markdown with YAML frontmatter (incl. `country` + `categories`) — queryable via Dataview, operated via a Streamlit UI, delivered nightly via Telegram
 
-All LLM calls go through one provider chain — **Mistral (cloud, primary) → StepFun step-3.5-flash (cloud, fallback) → Ollama Gemma-4 (local, last resort on an RTX 5080)** — so batches are fast and cheap, and the pipeline keeps working offline. Job text and your persona are sent to the cloud providers; switch `ANALYSIS_PROVIDER=ollama` for a fully local run. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
+Bulk LLM calls use the provider chain configured in `llm_client.py`. Job text and your persona are sent to the selected cloud providers; `ANALYSIS_PROVIDER=ollama` selects local inference for bulk calls. CV/CL proofreading uses a separate review route described below.
 
 ---
 
@@ -66,7 +66,9 @@ flowchart TD
 
 CV headers (title + tagline) are **per-role**: each `career/cv/profile/<role>.md` carries `role_title` / `role_tagline` frontmatter that `cv_generator.py` injects, so a Product Designer application leads with a different identity than a Creative Technologist one.
 
-Every LLM task (skill extraction, context/ethos scoring, EN+JA summaries, CV & cover-letter drafting) goes through `llm_client.py`, which walks the provider chain **Mistral → StepFun → local Ollama** on rate limits, 5xx errors, timeouts, or missing API keys.
+Bulk extraction, context scoring and summaries use `llm_client.py` and its configured provider chain.
+
+CV/CL proofreading uses **GLM-5.3 with `reasoning_effort: low`**, through the Gateway aliases `review-strong-glm53-key1` through `review-strong-glm53-key7`. It tries the existing NVIDIA keys in order and advances to the next key on a provider error, truncated stream or unusable review. Failed keys are quarantined separately, so one failure does not disable the other keys. It receives the complete document, including sections beyond 7,000 characters, and accepts streamed text only after normal completion. If all available keys fail, the previous review is retained. The default route has no fallback to a weaker model. `REVIEW_FALLBACKS` remains an explicit operator override. Human review remains necessary for factual claims and suggested rewrites. See [review model deployment and validation](docs/REVIEW_MODEL_2026-10-09.md).
 
 ---
 
@@ -593,3 +595,19 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 - 選択式: [letter_facts_v1.md](../career/cover-letter/letter_facts_v1.md)(tier: core/technical/operational、求人キーワードでゲート)
 - 生成: Context Bridge のみLLM。主語反転・ツール名列挙・誇張表現・定型closingを複数ゲートで拒否し、通らなければ静的文へフォールバック
 - テスト: `tests/test_cover_letter_assembler.py`(303件)
+
+---
+
+## 自律型マルチエージェント & System One 統合 (2026-09-20)
+
+Streamlit で人間がボタンを手動実行するスタイルから、**Hermes を司令塔とする自律型マルチエージェント協働システム**へと発展。
+
+### 1. 役割分担の3層アーキテクチャ
+- **Layer 1 (L1 Nightly Scout: 高速バッチ)**: `no_agent: true`。Python コード + **Jev System One**（`Choice`, `Noul`, `Score`）によるミリ秒単位の型安全な職種分類・スポンサー判定・適合度スコアリング。詳細は [docs/JIS_AND_JEV.md](docs/JIS_AND_JEV.md)。
+- **Layer 2 (L2 Scraper Repair: 障害自律修復)**: Hermes **`builder`** が担当。スクレイパー異常時に `git worktree` 上で自動修正・テストを実行。
+- **Layer 3 (L3 High-Match Workflow: 自動書類推敲・監査)**:
+  - `jis_hermes_bridge.py` がスコア ≥ 0.75 の特級求人を Hermes Kanban (`jis` ボード) へ自動起票。
+  - **`writer`**: Canonical Narrative を保ちつつ、Context Bridge の下書きを非同期作成。
+  - **`review-editor`**: `letter_facts_v1.md` に基づきハルシネーション・誇張を厳密に監査。
+  - 人間（Kazuki）は Telegram で完成書類の通知を受け取り、最終確認（Apply）するのみ。
+
