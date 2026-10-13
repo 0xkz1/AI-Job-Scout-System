@@ -97,6 +97,62 @@ Last verified: 2026-08-28
   require human checking. No full nightly/live-board run has been performed.
 - Details and task-only patch: `docs/EDINBURGH_LOCAL_WORK_2026-10-12.md`.
 
+## GLM-5.3 key fallback — 2026-10-10
+
+- The user requested the existing Mistral-style key fallback for GLM-5.3.
+  Changes are isolated on `fix/glm53-key-fallback-20261010` in
+  `10_output/_worktrees/glm53-key-fallback-20261010`.
+- The default CV/CL review and annotation-dialogue chain tries Gateway aliases
+  `review-strong-glm53-key1` through `review-strong-glm53-key7` in order, using
+  the seven existing NVIDIA keys and the same GLM-5.3 reasoning-low model.
+  Each key has one attempt. Errors or unusable reviews advance to the next key.
+- Reuses the existing quarantine system, scoped per key alias. A failed key
+  cannot quarantine the remaining six or the shared Gateway. Rate-limit errors
+  have a 15-minute cooldown; auth/quota errors use the existing 14-day cooldown.
+  These are retry schedules, not claims about when upstream quota resets.
+- If every key fails, the existing review remains untouched. Explicit
+  `REVIEW_FALLBACKS` remains available. The original pooled alias and other
+  Gateway aliases, their fallback chains and global router settings are retained.
+- Validation: 110 relevant tests pass, including per-key isolation, 401/402/403/
+  429 failures, six failures followed by key 7, interrupted/unusable responses,
+  annotation dialogue and all-key failure preserving existing reviews.
+  The installed LiteLLM Router also passed six local-upstream failure scenarios.
+- Production integration is complete. All seven new aliases answered through
+  the JIS virtual key; the production client confirmed its default seven-key
+  chain and GLM-5.3 response. Gateway readiness and dashboard health returned 200
+  after restart. Production files match the tested worktree.
+- Deployment and live connectivity results are recorded in
+  `10_output/_glm53_key_fallback_20261010/`. Existing loop-health dates below
+  have not been re-verified by this work.
+
+## Review model deployment — 2026-10-09
+
+- The user explicitly enabled L2 and approved tested production deployment.
+  Work is isolated on `fix/review-glm53-20261009` in
+  `10_output/_worktrees/review-glm53-20261009`.
+- The JIS Python CV/CL review and annotation-dialogue route now defaults to
+  `litellm-gateway:review-strong-glm53` (NVIDIA NIM GLM-5.3, reasoning low).
+  Seven existing NVIDIA key references are reused; each passed a short probe.
+  Existing Gateway aliases and global router settings are preserved.
+- New reviews receive the complete document. This route buffers streamed text
+  and requires normal completion; errors or partial answers fail the request.
+  No automatic retries or weaker-model fallbacks are used on the new route.
+  Explicit `REVIEW_FALLBACKS` overrides remain available.
+- Validation: 60 relevant tests pass. The isolated JIS client completed a
+  100,071-character real review prompt in 39.249 seconds, with a usable CV
+  review and the served model confirmed as `openai/z-ai/glm-5.3`.
+- Non-streaming long requests timed out during deployment. A complete
+  streamed Gateway review also passed in 63.945 seconds. These measurements
+  establish a working route, not a future availability guarantee.
+- Previous reviews and application documents are retained. No mass re-review,
+  Hermes profile model change, commit or push was performed. Human factual
+  review remains necessary; the model still made mistakes in the small benchmark.
+- Details: [review model validation](docs/REVIEW_MODEL_2026-10-09.md).
+  Production source matches the tested worktree. The dashboard was restarted;
+  Gateway readiness and dashboard health returned 200, and the production
+  client confirmed the served GLM-5.3 model through the JIS virtual key.
+  Existing loop-health dates below have not been re-verified.
+
 ## Dashboard integration — 2026-10-09
 
 - UI work is isolated on `feat/application-history-20261009` in

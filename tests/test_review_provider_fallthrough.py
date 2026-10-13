@@ -6,8 +6,12 @@ replied successfully with an empty or off-format body was accepted. On
 words 未算出, nothing else — and nothing in the frontmatter distinguishes one
 of those from a review that genuinely found no faults.
 """
+import itertools
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
+import key_quarantine
 import reviewer
 
 GOOD_CL = """### ❗ 事実
@@ -29,6 +33,59 @@ bridge の接続は方法論に寄りすぎており、求人票の技術的中�
 """
 
 GOOD_CV = "```yaml\nrubric:\n  - requirement: \"X\"\n    evidence: \"Weak\"\n```\n\n" + GOOD_CL
+
+
+@pytest.mark.parametrize(
+    "survivors",
+    [
+        reviewer.MISTRAL_KEYS,
+        reviewer.MISTRAL_KEYS[-3:],
+    ],
+)
+def test_parallel_reviews_rotate_the_surviving_mistral_keys(monkeypatch, survivors):
+    """Filtering first is load-bearing when most direct keys are quarantined.
+
+    Rotating the complete list before filtering made all three workers converge
+    on the first surviving key when the first twelve keys were sidelined.
+    """
+    survivor_set = set(survivors)
+    monkeypatch.setattr(reviewer, "_MISTRAL_ROTATION_COUNTER", itertools.count())
+    monkeypatch.setattr(
+        key_quarantine,
+        "is_quarantined",
+        lambda provider: provider in reviewer.MISTRAL_KEYS and provider not in survivor_set,
+    )
+
+    def direct_mistral_head(_index):
+        return next(
+            provider for provider, _model in reviewer._prepare_review_chain(
+                [(provider, reviewer.REVIEW_MODEL) for provider in reviewer.MISTRAL_KEYS]
+            )
+            if provider in reviewer.MISTRAL_KEYS
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        heads = list(pool.map(direct_mistral_head, range(3)))
+
+    assert set(heads) == set(survivors[:3])
+    assert len(heads) == len(set(heads))
+
+
+def test_review_fallback_env_preserves_operator_priority(monkeypatch):
+    monkeypatch.setenv(
+        "REVIEW_FALLBACKS",
+        "mistral-tertiary:model-c,mistral:model-a,mistral-backup:model-b",
+    )
+    monkeypatch.setattr(key_quarantine, "is_quarantined", lambda _provider: False)
+    monkeypatch.setattr(reviewer, "_MISTRAL_ROTATION_COUNTER", itertools.count())
+
+    expected = [
+        ("mistral-tertiary", "model-c"),
+        ("mistral", "model-a"),
+        ("mistral-backup", "model-b"),
+    ]
+    assert reviewer._review_chain() == expected
+    assert reviewer._review_chain() == expected
 
 
 def test_an_empty_body_is_unusable():

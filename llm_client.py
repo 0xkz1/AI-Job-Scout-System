@@ -148,6 +148,17 @@ NVIDIA_PROVIDERS = {
     "nvidia-septenary":  "NVIDIA_SEPTENARY_API_KEY",
 }
 
+# Each Gateway alias binds one existing NIM key. Reviews walk these in order
+# rather than letting a failed random pool selection end the request.
+GLM53_REVIEW_KEY_MODELS = tuple(f"review-strong-glm53-key{i}" for i in range(1, 8))
+
+
+def quarantine_scope(provider: str, model: Optional[str] = None) -> str:
+    """A failed review key must not quarantine the entire shared Gateway."""
+    if provider == "litellm-gateway" and model in GLM53_REVIEW_KEY_MODELS:
+        return f"{provider}:{model}"
+    return provider
+
 GROQ_PROVIDERS = {
     "groq":            "GROQ_API_KEY",
     "groq-back":       "GROQ_BACKUP_API_KEY",
@@ -220,12 +231,13 @@ def _rotate_interchangeable_head(chain: list[str]) -> list[str]:
     return chain[offset:head] + chain[:offset] + chain[head:]
 
 
-def _quarantine_filter_chain(chain: list[str]) -> list[str]:
+def _quarantine_filter_chain(chain: list[str], model: Optional[str] = None) -> list[str]:
     """Skip providers currently sidelined by key_quarantine (import kept lazy so
     llm_client still works if the module is absent)."""
     try:
         from key_quarantine import filter_chain
-        return filter_chain(chain)
+        active = filter_chain([quarantine_scope(p, model) for p in chain])
+        return [p for p in chain if quarantine_scope(p, model) in active]
     except Exception:
         return chain
 
@@ -435,7 +447,10 @@ def call_llm(
     # cooldown expires — otherwise every call burns the full retry budget on a
     # key that cannot answer, and deleting it would lose the key once its quota
     # resets. Order is untouched, so it returns to its original position.
-    chain = _quarantine_filter_chain(chain)
+    if model in GLM53_REVIEW_KEY_MODELS:
+        chain = _quarantine_filter_chain(chain, model=model)
+    else:
+        chain = _quarantine_filter_chain(chain)
     # Spread the load over the interchangeable keys at the head before anything
     # else looks at the chain, so the pressure does not all land on one account.
     chain = _rotate_interchangeable_head(chain)
@@ -475,7 +490,7 @@ def call_llm(
             # for the final provider, so a one-provider probe (or the tail of
             # the fallback chain) could repeatedly spend its retry budget on
             # the same bad key without ever placing it in quarantine.
-            _maybe_quarantine(prov, str(e))
+            _maybe_quarantine(quarantine_scope(prov, model), str(e))
             record_llm_call(stage, prov, time.time() - started, prompt_chars, max_tokens,
                             "transient" if _is_transient_error(e) else "error")
             if not _is_transient_error(e) or is_last:
@@ -691,6 +706,32 @@ def _call_stepfun(
             raise RuntimeError(f"StepFun API error after {attempt+1} attempts: {e}")
 
 
+def _read_gateway_review_stream(resp: requests.Response) -> str:
+    """Accept a complete review stream; never return a partial answer."""
+    parts, finish, done = [], None, False
+    deadline = time.monotonic() + _GATEWAY_READ_TIMEOUT
+    for line in resp.iter_lines():
+        if time.monotonic() > deadline:
+            raise RuntimeError("gateway review stream timed out")
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == b"[DONE]":
+            done = True
+            break
+        item = json.loads(payload)
+        if item.get("error"):
+            raise RuntimeError("gateway review stream returned an error")
+        for choice in item.get("choices", []):
+            if choice.get("index", 0) != 0:
+                continue
+            parts.append(choice.get("delta", {}).get("content") or "")
+            finish = choice.get("finish_reason") or finish
+    if not done or finish != "stop":
+        raise RuntimeError("gateway review stream incomplete (EOF or token limit)")
+    return "".join(parts)
+
+
 def _call_litellm_gateway(
     messages: list[dict],
     system_prompt: str,
@@ -726,8 +767,27 @@ def _call_litellm_gateway(
 
     model = model or os.environ.get("LITELLM_GATEWAY_MODEL", "mistral-medium")
     full_messages = _build_messages(messages, system_prompt)
+    strong_review = model == "review-strong-glm53" or model in GLM53_REVIEW_KEY_MODELS
+    payload = {
+        "model": model,
+        "messages": full_messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    request_options = {}
+    if strong_review:
+        # NIM's non-streaming full review timed out at 300s; the same input
+        # started returning streamed text in 11s. Buffer it until completion.
+        # Each key gets one attempt. reviewer walks the other key aliases,
+        # so neither this client nor the Gateway retries the same failed key.
+        payload.update(stream=True, num_retries=0, timeout=180, stream_timeout=90)
+        request_options["stream"] = True
+        retries = 0
+        if base_url == "http://localhost:4001":
+            base_url = "http://127.0.0.1:4001"
 
     for attempt in range(retries + 1):
+        resp = None
         try:
             resp = requests.post(
                 f"{base_url}/v1/chat/completions",
@@ -735,23 +795,20 @@ def _call_litellm_gateway(
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "messages": full_messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
+                json=payload,
                 # Not _http_timeout_for alone: that sizes a budget to one
                 # model's response time, and this endpoint is a whole chain
                 # behind one request. See _GATEWAY_READ_TIMEOUT. The
                 # prompt-scaled value still wins when it is the larger of the
                 # two, so a review-sized body keeps the headroom it was given.
-                timeout=(_HTTP_TIMEOUT[0],
+                timeout=(_HTTP_TIMEOUT[0], 90 if strong_review else
                          max(_http_timeout_for(full_messages)[1],
                              _GATEWAY_READ_TIMEOUT)),
+                **request_options,
             )
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"].get("content") or ""
+            content = (_read_gateway_review_stream(resp) if strong_review else
+                       resp.json()["choices"][0]["message"].get("content") or "")
             if not content.strip():
                 raise RuntimeError(
                     f"litellm-gateway/{model} returned empty content (max_tokens={max_tokens})")
@@ -765,6 +822,9 @@ def _call_litellm_gateway(
                 time.sleep(2 ** attempt)
                 continue
             raise RuntimeError(f"litellm-gateway API error after {attempt+1} attempts: {e}")
+        finally:
+            if strong_review and resp is not None:
+                resp.close()
 
 
 def _call_openrouter(

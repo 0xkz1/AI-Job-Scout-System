@@ -12,13 +12,16 @@ frontmatter (cv_review / cl_review).
 """
 
 import hashlib
+import itertools
 import os
 import re
 import yaml
 from datetime import date
 from pathlib import Path
 
-from llm_client import call_llm, current_served_model
+from llm_client import (
+    GLM53_REVIEW_KEY_MODELS, call_llm, current_served_model, quarantine_scope,
+)
 from matcher import USER_PROFILE_DIR, _load_persona_summary
 
 ROOT = Path(__file__).resolve().parent
@@ -28,7 +31,7 @@ ARCHIVE_DIR = REVIEWS_DIR / ".archive"      # old versions saved on re-review / 
 
 # Review deserves a stronger model than bulk analysis: it runs only on
 # shortlisted applications and its output gates what actually gets sent.
-REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "mistral-medium-latest")
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "review-strong-glm53")
 
 # Single source of truth for which Mistral keys exist, in priority order. Read from
 # llm_client rather than restated here: the two lists drifted before, and a chain
@@ -37,50 +40,47 @@ from llm_client import MISTRAL_PROVIDERS as _MISTRAL_PROVIDERS  # noqa: E402
 from doc_paths import md_files  # noqa: E402
 
 MISTRAL_KEYS = tuple(_MISTRAL_PROVIDERS)
+_MISTRAL_ROTATION_COUNTER = itertools.count()
+
+
+def _rotate_active_mistral_entries(
+    chain: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Spread concurrent reviews across the direct Mistral keys still active.
+
+    Quarantine filtering must happen first. Rotating the full key list and then
+    dropping quarantined entries makes several offsets collapse onto the same
+    first survivor, recreating the thundering herd this rotation prevents.
+    """
+    positions = [
+        index for index, (provider, _model) in enumerate(chain)
+        if provider in MISTRAL_KEYS
+    ]
+    if len(positions) <= 1:
+        return chain
+
+    entries = [chain[index] for index in positions]
+    offset = next(_MISTRAL_ROTATION_COUNTER) % len(entries)
+    rotated = entries[offset:] + entries[:offset]
+    result = list(chain)
+    for index, entry in zip(positions, rotated):
+        result[index] = entry
+    return result
+
+
+def _prepare_review_chain(
+    chain: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Filter unavailable providers, then distribute the surviving Mistral keys."""
+    return _rotate_active_mistral_entries(_drop_quarantined(chain))
 
 
 def _review_chain() -> list[tuple[str, str]]:
-    """Ordered (provider, model) candidates for a review call, tried in turn.
+    """Try the vetted GLM-5.3 model's seven key slots in order.
 
-    Unlike the global FALLBACK_PROVIDERS chain, each entry carries its OWN model
-    name — a model id is provider-specific (mistral-medium does not exist on
-    stepfun), so the single-`model` override could never fall back across
-    providers. Override via env REVIEW_FALLBACKS="prov:model,prov:model,...".
-
-    Default chain, best → last-resort. Reliable non-reasoning cloud models come
-    FIRST; the free reasoning model (deepseek-v4-flash) sits low because it can
-    silently return empty content on long docs (burns max_tokens on hidden
-    reasoning) — llm_client now raises on empty so the chain falls through, but
-    it's still a poor primary. Every MISTRAL_API_KEY* in the environment becomes an
-    entry (each key has its own allowance); nvidia is a fully independent provider,
-    so it survives a mistral.ai outage that would take out all of them at once:
-
-    The Z.AI entries (z-ai/glm-5.2) add another 11-key pool from Hermes's
-    credential pool — 2 are exhausted but quarantine handles them. Same
-    independent-rate-limit advantages as the others.
-
-      1..N.    mistral / mistral-backup / ...            (see MISTRAL_KEYS)
-      N+1..7   nvidia..nvidia-septenary / nemotron-super-49b-v1.5 — NIM 7 keys
-      N+8..18  zai..zai-undenary / glm-5.2                — Z.AI pool (11 keys)
-      N+19.    opencode / deepseek-v4-flash-free          — FREE reasoning (Zen)
-      N+20.    opencode / big-pickle                      — independent Zen model
-      N+21.    nvidia   / nemotron-nano-9b-v2             — cheap, looser on format
-      N+22.    ollama   / local                           — offline last resort
-
-    The prompt is ~64k characters, and that decides membership more than model
-    quality does. Measured 2026-08-12 against the real thing: mistral and the
-    NIM nemotrons take it, groq returns 413 Payload Too Large on every model
-    tried (a request-size limit on the account, not a context window), and the
-    local model is the only entry that accepts it while ignoring the output
-    format — which is why _review_is_unusable exists.
-
-    Key depth is not redundancy for its own sake: a single day of work (182 reviews
-    plus analysis) exhausted the first three keys AND nvidia AND stepfun, leaving
-    one live cloud provider. Free-tier Mistral allowances are monthly, so depth buys
-    throughput for exactly that kind of bulk day. Entries whose key is unset raise
-    on call and are skipped, so listing a key that does not exist is harmless —
-    which is why the list is fixed here rather than probed from os.environ. Dead
-    accounts (zai 429) are left out; add back via REVIEW_FALLBACKS once recharged.
+    A failed or unusable answer advances to the next key of the same model.
+    Raise only after every available key fails. Keep overrides explicit.
+    REVIEW_FALLBACKS can supply an operator-approved ordered provider:model list.
     """
     env = os.environ.get("REVIEW_FALLBACKS", "").strip()
     if env:
@@ -90,63 +90,8 @@ def _review_chain() -> list[tuple[str, str]]:
         ]
         if chain:
             return _drop_quarantined(chain)
-    return _drop_quarantined([
-        # The gateway leads, ahead of the keys this project holds itself, because
-        # it holds a SUPERSET of them — the same fifteen plus nine more, 24
-        # mistral-medium deployments as of 2026-08-18 — behind its own cooldown
-        # table and its own model-level fallback (nvidia-nim, groq-fast, zai-glm,
-        # ollama). Walking MISTRAL_KEYS first would spend the chain re-testing
-        # keys the gateway already knows are spent: five of the fifteen were
-        # sitting on multi-day 402s that day, and every review paid for them.
-        # Its model id is the gateway's own `mistral-medium`, not REVIEW_MODEL —
-        # the gateway maps that to mistral-medium-latest internally.
-        # Verified 2026-08-18: a 98,000-char prompt (review-sized) answered in
-        # 45.9s. If the gateway is down the entry simply fails and the chain
-        # falls through to the direct keys below, which is the safe direction.
-        ("litellm-gateway", "mistral-medium"),
-        *((provider, REVIEW_MODEL) for provider in MISTRAL_KEYS),
-        # mistralai/mistral-medium-3.5-128b does not exist on NIM and never
-        # did: all seven keys answered 410 Gone, which reads as a dead account
-        # rather than a wrong model id. GET /v1/models lists what is actually
-        # served; nemotron-super-49b takes the 64k prompt and follows the
-        # format, including the CL instruction not to comment on the letter's
-        # fixed blocks. nano-9b also takes the prompt and is far cheaper, but
-        # it flagged the canonical narrative the scope section rules out — so
-        # it sits behind, as a still-useful last cloud option.
-        ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-back", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-tertiary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-quaternary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-quinary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-senary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        ("nvidia-septenary", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
-        # groq is absent by measurement, not by model choice. Bisected against
-        # the live API 2026-08-17: it accepts 21,812 prompt chars and refuses
-        # 22,281, identically on gpt-oss-120b, gpt-oss-20b, qwen3.6-27b and
-        # compound-mini — an account request-BODY cap, not a context window
-        # (every one of those advertises 131k tokens). A review prompt measures
-        # ~98,577 chars, so nothing groq serves can take it and no model swap
-        # will change that. llm_client now enforces this generally
-        # (_PROVIDER_MAX_PROMPT_CHARS), so groq leads the general chain and is
-        # skipped here on size; do not "fix" its absence by adding it back.
-        # What WOULD make groq usable here is a smaller prompt, not a different
-        # model — the persona alone is ~55k chars.
-        # Z.AI 11-key pool — chain names zai..zai-undenary (see ZAI_PROVIDERS in llm_client)
-        ("zai", "glm-5.2"),
-        ("zai-back", "glm-5.2"),
-        ("zai-tertiary", "glm-5.2"),
-        ("zai-quaternary", "glm-5.2"),
-        ("zai-quinary", "glm-5.2"),
-        ("zai-senary", "glm-5.2"),
-        ("zai-septenary", "glm-5.2"),
-        ("zai-octonary", "glm-5.2"),
-        ("zai-nonary", "glm-5.2"),
-        ("zai-denary", "glm-5.2"),
-        ("zai-undenary", "glm-5.2"),
-        ("opencode", "deepseek-v4-flash-free"),
-        ("opencode", "big-pickle"),
-        ("nvidia", "nvidia/nvidia-nemotron-nano-9b-v2"),
-        ("ollama", os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")),
+    return _prepare_review_chain([
+        ("litellm-gateway", model) for model in GLM53_REVIEW_KEY_MODELS
     ])
 
 
@@ -157,7 +102,7 @@ def _drop_quarantined(chain: list[tuple[str, str]]) -> list[tuple[str, str]]:
     empty — if every provider is sidelined, fall back to the full chain.
 
     A missing provider here is EXPECTED, not a fault to repair. Quarantine
-    entries expire on their own (key_quarantine.DEFAULT_COOLDOWN_DAYS = 5); do
+    entries expire on their own (key_quarantine.DEFAULT_COOLDOWN_DAYS = 14); do
     not `key_quarantine.py --release` them to "restore" the chain. Nor does a
     small probe call prove a key recovered — a max_tokens=5 request can succeed
     on a key whose allowance is spent, because a real review sends a long prompt
@@ -166,7 +111,7 @@ def _drop_quarantined(chain: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """
     try:
         from key_quarantine import is_quarantined
-        active = [(p, m) for p, m in chain if not is_quarantined(p)]
+        active = [(p, m) for p, m in chain if not is_quarantined(quarantine_scope(p, m))]
         return active or chain
     except Exception:
         return chain
@@ -257,7 +202,15 @@ def _load_review_facts() -> str:
     """
     persona = _load_persona_summary() or ""
     try:
-        from cv_generator import _ALL_ENTRIES
+        from cv_generator import _ALL_ENTRIES, CONTACT
+        # These are the same user-maintained values used by the CV header.
+        # An absent value in profile.md alone does not make them invented.
+        contact = "\n".join(f"{key}: {CONTACT[key]}" for key in
+                            ("name", "name_ja", "location", "email", "phone") if CONTACT.get(key))
+        if contact:
+            persona += ("\n\n--- CONFIGURED APPLICATION CONTACT (user-maintained CV settings; "
+                        "source for the document's contact values, not an independent "
+                        "verification of reachability) ---\n" + contact)
         blocks = []
         for p in _ALL_ENTRIES:
             head = " | ".join(x for x in (p.get("title", ""), p.get("role", ""),
@@ -722,7 +675,7 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
         persona=_load_review_facts(),
         skills=_load_skills_md(),
         decisions=_load_decisions(),
-        document=document[:7000],
+        document=document,
         scope_section=(CL_SCOPE_INSTRUCTION if doc_kind == "CL"
                        else CV_RUBRIC_INSTRUCTION),
         translation_section=CL_TRANSLATION_INSTRUCTION if doc_kind == "CL" else "",

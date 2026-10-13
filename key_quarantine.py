@@ -24,7 +24,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-STATE_FILE = Path(__file__).resolve().parent / "10_output" / ".key_quarantine.json"
+STATE_FILE = Path(os.environ.get("KEY_QUARANTINE_STATE") or os.path.expanduser("~/.local/state/key-quarantine/state.json"))
 
 # Every mutation here is read-modify-write on one small file, and the enrichment
 # pass now calls it from several threads at once. Without the lock two providers
@@ -36,8 +36,8 @@ _STATE_LOCK = threading.RLock()
 # free-tier allowance is spent — indistinguishable from the outside, so both get
 # a cooldown rather than being written off. Kept short deliberately: a key that
 # is still spent just fails once on release and is quarantined again for another
-# 5 days, so retrying cheaply beats guessing when the quota actually resets.
-DEFAULT_COOLDOWN_DAYS = 5
+# 14 days, so retrying cheaply beats guessing when the quota actually resets.
+DEFAULT_COOLDOWN_DAYS = 14
 
 # A 429 is NOT the same failure as a 401, and treating them alike sidelined seven
 # working keys for five days. Mistral answers 429 both for a spent monthly
