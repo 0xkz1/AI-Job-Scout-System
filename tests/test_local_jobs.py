@@ -156,3 +156,23 @@ def test_local_jobs_remain_ranked_but_do_not_consume_document_or_review_slots(co
 def test_shipped_configuration_fits_measured_scraper_timeouts(config):
     from invariants import check_scrape_fits_its_timeout
     assert check_scrape_fits_its_timeout(config)==[]
+
+
+@pytest.mark.parametrize('mode', ['--dry-run', '--generate-only', '--review-only'])
+def test_bridge_does_not_generate_or_queue_local_jobs(config,tmp_path,monkeypatch,capsys,mode):
+    import sys
+    import jis_hermes_bridge as bridge
+    data=tmp_path/'_analyzed.json'
+    data.write_text('[]')
+    item=job('Warehouse Operative')
+    item['match']={'composite_score':0.99}
+    monkeypatch.setattr(bridge,'ANALYZED_FILE',data)
+    monkeypatch.setattr(selection,'load_config',lambda:config)
+    monkeypatch.setattr(selection,'ranked_jobs',lambda **kwargs:[item])
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Local jobs must not enter autonomous document review')
+    monkeypatch.setattr(bridge,'generate_documents',forbidden)
+    monkeypatch.setattr(bridge,'create_review_task',forbidden)
+    monkeypatch.setattr(sys,'argv',['jis_hermes_bridge.py',mode])
+    bridge.main()
+    assert 'Found 0 jobs' in capsys.readouterr().out

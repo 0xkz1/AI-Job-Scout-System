@@ -37,7 +37,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scrape-only", action="store_true",
                     help="stage one only, leaving the staged jobs unanalysed")
+    ap.add_argument("--to-kanban", action="store_true",
+                    help="stage four: bridge top matches to Hermes Kanban for autonomous review")
+    ap.add_argument("--sync-top", type=int, default=3,
+                    help="number of top matches to sync to Kanban (default: 3)")
     args = ap.parse_args()
+
 
     code = _run("① Scrape url-list.md", ["scraper_url_list.py"])
     if code == LOCK_BUSY:
@@ -92,8 +97,16 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001 - never let the check take the run down
         print(f"⚠️ 整合性チェックを実行できませんでした: {type(e).__name__}: {e}", flush=True)
 
+    # ④ Bridge to Hermes Kanban for autonomous review
+    if args.to_kanban:
+        code = _run(f"④ Bridge to Hermes Kanban (top {args.sync_top})",
+                    ["jis_hermes_bridge.py", "--sync-top", str(args.sync_top)])
+        if code != 0:
+            print(f"\n⚠ Hermes bridge exited with code {code}", flush=True)
+
     print(f"\n✅ chain complete  ({datetime.now():%H:%M:%S})", flush=True)
     return 0
+
 
 
 if __name__ == "__main__":
