@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import math
+import re
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -43,6 +45,42 @@ def load_config() -> dict:
         return {}
 
 
+def yms_expiry(config: dict | None = None) -> date | None:
+    """The visa expiry date from config, or None when it is unset.
+
+    A date and nothing more. This module makes no claim about immigration
+    eligibility, routes, or what happens on the day after — see
+    analyzer.classify_sponsorship for the same rule applied to job text. The only
+    question anything here answers is arithmetic: how much time is left.
+    """
+    config = config if config is not None else load_config()
+    raw = config.get("yms_expiry")
+    if isinstance(raw, date):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return date.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def months_until_expiry(config: dict | None = None, today: date | None = None) -> float | None:
+    """Months of visa left, or None when no expiry is configured.
+
+    Fractional and derived from days, not from calendar-month arithmetic: the
+    only consumer compares it against a contract length, and "13.4 months left
+    against a 12-month contract" is the comparison that matters. Negative once
+    the date has passed, which callers must handle rather than clamp — a passed
+    expiry is a real state, not a zero.
+    """
+    expiry = yms_expiry(config)
+    if expiry is None:
+        return None
+    today = today or date.today()
+    return (expiry - today).days / 30.44
+
+
 def max_pages_for(site: str, config: dict | None = None) -> int:
     """Result pages to scrape for one site, from max_pages_per_site[site] with
     max_pages_per_search as the fallback.
@@ -64,6 +102,49 @@ def max_pages_for(site: str, config: dict | None = None) -> int:
         return max(1, int(per_site.get(site, default)))
     except (TypeError, ValueError):
         return default
+
+
+def search_pairs(config: dict | None = None, site: str | None = None) -> list[tuple[str, str]]:
+    """Every (keyword, location) search a site walks, in order.
+
+    The full cross product is not affordable: each pair is one serial search
+    (~34s on reed at depth 3) against a 1500s per-site cron timeout, so the
+    whole keyword list is capped at 44 pairs — see
+    invariants.check_scrape_fits_its_timeout. Spending six locations on every
+    keyword therefore rations how many keywords can exist at all.
+
+    `keyword_locations` buys the difference back: a keyword whose roles only
+    matter where the candidate can actually take them (the support /
+    implementation / QA / operations terms are Edinburgh-or-remote jobs, not
+    ones worth relocating for) searches a subset instead of all six. A keyword
+    absent from the map keeps the full location list, so the default behaviour
+    is unchanged.
+
+    Every site loops over this rather than nesting its own keywords x locations,
+    so a budget decision made in config.yaml applies to all of them — and the
+    invariant counts the same pairs the scrapers walk.
+
+    `site_only_locations` is the one exception, for a location only one site can
+    search at all: LinkedIn's guest endpoint takes a country plus its remote
+    workplace filter, so "Remote (Japan)" is a real search there, while reed and
+    guardian are UK boards that would read the same string as a town name and
+    spend a search returning nothing. Those locations stay invisible unless the
+    caller names the site they belong to, so a scraper that does not ask — and
+    the global budget count — keep exactly the pairs they had.
+    """
+    config = config if config is not None else load_config()
+    keywords = config.get("keywords") or []
+    locations = config.get("locations") or [""]
+    per_keyword = config.get("keyword_locations") or {}
+    extra = list((config.get("site_only_locations") or {}).get(site) or []) if site else []
+    pairs: list[tuple[str, str]] = []
+    from local_jobs import local_job_role
+    for kw in keywords:
+        locs = list(per_keyword.get(kw) or locations)
+        if not local_job_role(kw, config):
+            locs += [loc for loc in extra if loc not in locs]
+        pairs += [(kw, loc) for loc in locs]
+    return pairs
 
 
 def _dedupe(jobs: list[dict]) -> list[dict]:
@@ -94,19 +175,76 @@ def _dedupe(jobs: list[dict]) -> list[dict]:
     title) gives all three ONE document path — so past this point a job must be a
     single entry whatever the database decided.
     """
-    from matcher import is_junk_description  # local import: avoids a cycle
+    from matcher import is_junk_description, make_safe_name  # local import: avoids a cycle
 
     def rank(j: dict) -> tuple[int, int]:
         desc = j.get("description") or ""
         return (0 if is_junk_description(desc) else 1, len(desc))
 
-    best: dict[tuple[str, str], dict] = {}
+    best: dict[str, dict] = {}
     for j in jobs:
-        key = (j.get("company", ""), j.get("title", ""))
+        # Keyed on the DOCUMENT PATH, not on (company, title). The two are not the
+        # same key, and the difference is the whole reason this function exists:
+        # make_safe_name truncates the title at 50 characters, so two postings
+        # whose titles differ only past that point are distinct to a (company,
+        # title) key and identical to the filesystem.
+        #
+        # Found 2026-09-01 on two real LinkedIn postings — Aquent's "UIデザイナー
+        # テクノロジーやAIを活用した…[AQ-14798]" and the same title ending
+        # "[AQ-15555]". Different jobs, different URLs, composites 0.69 and 0.61,
+        # both inside the generation set, both writing the same file. Whichever
+        # was generated last won while selection ranked by the other.
+        key = make_safe_name(j.get("company", ""), j.get("title", ""))
         cur = best.get(key)
         if cur is None or rank(j) > rank(cur):
             best[key] = j
     return list(best.values())
+
+
+# Shortest description a 5-requirement rubric can honestly be built from.
+#
+# Was 100, while invariants.check_unscoreable_excluded independently used 400 — so
+# anything between the two passed selection and was then reported as a violation,
+# which is how a 381-char "Motion Graphics Designer" reached both the generation and
+# the review set. The invariant deliberately does not call this function (a check
+# that delegates to the code it verifies passes unconditionally), so the two numbers
+# have to be kept equal on purpose.
+#
+# 400 is the floor, not a claim that 400 is enough — but the case for raising it
+# is much weaker than it looked, and the note that used to sit here overstated it.
+#
+# That note read the short band as 75.2 against 55.6 for 1000-2999 chars, which
+# is a nine-point-wide claim resting on n=9. Re-measured 2026-08-27 against 1096
+# reviewed documents:
+#
+#     400-600   n=151  mean 68.5   >=85: 21%
+#     600-800   n=  5  mean 70.6   >=85: 20%
+#     800-1000  n= 12  mean 78.8   >=85: 42%
+#    1000-2000  n= 95  mean 62.6   >=85:  9%
+#    2000-4000  n=377  mean 64.2   >=85: 15%
+#    4000+      n=451  mean 66.0   >=85: 14%
+#
+# The short band still reads a little high — 68.5 against 64-66 — and its tail is
+# fatter, 21% at submission-ready against 14-15%. But that is four points, not
+# nineteen, and raising the floor to 1000 would drop 151 reviewed jobs to collect
+# it. The 800-1000 band's 78.8 is twelve documents and should not be read as
+# anything.
+#
+# Two narrower rules were measured and rejected on 2026-08-27 rather than left as
+# folklore for someone to re-propose:
+#
+#   - scraper-bait wording ("please mention the word", "and tag <base64>"): 16
+#     postings in the database, 11 reviewed, mean 66.0 — the database average. The
+#     marker says the board is spammy, not that the review is inflated.
+#   - no extracted skills at all: n=66, mean 60.9, BELOW average. A posting the
+#     extractor found nothing in does not review high.
+#
+# One posting does behave the way the whole rule imagines — Super Creative's
+# "Graphic designer", 441 characters of "APPLY NOW ... Please mention the word
+# PLEASANT", reviewed 100. Intersecting short WITH bait finds exactly two jobs in
+# 4750. That is a special case, and writing a guard for it would be recording a
+# rule nothing measured.
+MIN_REVIEWABLE_DESC = 400
 
 
 def is_unscoreable(job: dict) -> bool:
@@ -133,12 +271,27 @@ def is_unscoreable(job: dict) -> bool:
     # chars ending in "…", has no full-text field and no job-details endpoint (every
     # candidate path 404s), and what it cuts is the tail — the requirements list.
     #
-    # Excluded from RANKING too, not just review, because a summary scores higher
-    # than a full description rather than lower: across 980 filter-passing jobs,
-    # composite 0.440 vs 0.340 and context 0.454 vs 0.398. A 500-char excerpt is the
-    # opening pitch, so the model sees only what the posting is selling and none of
-    # what it demands. Left in the pool these outrank real postings — "Billing
-    # Specialist" and several "Talent Pool" registrations scored 0.81-0.83 that way.
+    # Excluded from RANKING too, not just review. A 500-char excerpt is the
+    # opening pitch, so the model sees what the posting is selling and none of
+    # what it demands, and summaries used to outscore full descriptions rather
+    # than underscore them: 0.440 vs 0.340 composite across 980 filter-passing
+    # jobs. Left in the pool they outranked real postings — "Billing Specialist"
+    # and several "Talent Pool" registrations reached 0.81-0.83 that way.
+    #
+    # That measurement no longer holds, and the reason is worth recording.
+    # scikit-learn was missing from the venv, so calculate_context_match
+    # returned a flat 0.50 for every job the LLM path did not cover; installing
+    # it and recalibrating dropped the truncated cohort from 0.450 to 0.336
+    # while full descriptions held at 0.354. Traced across seven snapshots, the
+    # gap closed at exactly that change and nowhere else. So a good part of the
+    # inflation this rule was written against was the dead constant, not the
+    # excerpts.
+    #
+    # The rule stays anyway. The mechanism argument is unchanged — an excerpt
+    # still cannot state what a job requires — the margin is now 0.018 either
+    # way, and lifting it would admit 1,223 Adzuna postings, a third of the
+    # database, on one measurement. Revisit with a re-scrape that supplies real
+    # descriptions, not by deleting the guard.
     if job.get("description_truncated"):
         return True
 
@@ -148,7 +301,7 @@ def is_unscoreable(job: dict) -> bool:
     # it as evidence let "Frontend Developer Needed for Business Website" (0-char
     # description, 174-char snippet) reach review 91 off an invented rubric.
     desc = job.get("description") or ""
-    return len(desc.strip()) < 100 or is_junk_description(desc)
+    return len(desc.strip()) < MIN_REVIEWABLE_DESC or is_junk_description(desc)
 
 
 def ranked_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> list[dict]:
@@ -169,6 +322,77 @@ def ranked_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> l
     ]
     passed.sort(key=lambda j: j["match"]["composite_score"], reverse=True)
     return passed
+
+
+# A title that names its own seniority — "Principal UX/UI Designer", "Staff
+# Brand Designer", "Sr. Product Designer" — is senior in the discipline itself,
+# and no document changes that. A title that names none of these was called
+# senior by the analyser reading the requirements list instead, which is a
+# different situation: the Inspired Thinking Group "Creative Technologist/AI
+# Specialist" posting is squarely about AI prototyping with Claude Code, MCP
+# services and agents, and was classified senior on "5 years React, 1 year AWS".
+# Splitting on the title is what makes the stretch pool worth looking at — of
+# 187 senior-filtered postings, 93 have a level-neutral title, and that cut is
+# the difference between a list headed by Principal Designer roles and one that
+# reaches the AI-prototyping post twelfth.
+_INTRINSIC_SENIORITY_RE = re.compile(
+    r"\b(senior|snr|sr\.?|staff|principal|lead|head\s+of|chief|vp|director|architect)\b",
+    re.IGNORECASE,
+)
+
+
+def _skills_score(job: dict) -> float:
+    match = job.get("match") or {}
+    skills = match.get("skills") or {}
+    try:
+        return float(skills.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def stretch_jobs(config: dict | None = None, jobs: list[dict] | None = None) -> list[dict]:
+    """Level-rejected postings still worth a CV, cover letter and review.
+
+    A posting the level gate rejects gets no documents and therefore no CV
+    review — and the review score is the signal actually used to decide whether
+    to apply, so the filter does not just deprioritise these, it makes them
+    unjudgeable. This returns the small set worth judging anyway.
+
+    Ranked by SKILLS score, not composite. For a filtered job the composite is
+    dominated by a context score the LLM never produced — TF-IDF stands in, at
+    64% of the weight — and TF-IDF compares the posting's prose style to the
+    candidate's, which is the wrong question here. Ranked by composite the AI
+    prototyping post came 106th of 203; by skills score, which is direct
+    keyword overlap with the skill inventory and costs nothing, it came 12th.
+
+    `stretch_top_count` in config.yaml caps the set; 0 disables it entirely.
+    """
+    from filter import passes_filter  # local import: avoids a cycle at import time
+    config = config if config is not None else load_config()
+    if jobs is None:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    try:
+        cap = int(config.get("stretch_top_count", 0) or 0)
+    except (TypeError, ValueError):
+        return []
+    if cap <= 0:
+        return []
+
+    candidates = []
+    for job in _dedupe(jobs):
+        if not job.get("match") or is_unscoreable(job):
+            continue
+        passed, reason = passes_filter(job, config)
+        # Only the level gate, and only one step up. "director" is two, and
+        # nothing in the record speaks to it.
+        if passed or not reason.startswith("level ") or "'senior'" not in reason:
+            continue
+        if _INTRINSIC_SENIORITY_RE.search(job.get("title") or ""):
+            continue
+        candidates.append(job)
+
+    candidates.sort(key=_skills_score, reverse=True)
+    return candidates[:cap]
 
 
 def unscoreable_jobs(jobs: list[dict] | None = None) -> list[dict]:
@@ -211,9 +435,28 @@ def select_top(
     CLI --limit-style override that is expressed as a percentage)."""
     config = config if config is not None else load_config()
     ranked = ranked_jobs(config, jobs)
+    from local_jobs import local_job_role
+    ranked = [j for j in ranked if not local_job_role(j.get("title", ""), config)]
     pct = percent if percent is not None else stage_percent(config, stage)
     k = top_percent_count(len(ranked), pct)
+
+    # Take everything scoring at least as much as rank k, not literally ranked[:k].
+    # Composite scores are quantised to 2 decimals, so equal scores come in blocks —
+    # 19 jobs sat on exactly 0.5400 in a 665-job pool, with the top-30% boundary
+    # falling at rank 200, inside that block. A plain slice keeps 10 of the 19 and
+    # drops 9, and since the sort is stable the split is decided by row order in
+    # _analyzed.json rather than by anything about the jobs. That made the set churn
+    # on any reshuffle: excluding 54 off-trade titles moved the boundary and pushed
+    # 16 already-generated jobs — every one of them on 0.54 — out of selection while
+    # jobs on the same score stayed in.
+    #
+    # Cost is a bounded overshoot of the configured percentage (200 -> 209 here,
+    # 31.4% instead of 30%). Paid deliberately: a percentage is an approximation of
+    # "the good ones", and there is no basis for preferring one 0.54 job over another.
     top = ranked[:k]
+    if top:
+        cutoff = top[-1]["match"]["composite_score"]
+        top = [j for j in ranked if j["match"]["composite_score"] >= cutoff]
 
     floor = config.get("match_score_threshold")
     if floor:

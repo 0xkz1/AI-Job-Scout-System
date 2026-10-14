@@ -1,4 +1,4 @@
-"""Regenerate top-3% CV/CL with current sources, then re-review all stale docs."""
+"""Regenerate top-20% CV/CL with current sources, then re-review all stale docs."""
 import sys, math, json, hashlib, shutil, time
 from pathlib import Path
 from datetime import datetime
@@ -13,6 +13,7 @@ for k, v in dotenv_values(ROOT / ".env").items():
         os.environ[k] = v
 
 import yaml
+import gen_version
 from filter import passes_filter
 from matcher import make_safe_name
 from cv_generator import detect_role_type, generate_cv
@@ -22,6 +23,7 @@ from reviewer import run_review, review_is_current
 OUTPUT_DIR = ROOT / "10_output"
 CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
+MATCH_DIR = OUTPUT_DIR / "00_matches"
 
 
 def resolve_base(company, title, url):
@@ -40,15 +42,25 @@ def main():
     rows = sorted(job_map.values(),
                   key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
     scored = [j for j in rows if j.get("match", {}).get("composite_score", 0) > 0]
-    targets = scored[:math.ceil(len(scored) * 3 / 100)]
+    targets = scored[:math.ceil(len(scored) * 20 / 100)]
 
-    print(f"[{time.strftime('%H:%M:%S')}] === PHASE A: regenerate top-3% = {len(targets)} jobs ===", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] === PHASE A: regenerate top-20% = {len(targets)} jobs ===", flush=True)
     backup_dir = OUTPUT_DIR / ".backups_pre_regen" / f"pre_regen_{datetime.now():%Y%m%d_%H%M%S}"
+    skipped_locked = 0
     for j in targets:
         company, title, url = j.get("company", "company"), j.get("title", "job"), j.get("url", "")
         base = resolve_base(company, title, url)
+        cv_p, cl_p = CV_DIR / f"{base}_CV.md", CL_DIR / f"{base}_CL.md"
+        # Hand-edited / applied / expired — see gen_version. The check runs
+        # before the unlink below, and holds even when neither file exists yet,
+        # so an expired posting is not handed a first CV either.
+        locked = gen_version.pair_lock_reason(base, (cv_p, cl_p), MATCH_DIR)
+        if locked:
+            skipped_locked += 1
+            print(f"  [{time.strftime('%H:%M:%S')}] skip ({locked}): {base}", flush=True)
+            continue
         backup_dir.mkdir(exist_ok=True)
-        for p in (CV_DIR / f"{base}_CV.md", CL_DIR / f"{base}_CL.md"):
+        for p in (cv_p, cl_p):
             if p.exists():
                 shutil.copyfile(p, backup_dir / p.name)
                 p.unlink()
@@ -56,23 +68,32 @@ def main():
         role_type = detect_role_type(title, desc)
         cv = generate_cv(role_type=role_type, job_title=title, company=company,
                          job_description=desc, match_filename=base, cl_filename=f"{base}_CL")
-        (CV_DIR / f"{base}_CV.md").write_text(cv, encoding="utf-8")
+        cv_p.write_text(cv, encoding="utf-8")
         save_cover_letter(title, company, j.get("location", "Edinburgh"), desc,
                           str(CL_DIR), match_filename=base, cv_filename=f"{base}_CV")
         print(f"  [{time.strftime('%H:%M:%S')}] regen: {base}", flush=True)
-    print(f"[{time.strftime('%H:%M:%S')}] backup: {backup_dir.name}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] backup: {backup_dir.name}"
+          + (f"  (skipped {skipped_locked} locked)" if skipped_locked else ""), flush=True)
 
     to_review = []
+    locked_reviews = 0
     for j in targets:
         base = resolve_base(j.get("company", ""), j.get("title", ""), j.get("url", ""))
         for kind, d in (("CV", CV_DIR), ("CL", CL_DIR)):
             doc = d / f"{base}_{kind}.md"
             if doc.exists():
+                # A locked document is not reviewable: run_review writes a
+                # backlink into it, and a verdict on a submitted or closed
+                # application buys nothing that can still be acted on.
+                if gen_version.is_locked(base, doc.read_text(encoding="utf-8"), MATCH_DIR):
+                    locked_reviews += 1
+                    continue
                 cur, _ = review_is_current(doc)
                 if not cur:
                     to_review.append((kind, doc, j))
 
-    print(f"\n[{time.strftime('%H:%M:%S')}] === PHASE B: review {len(to_review)} stale docs ===", flush=True)
+    print(f"\n[{time.strftime('%H:%M:%S')}] === PHASE B: review {len(to_review)} stale docs ==="
+          + (f" (skipped {locked_reviews} locked)" if locked_reviews else ""), flush=True)
     ok, failed = 0, []
     for i, (kind, doc, job) in enumerate(to_review, 1):
         t0 = time.time()

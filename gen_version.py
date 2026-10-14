@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from doc_paths import md_files
 
 ROOT = Path(__file__).resolve().parent
 PROFILE_DIR = Path("/media/kz003/atelier/00_Kazuki")
@@ -38,17 +39,41 @@ TEMPLATE_DIR = PROFILE_DIR / "career" / "cover-letter"
 # job to a different role, that pair's fingerprint changes on its own and only
 # it rebuilds. Bump this only for logic that the data-file hashes cannot see
 # (prompt wording, a gate rule, the digest shape).
-GEN_SPEC_VERSION = "2026-07-24.1"  # salvage over-long but honest openings instead of falling back to template
+# NOTE: page count is a RENDERING property, not a generation one. It is fixed in
+# app.py's PDF CSS (the page margin), and _convert_pdf_versioned already hashes
+# that function's source — so a layout fix needs no bump here. Measured
+# 2026-08-01: at the old 13mm margin 9 of 15 CVs ran to three pages; at 10mm
+# none do.
+GEN_SPEC_VERSION = "2026-08-08.1"  # strategy-led narrative CL: plan verified evidence before drafting, then vet the full body
 
 # Data files whose CONTENT feeds every pair, regardless of role.
+#
+# The two letter sources are listed for the reason the note under _GLOBAL_DIRS
+# gives: they feed EVERY cover letter, and while they were missing here, editing
+# them changed every letter without moving a single fingerprint. Measured
+# 2026-08-28: the canonical narrative went from 252 words to 177 and four fact
+# blocks gained a role gate, and `--stale-only` still reported 0 documents to
+# rebuild — 1,028 letters carrying the superseded opening all claimed to be
+# current.
 _GLOBAL_FILES = [
     PROFILE_DIR / "ethos.md",
     PROFILE_DIR / "about.md",
     PROFILE_DIR / "profile.md",
     PROFILE_DIR / "interests.md",
     PROFILE_DIR / "skills.md",
+    TEMPLATE_DIR / "canonical_narrative_v1.md",
+    TEMPLATE_DIR / "letter_facts_v1.md",
 ]
-_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "skill-toolkit"]
+# "experience" holds the employment records, which used to sit in "projects".
+# It must be listed: an employment entry edited outside this list changes every
+# CV while leaving every fingerprint identical, so nothing rebuilds and the
+# stale documents keep reporting themselves as current.
+# "profile" holds the per-role CV profile paragraphs. It is listed for the same
+# reason: a profile edited outside this list changes the CVs built from it while
+# leaving their fingerprints identical. glob("*.md") does not descend, so the
+# superseded copies in profile/archive/ stay out of the hash.
+_GLOBAL_DIRS = [CV_ROOT / "projects", CV_ROOT / "experience", CV_ROOT / "skill-toolkit",
+                CV_ROOT / "profile"]
 
 
 def _hash_file(h, path: Path) -> None:
@@ -63,7 +88,7 @@ def _global_digest(h) -> None:
         _hash_file(h, f)
     for d in _GLOBAL_DIRS:
         if d.exists():
-            for f in sorted(d.glob("*.md")):
+            for f in md_files(d):
                 _hash_file(h, f)
 
 
@@ -91,3 +116,186 @@ def read_fingerprint(text: str) -> str | None:
 def is_current(text: str, role_type: str = "general") -> bool:
     """True when the document was generated under the current inputs."""
     return read_fingerprint(text) == fingerprint(role_type)
+
+
+def role_of(text: str) -> str:
+    """The role a generated doc was built for, read from its own frontmatter.
+
+    Assembled cover letters state it outright in `role_type`, because they are
+    built from one canonical narrative rather than a per-role template — their
+    `source_template` link no longer ends in the role name. Older documents name
+    a profile (`source_profile`) or a template (`source_template`) whose link
+    tail IS the role. Falls back to "general", which is what generation itself
+    falls back to.
+    """
+    import re
+    m = re.search(r'^role_type:\s*"?([\w-]+)"?\s*$', text, re.MULTILINE)
+    if m:
+        return m.group(1)
+    m = re.search(r'^source_(?:profile|template):\s*"?\[\[[^\]]*?([\w-]+)\]\]',
+                  text, re.MULTILINE)
+    return m.group(1) if m else "general"
+
+
+# ---------------------------------------------------------------------------
+# Staleness: is this document's BODY built to the current shape?
+#
+# The fingerprint answers this exactly, but only for documents that carry one —
+# and 489 of 554 CVs predate stamping. Most of them are fine: patch scripts
+# (patch_toolkit_lines, patch_add_project_urls) rewrite bodies in place without
+# stamping, so "unstamped" says nothing either way. Silently treating them as
+# current is what let a three-page, pre-taifunome CV render as a finished PDF on
+# 2026-08-06; refusing all 489 would block half the corpus over a missing line.
+#
+# So an unstamped CV falls back to reading its own structure. Each marker below
+# is one shape change, named with the commit that made it, and the check is
+# deliberately shallow: it looks only at things generation ALWAYS produces, so a
+# per-job difference (which projects were picked, how many write-ups fit the two
+# pages) never reads as staleness. Add a marker here when the CV shape changes.
+# ---------------------------------------------------------------------------
+
+_HEADER_RE = r'^# .+\n\*\*.+\*\*\n(.+)$'
+_PROJECTS_RE = r'^## SELECTED PROJECTS\n(.*?)(?=^## |\Z)'
+
+
+def _cv_shape_faults(text: str) -> list[str]:
+    """Shape changes this CV body predates, newest spec first. Empty when current."""
+    import re
+    faults = []
+
+    # 029cd13: the header lost its second line (role_tagline), so the line under
+    # the job title is the contact line and nothing else.
+    m = re.search(_HEADER_RE, text, re.MULTILINE)
+    if m and not m.group(1).lstrip().startswith(("Edinburgh", "[")):
+        faults.append("header still carries the retired role_tagline line")
+
+    body = re.search(_PROJECTS_RE, text, re.MULTILINE | re.DOTALL)
+    if not body:
+        # No "## SELECTED PROJECTS" at all: the pre-heading generation, which
+        # wrote plain-text section names and the filename as the H1.
+        faults.append("no '## SELECTED PROJECTS' section (pre-heading generation)")
+    else:
+        writeups = [l for l in body.group(1).splitlines()
+                    if l.startswith("**") and not l.startswith("**Other projects")]
+        # e99bac4: TAIFUNOME leads the section on every CV — it is the studio the
+        # candidate runs, and it was being demoted to the "other projects" line.
+        if writeups and "TAIFUNOME" not in writeups[0]:
+            faults.append("TAIFUNOME is not the first project write-up")
+
+    # cfa29ad: EDUCATION and LANGUAGES merged into one section to win back the
+    # space that was pushing CVs onto a third page.
+    if "## EDUCATION & LANGUAGES" not in text:
+        faults.append("EDUCATION and LANGUAGES are still separate sections")
+    return faults
+
+
+def staleness_reason(text: str, is_cv: bool = True) -> str | None:
+    """Why this document's body is not built to the current spec, or None.
+
+    Checked in the order the evidence is trustworthy: a fingerprint that
+    disagrees is conclusive, an absent one sends a CV to its own structure, and
+    an unstamped cover letter has no structure worth reading — its shape is one
+    template, so there is nothing to compare against.
+    """
+    role = role_of(text)
+    stamped = read_fingerprint(text)
+    if stamped is not None:
+        current = fingerprint(role)
+        if stamped != current:
+            return f"gen_fingerprint {stamped} != current {current} (role: {role})"
+        return None
+    if not is_cv:
+        return None
+    faults = _cv_shape_faults(text)
+    if faults:
+        return "no gen_fingerprint, and the body predates: " + "; ".join(faults)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Locks: when a CV/CL must be left exactly as it is.
+#
+# Three reasons, in two scopes. The scope matters, because it decides whether a
+# lock can fire before the document exists:
+#
+#   document-scoped  updated_by_hand  a human edited THIS file; a script must
+#                                     not roll over their words.
+#   job-scoped       applied          the job was applied to, so the files on
+#                                     disk ARE the record of what was actually
+#                                     submitted. They must stop moving even as
+#                                     the profile / projects / templates do.
+#   job-scoped       expired          the posting has closed. Regenerating or
+#                                     reviewing it spends LLM budget on a job
+#                                     that can no longer be applied to.
+#
+# The job-scoped ones hold whether or not a CV/CL is on disk yet — that is the
+# point for `expired`: a closed posting must not receive a FIRST CV either.
+# ---------------------------------------------------------------------------
+
+# Spellings a human or Obsidian's Properties UI writes for a ticked checkbox.
+# Matches matcher.read_expired_flag, which has read the `expired` tick this way
+# since before these locks existed.
+_TRUTHY = ("true", "yes", "on")
+
+
+def _frontmatter_bool(text: str, key: str) -> bool:
+    """True when frontmatter `key:` holds a ticked-checkbox value."""
+    import re
+    m = re.search(rf'^{key}:\s*(\S+)', text, re.MULTILINE)
+    return bool(m) and m.group(1).strip().strip('"').lower() in _TRUTHY
+
+
+def doc_lock_reason(doc_text: str | None) -> str | None:
+    """Why this specific document is frozen, or None. Document-scoped only."""
+    if doc_text and _frontmatter_bool(doc_text, "updated_by_hand"):
+        return "hand-edited"
+    return None
+
+
+def job_lock_reason(base: str, match_dir: Path) -> str | None:
+    """Why this JOB is frozen, or None — read from its match report.
+
+    Independent of whether a CV/CL exists yet, so an expired posting is refused
+    a first document as firmly as it is refused a rewrite.
+    """
+    report = match_dir / f"{base}.md"
+    if not report.exists():
+        return None
+    try:
+        fm = report.read_text(encoding="utf-8")
+    except OSError:
+        return None  # unreadable report is not evidence of a lock
+    if _frontmatter_bool(fm, "applied"):
+        return "applied"
+    if _frontmatter_bool(fm, "expired"):
+        return "expired"
+    return None
+
+
+def lock_reason(base: str, doc_text: str | None, match_dir: Path) -> str | None:
+    """Why base's CV/CL must not be regenerated, patched, or reviewed."""
+    return doc_lock_reason(doc_text) or job_lock_reason(base, match_dir)
+
+
+def is_locked(base: str, doc_text: str | None, match_dir: Path) -> bool:
+    """True when base's CV/CL must not be regenerated, patched, or reviewed."""
+    return lock_reason(base, doc_text, match_dir) is not None
+
+
+def pair_lock_reason(base: str, docs, match_dir: Path) -> str | None:
+    """lock_reason for a CV/CL pair — a lock on either half freezes both.
+
+    Rebuilding only the unlocked half is precisely the CV/CL drift the paired
+    rebuild exists to prevent, so the pair moves together or not at all.
+    `docs` are the pair's paths; ones not yet on disk are simply skipped, which
+    still leaves the job-scoped locks to answer for them.
+    """
+    for p in docs:
+        try:
+            if p.exists():
+                reason = doc_lock_reason(p.read_text(encoding="utf-8"))
+                if reason:
+                    return reason
+        except OSError:
+            continue
+    return job_lock_reason(base, match_dir)

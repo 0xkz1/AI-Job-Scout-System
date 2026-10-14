@@ -4,7 +4,7 @@ Written after _load_review_facts() replaced a 2500-char persona slice with the
 full persona + every career/cv/projects entry: existing reviews were produced
 against that starved evidence base and wrongly flagged substantiated claims
 (e.g. "systems-level approach to UX and UI", evidenced by portfolio_website.md
-and feral-research-living-archive.md) as fabrication. Those stale verdicts stay
+and taifunome-research-platform.md) as fabrication. Those stale verdicts stay
 on disk until the documents are reviewed again.
 
 Checkpoint-free by nature — run_review() writes each review file as it goes, so
@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import yaml  # noqa: E402
+import gen_version  # noqa: E402
 from filter import passes_filter  # noqa: E402
 from matcher import make_safe_name  # noqa: E402
 from reviewer import REVIEWS_DIR, run_review, _extract_score  # noqa: E402
@@ -32,6 +33,7 @@ from reviewer import REVIEWS_DIR, run_review, _extract_score  # noqa: E402
 ANALYZED = ROOT / "10_output" / "_analyzed.json"
 CV_DIR = ROOT / "10_output" / "10_cvs"
 CL_DIR = ROOT / "10_output" / "10_cover-letters"
+MATCH_DIR = ROOT / "10_output" / "00_matches"
 
 
 def main():
@@ -56,7 +58,8 @@ def main():
     config = yaml.safe_load((ROOT / "config.yaml").read_text()) or {}
     from selection import ranked_jobs, select_top
     if args.limit is not None:
-        top = ranked_jobs(config)[:args.limit]
+        from local_jobs import local_job_role
+        top = [j for j in ranked_jobs(config) if not local_job_role(j.get("title", ""), config)][:args.limit]
         scope = f"上位{args.limit}求人"
     else:
         top = select_top("review", config, percent=args.percent)
@@ -71,6 +74,7 @@ def main():
     kinds = ["CV", "CL"] if args.kind == "both" else [args.kind]
     todo = []
     skipped_reviewed = 0
+    skipped_locked = 0
     for job in top:
         base = make_safe_name(job.get("company", ""), job.get("title", ""))
         if only is not None and base not in only:
@@ -80,6 +84,12 @@ def main():
             p = d / f"{base}_{kind}.md"
             if not p.exists():
                 continue
+            # Locked (hand-edited / applied / expired): run_review writes a
+            # backlink into the document, and a fresh verdict on a submitted or
+            # closed application is advice that can no longer be taken.
+            if gen_version.is_locked(base, p.read_text(encoding="utf-8"), MATCH_DIR):
+                skipped_locked += 1
+                continue
             if args.new_only and (REVIEWS_DIR / f"{p.stem}_review.md").exists():
                 skipped_reviewed += 1
                 continue
@@ -87,7 +97,8 @@ def main():
 
     print(f"[{time.strftime('%H:%M:%S')}] 再レビュー対象: {len(todo)}件 "
           f"({scope} / {args.kind})"
-          + (f" / 既レビューをスキップ: {skipped_reviewed}件" if args.new_only else ""),
+          + (f" / 既レビューをスキップ: {skipped_reviewed}件" if args.new_only else "")
+          + (f" / ロック済みをスキップ: {skipped_locked}件" if skipped_locked else ""),
           flush=True)
 
     done = failed = 0

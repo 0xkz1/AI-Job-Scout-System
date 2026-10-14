@@ -28,6 +28,22 @@ def sanitize_filename(text: str, max_len: int = 80) -> str:
     return safe[:max_len]
 
 
+def _search_url(keyword: str, page: int = 1) -> str:
+    """The Guardian Jobs search URL for one keyword, at one results page.
+
+    Split out because the parameter name is the whole defect: this board accepts
+    `keywords` and silently ignores `q`, so the scraper spent 65 nights fetching
+    the front page of /jobs/ under every one of its 81 keyword/location pairs.
+    Nothing in the output said so -- it returned a full page of rows every time.
+
+    Later pages are a path segment, /jobs/2/?keywords=... (measured 2026-09-26:
+    twenty rows sharing none with page 1 or with the unfiltered /jobs/2/).
+    ?keywords=...&page=2 returns no rows at all.
+    """
+    prefix = "https://jobs.theguardian.com/jobs/" + (f"{page}/" if page > 1 else "")
+    return f"{prefix}?keywords={quote_plus(keyword)}"
+
+
 async def _extract_guardian_jobs(page) -> list[dict]:
     """Extract job listings from the current Guardian Jobs search results page."""
     try:
@@ -158,19 +174,33 @@ async def scrape_guardian(
     jobs = []
     seen_urls = set()
 
-    # Build search URL
-    kw_q = quote_plus(keyword)
-    loc_q = quote_plus(location) if location else ""
-    if loc_q:
-        search_url = f"https://jobs.theguardian.com/jobs/?q={kw_q}&location={loc_q}"
-    else:
-        search_url = f"https://jobs.theguardian.com/jobs/?q={kw_q}"
+    # Build search URL.
+    #
+    # The parameter is `keywords`, not `q`. Measured 2026-09-24: ?q=graphic+designer
+    # and ?q=nurse and ?q=accountant all return the same twenty listings, which are
+    # simply the front page of /jobs/ — "Examinations Officer (Dental)", "Director of
+    # Finance", "Chief Executive". Across 65 nights and 2,233 searches this board
+    # returned exactly 60 or exactly 100 rows every single time and never zero,
+    # because 60 is three pages of twenty and the query was never applied.
+    # ?keywords=zzqqxxnonsenseword returns 0 and ?keywords=nurse returns 9 nursing
+    # posts, so this one filters.
+    #
+    # `location` is dropped rather than renamed: location=, Location=,
+    # locationsearch= and radialsearch= were each measured against a fixed keyword
+    # and all four returned results identical to sending no location at all. The
+    # board has no URL-reachable location filter, so passing one only reads as if
+    # it were doing something.
+    search_url = _search_url(keyword)
 
     if not playwright_instance:
         raise ValueError("playwright_instance is required — call from scrape_guardian_all")
 
     p = playwright_instance
     browser = await p.chromium.launch(
+        # Always headless. The nightly inherits DISPLAY (:20) from the desktop
+        # session that started the scheduler while no X server listens there, so
+        # a headed launch died on 2026-10-10..13 and keying on DISPLAY does not
+        # help. Only Indeed needs a headed browser, and it gets xvfb-run.
         headless=True,
         args=[
             "--disable-blink-features=AutomationControlled",
@@ -228,18 +258,24 @@ async def scrape_guardian(
         if page_num >= max_pages:
             break
 
-        next_url = None
-        # Guardian uses numbered pagination: /jobs/2/, /jobs/3/, ...
         current_page_num = page_num + 1
-        next_url = f"https://jobs.theguardian.com/jobs/{current_page_num}/?q={kw_q}"
-        if loc_q:
-            next_url += f"&location={loc_q}"
+        next_url = _search_url(keyword, current_page_num)
         try:
             await page.goto(next_url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
         except Exception:
             print(f"  ⚠ Could not navigate to page {current_page_num}.")
             break
+
+    # Gate on the title and the listing's own snippet before paying ~4s a detail
+    # page. `keywords=` is a full-text match, so a working search returns mostly
+    # postings that only mention a keyword somewhere in the body: measured
+    # 2026-09-27, 503 postings for 10 keywords, 494 uncached — ~2,080s against the
+    # 1,500s cap — and 4 of the 503 titles held a configured keyword. The one
+    # posting of the 61 staged on 2026-09-28 to reach composite 0.70 (Interaction
+    # Designer, 0.76) passes this gate.
+    from scraper_indeed import filter_jobs_by_keywords
+    jobs = filter_jobs_by_keywords(jobs, (config or {}).get("keywords", []))
 
     # --- Fetch full descriptions from detail pages ---
     if jobs:
@@ -265,20 +301,27 @@ async def scrape_guardian_all(config: dict) -> list[dict]:
     seen = set()
     cache = load_description_cache()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("guardian", config)
 
+    # One search per keyword, not per (keyword, location). Location does not reach
+    # this board at all (see scrape_guardian), so the five locations behind each
+    # keyword were five identical requests — 18 searches a night for 549 seconds,
+    # yielding 2 new postings.
+    searched: set[str] = set()
+
     async with async_playwright() as p:
-        for kw in keywords:
-            for loc in locations:
-                jobs = await scrape_guardian(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
-                for j in jobs:
-                    dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
-                    if dedup_key not in seen:
-                        seen.add(dedup_key)
-                        all_jobs.append(j)
+        for kw, loc in search_pairs(config):
+            if kw in searched:
+                continue
+            searched.add(kw)
+            jobs = await scrape_guardian(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
+            for j in jobs:
+                dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    all_jobs.append(j)
 
     # --- Filter by keywords ---
     from scraper_indeed import filter_jobs_by_keywords

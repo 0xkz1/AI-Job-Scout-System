@@ -142,21 +142,59 @@ def test_thin_check_does_not_delegate_to_the_code_it_tests(monkeypatch, config):
     assert invariants.check_unscoreable_excluded(config)
 
 
-def test_colliding_document_paths_are_reported(monkeypatch, config):
-    """Two selected entries sharing make_safe_name share one CV/CL/review path."""
+def test_colliding_document_paths_in_the_generation_set_are_reported(monkeypatch,
+                                                                    config):
+    """Two selected entries sharing make_safe_name share one CV/CL/review path, so
+    the file on disk comes from whichever was written last."""
     import selection
 
     dupe = _job(title="Geotechnical Design Engineer", company="Penguin")
     monkeypatch.setattr(selection, "ranked_jobs",
                         lambda c=None, jobs=None: [dupe, dict(dupe)])
+    monkeypatch.setattr(selection, "select_top",
+                        lambda stage, c=None, jobs=None: [dupe, dict(dupe)])
     found = invariants.check_one_entry_per_document_path(config)
-    assert found and "more than one selected job" in found[0]
+    assert found and "written twice by the generation set" in found[0]
+
+
+def test_a_collision_below_the_generation_cutoff_is_distinguished(monkeypatch, config):
+    """Truncation collisions are common — make_safe_name cuts the title at 50 chars,
+    so an "- Examiner" and "- Moderator" pair collapse to one name — and 322 of 1895
+    rows truncate at all. Only a collision that reaches generation loses data, so the
+    two cases must not read the same or the fix looks like renaming 145 files."""
+    import selection
+
+    examiner = _job(title="BTEC Tech Awards Sept 22 - Creative Media Production - "
+                          "Examiner", company="Pearson")
+    moderator = dict(examiner, title="BTEC Tech Awards Sept 22 - Creative Media "
+                                     "Production - Moderator")
+    monkeypatch.setattr(selection, "ranked_jobs",
+                        lambda c=None, jobs=None: [examiner, moderator])
+    monkeypatch.setattr(selection, "select_top", lambda stage, c=None, jobs=None: [])
+    found = invariants.check_one_entry_per_document_path(config)
+    assert len(found) == 1
+    assert "below the generation cutoff" in found[0]
+    assert "Nothing is overwritten today" in found[0]
+
+
+def test_the_two_collision_cases_are_not_double_counted(monkeypatch, config):
+    """A generation-set collision is also a ranked collision. Reporting it twice
+    would inflate the count and hide how many are merely latent."""
+    import selection
+
+    dupe = _job(title="Geotechnical Design Engineer", company="Penguin")
+    pair = [dupe, dict(dupe)]
+    monkeypatch.setattr(selection, "ranked_jobs", lambda c=None, jobs=None: pair)
+    monkeypatch.setattr(selection, "select_top", lambda stage, c=None, jobs=None: pair)
+    assert len(invariants.check_one_entry_per_document_path(config)) == 1
 
 
 def test_distinct_document_paths_are_silent(monkeypatch, config):
     import selection
 
     monkeypatch.setattr(selection, "ranked_jobs", lambda c=None, jobs=None: _spread())
+    monkeypatch.setattr(selection, "select_top",
+                       lambda stage, c=None, jobs=None: _spread())
     assert invariants.check_one_entry_per_document_path(config) == []
 
 
@@ -214,15 +252,54 @@ def _scrape_config(searches, sites=("reed",)):
 
 
 def test_search_count_that_exceeds_the_cron_timeout_is_reported():
-    """reed measured 68s per search, so 63 searches needs ~4300s of a 1500s cap."""
+    """reed measured 58.6s per search at depth 3, so 63 searches needs ~3700s
+    of a 1500s cap."""
     found = invariants.check_scrape_fits_its_timeout(_scrape_config(63))
     assert len(found) == 1
     assert "exit 124" in found[0]
 
 
 def test_search_count_within_the_cron_timeout_is_silent():
-    """At 68s per search, 1500s affords 22 — 20 must pass."""
+    """At 58.6s per search, 1500s affords 25 — 20 must pass."""
     assert invariants.check_scrape_fits_its_timeout(_scrape_config(20)) == []
+
+
+def test_reeds_real_nightly_shape_fits_only_because_of_its_raised_cap():
+    """The regression this check missed for five nights, and its fix.
+
+    reed runs 36 searches at depth 3 = ~2110s. On the old figure — 68s measured
+    at depth 6, halved to 34s by the linear scaling — that came to 1224s and
+    passed against the shared 1500s cap, while reed was in fact killed at 1500s
+    every night. It fits now only because the nightly gives reed its own 2200s;
+    on the shared cap the same run is still over. Both halves are pinned, so
+    dropping the override or restoring the old rate fails loudly.
+    """
+    assert invariants.check_scrape_fits_its_timeout(_scrape_config(36)) == []
+    assert invariants._site_timeout("reed") == 2200
+    assert invariants._site_timeout("reed") > invariants.SITE_TIMEOUT_SECONDS
+
+    rate, depth = invariants._SECONDS_PER_SEARCH["reed"]
+    assert 36 * rate * (3 / depth) > invariants.SITE_TIMEOUT_SECONDS, (
+        "reed's measured run must still not fit the shared cap — if it does, "
+        "the rate has been lowered back towards the figure that hid this"
+    )
+
+
+def test_a_site_on_the_shared_cap_is_judged_against_it():
+    """The override must not leak: guardian has no entry, so it is still judged
+    against SITE_TIMEOUT_SECONDS."""
+    assert invariants._site_timeout("guardian") == invariants.SITE_TIMEOUT_SECONDS
+    found = invariants.check_scrape_fits_its_timeout(
+        _scrape_config(100, sites=("guardian",)))
+    assert found and f"{invariants.SITE_TIMEOUT_SECONDS}s cron" in found[0]
+
+
+def test_the_remedy_does_not_point_at_the_description_fetch_alone():
+    """Measured on the same run: 648 descriptions (~648s) against ~1460s of page
+    walking. Concurrency on the fetch takes 2110s to ~1590s — still over the cap
+    — so advice naming it as THE cost sends the reader at the smaller half."""
+    found = invariants.check_scrape_fits_its_timeout(_scrape_config(63))
+    assert "NOT enough on its own" in found[0]
 
 
 def test_unmeasured_site_is_not_judged():
@@ -238,10 +315,24 @@ def test_api_only_site_is_not_charged_for_page_walking():
         _scrape_config(63, sites=("remote_apis",))) == []
 
 
-def _analyzed(monkeypatch, tmp_path, jobs):
+def _analyzed(monkeypatch, tmp_path, jobs, yields=None, statuses=None):
+    """Point the check at a synthetic database and, with it, the two nightly
+    histories it now consults. They are pointed at tmp_path unconditionally:
+    left on the real files, a test asserting the stale-selector wording would
+    pass or fail on whatever last night happened to record."""
+    import json
+
     db = tmp_path / "a.json"
-    db.write_text(__import__("json").dumps(jobs))
+    db.write_text(json.dumps(jobs))
     monkeypatch.setattr(invariants, "ANALYZED", db)
+
+    yield_file = tmp_path / "yields.json"
+    yield_file.write_text(json.dumps(yields or {}))
+    monkeypatch.setattr(invariants, "YIELD_HISTORY", yield_file)
+
+    status_file = tmp_path / "statuses.json"
+    status_file.write_text(json.dumps(statuses or {}))
+    monkeypatch.setattr(invariants, "STATUS_HISTORY", status_file)
 
 
 def test_silent_site_is_reported(monkeypatch, tmp_path):
@@ -276,7 +367,7 @@ def test_site_with_no_jobs_yet_is_reported_without_asserting_a_fault(monkeypatch
 
 
 def test_site_reporting_under_alias_sources_counts_as_yielding(monkeypatch, tmp_path):
-    """remote_apis tags jobs 'remotive'/'remoteok'/'arbeitnow', so matching on the
+    """remote_apis tags jobs 'remotive'/'arbeitnow', so matching on the
     site name alone would call a working scraper silent."""
     from datetime import date
 
@@ -284,6 +375,68 @@ def test_site_reporting_under_alias_sources_counts_as_yielding(monkeypatch, tmp_
     _analyzed(monkeypatch, tmp_path,
               [{"source": "remotive", "scraped_at": f"{today}T05:00:00Z", "match": {}}])
     assert invariants.check_every_site_still_yields({"sites": ["remote_apis"]}) == []
+
+
+def test_saturated_board_is_not_reported_as_a_stale_selector(monkeypatch, tmp_path):
+    """guardian yields the same 2-4 jobs for weeks. No NEW row for days is what
+    a small board looks like when it is working, and calling that a stale
+    selector sends the reader to debug a scraper that is fine."""
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=9)).isoformat()
+    _analyzed(monkeypatch, tmp_path,
+              [{"source": "guardian", "scraped_at": f"{old}T05:00:00Z", "match": {}}],
+              yields={"guardian": [3, 2, 2, 2, 3]},
+              statuses={"guardian": ["ok", "ok", "ok", "ok"]})
+    found = invariants.check_every_site_still_yields({"sites": ["guardian"]})
+    assert found
+    assert "saturated" in found[0]
+    assert "stale selector" not in found[0]
+
+
+def test_site_returning_nothing_is_still_reported_as_a_stale_selector(monkeypatch, tmp_path):
+    """The original adzuna case must survive the yield-history branch: the
+    scraper completed and extracted zero, which is the selector fault."""
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=13)).isoformat()
+    _analyzed(monkeypatch, tmp_path,
+              [{"source": "adzuna", "scraped_at": f"{old}T05:00:00Z", "match": {}}],
+              yields={"adzuna": [0, 0, 0, 0, 0]},
+              statuses={"adzuna": ["ok", "ok", "ok", "ok"]})
+    found = invariants.check_every_site_still_yields({"sites": ["adzuna"]})
+    assert found and "stale selector" in found[0]
+
+
+def test_site_that_never_finishes_is_reported_as_a_budget_fault(monkeypatch, tmp_path):
+    """reed was killed at its 1500s timeout four nights running. Its yield
+    history still held the healthy counts from the last night it completed and
+    carries no dates, so on that alone it read as a saturated board. The status
+    history is what knows, and it must outrank the yield reading."""
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=6)).isoformat()
+    _analyzed(monkeypatch, tmp_path,
+              [{"source": "reed", "scraped_at": f"{old}T05:00:00Z", "match": {}}],
+              yields={"reed": [156, 155, 159, 163, 167]},
+              statuses={"reed": ["timeout", "timeout", "timeout", "timeout"]})
+    found = invariants.check_every_site_still_yields({"sites": ["reed"]})
+    assert found
+    assert "not completed a run" in found[0]
+    assert "saturated" not in found[0]
+    assert "stale selector" not in found[0]
+
+
+def test_missing_histories_fall_back_to_the_stale_selector_reading(monkeypatch, tmp_path):
+    """No recorded history is no evidence, not evidence of health — the check
+    must still report a silent site rather than swallow it."""
+    from datetime import date, timedelta
+
+    old = (date.today() - timedelta(days=13)).isoformat()
+    _analyzed(monkeypatch, tmp_path,
+              [{"source": "adzuna", "scraped_at": f"{old}T05:00:00Z", "match": {}}])
+    found = invariants.check_every_site_still_yields({"sites": ["adzuna"]})
+    assert found and "stale selector" in found[0]
 
 
 def test_truncated_summaries_in_the_top_band_are_reported(monkeypatch, tmp_path):
@@ -311,20 +464,31 @@ def test_full_descriptions_in_the_top_band_are_silent(monkeypatch, tmp_path):
         {"generation_top_percent": 30, "review_top_percent": 30}) == []
 
 
-def test_truncated_summaries_really_do_outscore_full_text():
+def test_truncated_summaries_do_not_quietly_outscore_full_text():
     """The measurement the exclusion rests on, asserted against the live DB.
 
-    A 500-char summary scoring HIGHER than a full description is counter-intuitive
-    enough that it needs guarding: if it ever reverses, excluding these from ranking
-    stops being justified and this test should fail loudly rather than let the
-    exclusion persist on a stale premise. Skipped when the DB has too few of either
-    kind to compare.
+    Written when a 500-char summary scored 0.440 against a full description's
+    0.340 — counter-intuitive enough to guard, since the exclusion was justified
+    by that gap. It asserted the gap stayed open.
+
+    It no longer is, and the cause was not the excerpts. scikit-learn was absent
+    from the venv, so the TF-IDF fallback returned a flat 0.50 for every job the
+    LLM path did not cover; installing it and recalibrating moved the truncated
+    cohort 0.450 -> 0.336 while full text held at 0.354. Across seven DB
+    snapshots the gap closes at that change and nowhere else.
+
+    So the direction is no longer the thing to pin — the exclusion now rests on
+    the mechanism (an excerpt cannot state what a job requires), and what needs
+    guarding is the opposite failure: summaries running away again, which is
+    what a second dead-constant regression would look like. A margin of a few
+    points either way is noise and must not fail; a large edge to the summaries
+    is the alarm.
     """
     import json
     import statistics
 
     from filter import passes_filter
-    from selection import _dedupe, is_unscoreable, load_config
+    from selection import _dedupe, load_config
 
     if not invariants.ANALYZED.exists():
         pytest.skip("no live DB")
@@ -332,13 +496,18 @@ def test_truncated_summaries_really_do_outscore_full_text():
     pool = [j for j in _dedupe(json.loads(invariants.ANALYZED.read_text(encoding="utf-8")))
             if j.get("match") and passes_filter(j, config)[0]]
     trunc = [j["match"]["composite_score"] for j in pool if j.get("description_truncated")]
-    full = [j["match"]["composite_score"] for j in pool if not is_unscoreable(j)]
+    # Not `not is_unscoreable(j)` — that helper excludes truncated jobs itself,
+    # so the two sets were never each other's complement.
+    full = [j["match"]["composite_score"] for j in pool if not j.get("description_truncated")]
     if len(trunc) < 30 or len(full) < 30:
         pytest.skip("not enough of each kind to compare")
-    assert statistics.mean(trunc) > statistics.mean(full), (
-        f"summaries no longer outscore full text (summary {statistics.mean(trunc):.3f} "
-        f"vs full {statistics.mean(full):.3f}) — re-examine whether they still need "
-        f"holding out of the ranking"
+    edge = statistics.mean(trunc) - statistics.mean(full)
+    assert edge < 0.05, (
+        f"truncated summaries outscore full descriptions by {edge:+.3f} "
+        f"(summary {statistics.mean(trunc):.3f} vs full {statistics.mean(full):.3f}). "
+        f"That is the shape of a scoring path returning a constant for jobs it "
+        f"cannot read — check SKLEARN_AVAILABLE and the LLM context path before "
+        f"trusting any ranking built on this."
     )
 
 
@@ -362,3 +531,86 @@ def test_a_broken_check_is_reported_not_raised(monkeypatch, config):
     monkeypatch.setattr(invariants, "CHECKS", (boom,))
     found = invariants.run_all(config)
     assert found and "could not run" in found[0]
+
+
+# --- check_configured_sites_are_scheduled ---
+# linkedin sat in `sites` for six days without a run_site line in the cron script,
+# so it was never invoked at all. check_every_site_still_yields did fire, but its
+# wording sends you to audit a scraper that is fine — the script lives in a separate
+# dotfiles repo, so nothing here could see the real cause.
+
+def _script(tmp_path, body):
+    path = tmp_path / "job_scout_nightly.sh"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_site_missing_from_the_cron_script_is_reported(monkeypatch, config, tmp_path):
+    config["sites"] = ["reed", "linkedin"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site reed\n"))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("never run by" in v and "linkedin" in v for v in violations)
+
+
+def test_a_fully_scheduled_config_is_silent(monkeypatch, config, tmp_path):
+    config["sites"] = ["reed", "indeed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site indeed --headless\nrun_site reed\n"))
+    assert invariants.check_configured_sites_are_scheduled(config) == []
+
+
+def test_site_scheduled_but_not_configured_is_reported(monkeypatch, config, tmp_path):
+    """The reverse drift: its jobs reach the database while every per-site budget
+    and check here skips it."""
+    config["sites"] = ["reed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT",
+                        _script(tmp_path, "run_site reed\nrun_site adzuna\n"))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("absent from `sites`" in v and "adzuna" in v for v in violations)
+
+
+def test_the_function_definition_is_not_read_as_an_invocation(monkeypatch, config,
+                                                              tmp_path):
+    """`run_site() {` and commented examples must not count as scheduling anything,
+    or the check passes for a script that runs nothing at all."""
+    config["sites"] = ["reed"]
+    body = "run_site() {\n  timeout 1500 python run.py --site \"$1\"\n}\n# run_site reed\n"
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT", _script(tmp_path, body))
+    violations = invariants.check_configured_sites_are_scheduled(config)
+    assert any("never run by" in v and "reed" in v for v in violations)
+
+
+def test_a_missing_script_is_not_a_violation(monkeypatch, config, tmp_path):
+    """The path is environment-specific; absence is not evidence of drift."""
+    config["sites"] = ["reed"]
+    monkeypatch.setattr(invariants, "NIGHTLY_SCRIPT", tmp_path / "absent.sh")
+    assert invariants.check_configured_sites_are_scheduled(config) == []
+
+
+# --- selection.MIN_REVIEWABLE_DESC ---
+# is_unscoreable used < 100 while check_unscoreable_excluded used < 400, so a
+# 381-char "Motion Graphics Designer" passed selection and was then reported as a
+# violation by the check. The invariant must not call is_unscoreable (a check that
+# delegates to the code it verifies passes unconditionally), so the two constants
+# have to be kept equal deliberately.
+
+def test_the_selection_floor_matches_the_invariant_floor():
+    import selection
+
+    assert selection.MIN_REVIEWABLE_DESC == invariants.MIN_REVIEWABLE_DESC
+
+
+def test_a_description_between_the_two_old_thresholds_is_unscoreable():
+    """381 chars is the real case. Under the old floor of 100 it reached both the
+    generation and the review set, where the reviewer invents a rubric from the
+    title."""
+    import selection
+
+    assert selection.is_unscoreable({"description": "Design motion graphics. " * 16})
+
+
+def test_a_description_above_the_floor_is_scoreable():
+    import selection
+
+    assert not selection.is_unscoreable({"description": "A real posting. " * 60})

@@ -6,9 +6,14 @@ recompute_skill_scores.py then fixes _analyzed.json but never touches the .md,
 which is what Obsidian/Dataview actually read. Without this step the nightly
 silently shows pre-coverage numbers.
 
-cv/cover_letter/route/saved_at are read back off the existing file and fed to the
-renderer, so only score-derived frontmatter and the body change. Files whose
-content would be byte-identical are left alone (no vault churn).
+A report whose job is ticked applied or expired is skipped outright: those
+locks exist so a submitted application's record stops moving, and this script
+rewrites the very file the lock flag is read from.
+
+For the rest, cv/cover_letter/route/saved_at/expired/applied and the carried
+cv_pdf/cl_pdf/cv_review/cl_review lines are read back off the existing file and
+fed to the renderer, so only score-derived frontmatter and the body change.
+Files whose content would be byte-identical are left alone (no vault churn).
 
 DRY-RUN by default; pass --apply to write.
 """
@@ -21,10 +26,17 @@ from pathlib import Path
 JIS = Path(__file__).resolve().parent
 sys.path.insert(0, str(JIS))
 
-from matcher import generate_match_report  # noqa: E402
+import gen_version  # noqa: E402
+from matcher import (  # noqa: E402
+    generate_match_report, read_expired_flag, read_applied_flag,
+    read_carried_properties,
+)
 from scraper_url_list import normalize_url  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 MATCH_DIR = JIS / "10_output" / "00_matches"
+CV_DIR = JIS / "10_output" / "10_cvs"
+CL_DIR = JIS / "10_output" / "10_cover-letters"
 DB_PATH = JIS / "10_output" / "_analyzed.json"
 
 APPLY = "--apply" in sys.argv
@@ -50,7 +62,30 @@ def wikilink_to_filename(val: str) -> str | None:
     return (m.group(1) + ".md") if m else None
 
 
+def _document_on_disk(base: str, kind: str) -> str | None:
+    """The CV or cover letter this report should link, when its own frontmatter
+    does not name one.
+
+    The links are otherwise carried forward from the file being rewritten, and
+    nothing ever puts one there after the fact — so a document generated AFTER
+    its match report was last written stays invisible in the only file a human
+    reads. Measured 2026-08-27: 69 reports had a CV on disk and no link to it,
+    70 had a cover letter, several of them carrying a review score for the
+    document they did not link. Lothian Buses' Junior Digital Designer showed
+    `cv_review_score: 58` above no CV at all.
+
+    Only ever ADDS a link, and only to a file that exists under this report's
+    own base name — the same company+title convention every stage uses. An
+    existing link always wins, so a hand-corrected one is never overwritten.
+    """
+    directory, suffix = (CV_DIR, "_CV.md") if kind == "CV" else (CL_DIR, "_CL.md")
+    name = f"{base}{suffix}"
+    return name if (directory / name).exists() else None
+
+
 def main():
+    from selection import load_config
+    config = load_config()
     db = json.loads(DB_PATH.read_text())
     by_url, by_title = {}, {}
     for job in db:
@@ -62,13 +97,24 @@ def main():
         key = (job.get("title", ""), job.get("company", ""))
         by_title[key] = job
 
-    files = sorted(p for p in MATCH_DIR.glob("*.md") if p.is_file())
-    matched, unmatched, changed, unchanged = 0, [], 0, 0
+    files = md_files(MATCH_DIR)
+    matched, unmatched, changed, unchanged, locked = 0, [], 0, 0, 0
     sample_shown = False
 
     for path in files:
         text = path.read_text(encoding="utf-8")
         fm = parse_frontmatter(text)
+
+        # A job ticked applied or expired is frozen — see gen_version's lock
+        # rationale: once applied to, "the files on disk ARE the record of what
+        # was actually submitted. They must stop moving." Those locks were
+        # written to guard the CV/CL, and nothing guarded the match report that
+        # the lock flag is itself read from. Re-rendering it moves the record of
+        # a submitted application (and, before the flags were passed through
+        # below, silently cleared the tick as well).
+        if gen_version.job_lock_reason(path.stem, MATCH_DIR):
+            locked += 1
+            continue
         url = fm.get("url", "")
         job = by_url.get(normalize_url(url)) if url else None
         if job is None:
@@ -90,15 +136,28 @@ def main():
         if fm.get("type"):
             job["type"] = fm["type"]
 
-        cv = wikilink_to_filename(fm.get("cv", ""))
-        cl = wikilink_to_filename(fm.get("cover_letter", ""))
+        cv = wikilink_to_filename(fm.get("cv", "")) or _document_on_disk(path.stem, "CV")
+        cl = wikilink_to_filename(fm.get("cover_letter", "")) or _document_on_disk(path.stem, "CL")
 
         match = dict(job["match"])
         # Preserve the description-missing banner if the old file had it.
         if "> **⚠️ 求人説明文が取得できませんでした" in text:
             match["description_missing"] = True
 
-        new_text = generate_match_report(job, match, cv, cl)
+        # generate_match_report's own docstring warns that every caller must
+        # pass expired/applied through, or a rewrite silently resets both to
+        # false — save_match_report does this correctly by reading the flags
+        # off the file it is about to overwrite. This function did not, and on
+        # 2026-08-06 that reset applied/expired on every report whose content
+        # had changed, wiping hand-ticked checkboxes for jobs already applied
+        # to. `carried` (cv_pdf/cl_pdf/cv_review/cl_review) was missing the
+        # same way and lost the same night.
+        new_text = generate_match_report(
+            job, match, cv, cl,
+            expired=read_expired_flag(path),
+            applied=read_applied_flag(path),
+            carried=read_carried_properties(path), config=config,
+        )
         # Preserve the original file's trailing-newline convention so a pure
         # newline delta never counts as a change (avoids churning 589 files
         # in the vault for a 1-byte difference).
@@ -127,7 +186,7 @@ def main():
             path.write_text(new_text, encoding="utf-8")
 
     print(f"files={len(files)} matched={matched} unmatched={len(unmatched)} "
-          f"changed={changed} unchanged={unchanged} apply={APPLY}")
+          f"changed={changed} unchanged={unchanged} locked={locked} apply={APPLY}")
     if unmatched:
         print(f"UNMATCHED ({len(unmatched)}) — left untouched:")
         for n in unmatched[:40]:

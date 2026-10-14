@@ -26,6 +26,7 @@ Usage:
   .venv/bin/python3 llm_context_backfill.py --force        # re-score everything
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -40,12 +41,15 @@ for k, v in dotenv_values(ROOT / ".env").items():
     if v:
         os.environ.setdefault(k, v)
 
+import yaml  # noqa: E402
 from matcher import (  # noqa: E402
     _ollama_context_score, _ollama_job_summary, _load_persona_summary,
-    translate_to_ja,
+    composite_weights, translate_to_ja,
 )
+from filter import passes_filter  # noqa: E402
 
 ANALYZED_PATH = ROOT / "10_output" / "_analyzed.json"
+CONFIG_PATH = ROOT / "config.yaml"
 CHECKPOINT_EVERY = 5
 # Only jobs at/above this composite get a Japanese translation of their
 # reasoning — matches the notify threshold, so exactly the jobs that surface
@@ -74,13 +78,21 @@ def _pseudo_description(job: dict) -> str:
     return ". ".join(p for p in parts if p)
 
 
-def _recompute(job: dict, ctx_score: float) -> None:
+def _recompute(job: dict, ctx_score: float, config: dict) -> None:
     """Rewrite composite + tier for a freshly LLM-scored job. Mirrors
     matcher.analyze_match: an LLM context source is allowed to reach the top
-    tier (unlike the TF-IDF fallback, which is capped there)."""
+    tier (unlike the TF-IDF fallback, which is capped there).
+
+    Weights come from the CONFIG, via matcher.composite_weights. They used to
+    come off the job — a snapshot of whatever was configured when it was last
+    fully scored — with a hard-coded fallback (skills 0.4, experience 0.25) that
+    matched neither the config nor DEFAULT_WEIGHTS. That is how a nightly pass
+    keeps scoring on superseded weights after config.yaml changes, and it is
+    what left Lloyds Banking Group's Software Engineer showing "Skills 20% |
+    Role Fit 64%" days after the 2026-08-24 reweighting."""
     m = job["match"]
-    w = m.get("weights") or {"skills": 0.4, "experience": 0.25,
-                             "location": 0.1, "salary": 0.05, "context": 0.2}
+    w = composite_weights(config)
+    m["weights"] = w
     composite = (
         m.get("skills", {}).get("score", 0) * w["skills"]
         + m.get("experience", {}).get("score", 0) * w["experience"]
@@ -105,6 +117,9 @@ def main():
                      help="score only the top N jobs by current composite")
     ap.add_argument("--force", action="store_true",
                      help="re-score even jobs already tagged context_source=llm")
+    ap.add_argument("--include-filtered", action="store_true",
+                     help="also score jobs the config filter rejects (normally skipped: "
+                          "they can never reach a CV or the notification)")
     args = ap.parse_args()
 
     try:
@@ -113,12 +128,30 @@ def main():
         print(f"❌ _analyzed.json を読めません: {e}")
         return 1
 
+    config = yaml.safe_load(CONFIG_PATH.read_text()) or {}
     persona = _load_persona_summary()
     if not persona:
         print("❌ persona summary が空 — 中断")
         return 1
 
+    # Rank only what could actually be acted on. Ranking by composite alone put
+    # the config's rejects at the front of the queue, because a rejected posting
+    # is usually rejected on its TITLE while scoring well on everything else:
+    # measured 2026-08-05, 85 of the top 250 (34%) fail passes_filter — "Senior
+    # Product Designer" at 0.85, "Lead Software Engineer" at 0.86, "Head of
+    # Marketing" at 0.84. None of them can reach a CV or the Telegram summary,
+    # which calls passes_filter itself, so a semantic re-read of them buys
+    # nothing. They matter more now than they used to: run.py deliberately
+    # leaves the rejects on a cheap TF-IDF context score, which is exactly the
+    # signature this pass looks for, so without this gate every night would
+    # re-buy the calls run.py just avoided.
     ranked = sorted(jobs, key=lambda j: j.get("match", {}).get("composite_score", 0), reverse=True)
+    if not args.include_filtered:
+        before = len(ranked)
+        ranked = [j for j in ranked if passes_filter(j, config)[0]]
+        if before != len(ranked):
+            print(f"  🚫 除外設定で {before - len(ranked)} 件をスキップ "
+                  f"(CVにも通知にも到達しないため)", flush=True)
     if args.limit:
         ranked = ranked[:args.limit]
 
@@ -140,7 +173,9 @@ def main():
         try:
             # brief: score gates filtering; the long bilingual reasoning is
             # added lazily only to the high-match reports that display it.
-            ctx = _ollama_context_score(desc, persona, brief=True)
+            from local_jobs import local_persona_extra
+            extra = local_persona_extra(job, config)
+            ctx = _ollama_context_score(desc, persona + extra, brief=True)
         except Exception as e:
             failed += 1
             print(f"  ✗ {job.get('company','?')[:25]}: {str(e)[:60]}", flush=True)
@@ -148,12 +183,15 @@ def main():
         if ctx is None:
             failed += 1
             continue
+        if extra:
+            job["match"]["local_persona_sha256"] = hashlib.sha256(extra.encode()).hexdigest()
+            job["match"]["context_persona_chars"] = len(persona + extra)
         job["match"]["context_score"] = ctx["score"]
         job["match"]["context_reasoning"] = ctx.get("reasoning", "")
         job["match"]["context_reasoning_en"] = ctx.get("reasoning_en", "")
         job["match"]["context_reasoning_ja"] = ctx.get("reasoning_ja", "")
         job["match"]["context_source"] = "llm"
-        _recompute(job, ctx["score"])
+        _recompute(job, ctx["score"], config)
         after = job["match"]["composite_score"]
         if after - before >= 0.05:
             promoted += 1

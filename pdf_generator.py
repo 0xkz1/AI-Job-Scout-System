@@ -1,304 +1,152 @@
 """
-PDF Generator — Markdown → HTML → PDF
-=====================================
-Converts tailored CV and Cover Letter Markdown files into polished PDFs.
+PDF Generator — CLI Entrypoint
+===============================
+Delegates rendering to app.py's live renderer (_convert_pdf_versioned) to guarantee
+all PDF outputs follow the latest layout, CSS rules, and versioning system.
 
 Usage:
     # Generate PDFs for all jobs above match threshold
     python3 pdf_generator.py
 
+    # Generate for a single note file
+    python3 pdf_generator.py --file "10_output/10_cvs/Wordsmith_AI_Product_Designer_CV.md"
+
     # Generate for a specific job
-    python3 pdf_generator.py --company "Opus 2" --title "Junior Software Engineer"
-
-    # Custom threshold (default: top 50%+ match score)
-    python3 pdf_generator.py --threshold 0.70
-
-Design:
-    - Clean, professional layout (A4, margins, serif body / sans-serif headings)
-    - Color palette: dark slate headings, muted accent line, black body text
-    - Portable: no external font deps (uses system fonts via WeasyPrint)
+    python3 pdf_generator.py --company "Wordsmith AI" --title "Product Designer"
 """
 
-import os
-import re
 import sys
-import json
 import argparse
 from pathlib import Path
-from datetime import date
-
-import markdown
-from weasyprint import HTML
-
-# ─────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
-OUTPUT_DIR = SCRIPT_DIR / "10_output"
-CV_DIR = OUTPUT_DIR / "10_cvs"
-CL_DIR = OUTPUT_DIR / "10_cover-letters"
-PDF_DIR = OUTPUT_DIR / "20_pdfs"
+sys.path.insert(0, str(SCRIPT_DIR))
 
-# ─────────────────────────────────────────────
-# CSS — Shared design system
-# ─────────────────────────────────────────────
-
-BASE_CSS = """
-@page {
-    size: A4;
-    margin: 18mm 18mm 16mm 18mm;
-    @bottom-center {
-        content: counter(page);
-        font-size: 9pt;
-        color: #999;
-    }
-}
-
-:root {
-    --heading-color: #2c3e50;
-    --accent-color: #4a90d9;
-    --body-color: #1a1a1a;
-    --muted-color: #666;
-    --border-color: #e0e0e0;
-}
-
-body {
-    font-family: "Georgia", "Times New Roman", serif;
-    font-size: 10.5pt;
-    line-height: 1.5;
-    color: var(--body-color);
-    margin: 0;
-    padding: 0;
-}
-
-h1 {
-    font-family: "Helvetica Neue", "Arial", sans-serif;
-    font-size: 18pt;
-    font-weight: 700;
-    color: var(--heading-color);
-    margin: 0 0 2pt 0;
-    padding-bottom: 4pt;
-    border-bottom: 2pt solid var(--heading-color);
-}
-
-h2 {
-    font-family: "Helvetica Neue", "Arial", sans-serif;
-    font-size: 11.5pt;
-    font-weight: 700;
-    color: var(--heading-color);
-    margin: 14pt 0 4pt 0;
-    padding-bottom: 2pt;
-    border-bottom: 0.5pt solid var(--border-color);
-    text-transform: uppercase;
-    letter-spacing: 0.5pt;
-}
-
-h3 {
-    font-family: "Helvetica Neue", "Arial", sans-serif;
-    font-size: 10.5pt;
-    font-weight: 600;
-    color: var(--accent-color);
-    margin: 8pt 0 3pt 0;
-}
-
-p {
-    margin: 0 0 6pt 0;
-    text-align: justify;
-}
-
-ul {
-    margin: 0 0 6pt 0;
-    padding-left: 16pt;
-}
-
-li {
-    margin-bottom: 2pt;
-    line-height: 1.45;
-}
-
-strong {
-    font-weight: 700;
-    color: var(--heading-color);
-}
-
-a {
-    color: var(--accent-color);
-    text-decoration: none;
-}
-
-hr {
-    border: none;
-    border-top: 0.5pt solid var(--border-color);
-    margin: 8pt 0;
-}
-
-/* CV-specific: first line (name) styling */
-body > p:first-of-type {
-    font-family: "Helvetica Neue", "Arial", sans-serif;
-    font-size: 20pt;
-    font-weight: 700;
-    color: var(--heading-color);
-    margin-bottom: 4pt;
-}
-
-/* Contact line (second paragraph) */
-body > p:nth-of-type(2) {
-    font-size: 9pt;
-    color: var(--muted-color);
-    margin-bottom: 10pt;
-}
-"""
-
-CL_CSS = BASE_CSS + """
-/* Cover letter overrides */
-body {
-    font-size: 11pt;
-    line-spacing: 1.55;
-}
-
-h1 {
-    display: none;  /* Cover letters don't use h1 */
-}
-
-p {
-    margin-bottom: 8pt;
-}
-
-/* Date + address block */
-body > p:nth-of-type(1),
-body > p:nth-of-type(2),
-body > p:nth-of-type(3),
-body > p:nth-of-type(4) {
-    font-size: 10pt;
-    color: var(--muted-color);
-    margin-bottom: 2pt;
-}
-"""
+from pdf_core import (
+    _convert_pdf_versioned,
+    PdfPageCountError,
+    OUTPUT_DIR,
+    CV_DIR,
+    CL_DIR,
+    PDF_DIR,
+)
+from matcher import canonical_company, make_safe_name
+import gen_version
 
 
-# ─────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────
+def _stale_guard(md_path: Path, force: bool) -> bool:
+    """Refuse to render a document whose body predates the current spec.
 
-def md_to_html(md_text: str, is_cover_letter: bool = False) -> str:
-    """Convert markdown text to styled HTML string."""
-    html_body = markdown.markdown(
-        md_text,
-        extensions=["extra", "nl2br"],
-    )
-    css = CL_CSS if is_cover_letter else BASE_CSS
-    return f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{css}</style></head><body>{html_body}</body></html>"
+    Rendering is faithful — it turns whatever markdown is on disk into a PDF —
+    so it cannot tell a current CV from one written before the shape changed.
+    That is how a three-page, pre-taifunome CV reached a finished PDF: the
+    markdown had been touched by a patch script, its mtime looked fresh, and
+    nothing between the file and the PDF asked whether the body was current.
 
+    Printed on stdout, not stderr: the Obsidian plugin runs this over ssh with
+    stderr discarded, and a refusal the user cannot read is just a failure.
 
-def generate_pdf(md_path: Path, output_pdf_path: Path, is_cover_letter: bool = False) -> bool:
-    """Convert a single Markdown file to PDF."""
+    Returns True when rendering may proceed.
+    """
     try:
-        md_text = md_path.read_text(encoding="utf-8")
-        if not md_text.strip():
-            return False
-        html = md_to_html(md_text, is_cover_letter=is_cover_letter)
-        HTML(string=html).write_pdf(str(output_pdf_path))
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return True  # unreadable here means unreadable to the renderer too; let it say so
+    reason = gen_version.staleness_reason(text, is_cv=md_path.stem.endswith("_CV"))
+    if not reason:
         return True
-    except Exception as e:
-        print(f"  ⚠ PDF error for {md_path.name}: {e}")
-        return False
+    if force:
+        print(f"⚠️ 古い型のまま出力します (--force): {reason}")
+        return True
+    base = md_path.stem.removesuffix("_CV").removesuffix("_CL")
+    print(f"🛑 古い型のため中止: {md_path.name}")
+    print(f"   {reason}")
+    print(f"   再生成: printf '{base}\\n' > /tmp/regen.txt && "
+          f".venv/bin/python3 regen_top_docs.py --only /tmp/regen.txt")
+    print("   このまま出力する場合は --force")
+    return False
 
-
-def find_matching_cv_cl(company: str = "", title: str = "") -> list[tuple[Path, Path | None]]:
-    """Find CV and optionally CL files matching company/title."""
-    if not company:
-        # Return all CVs
-        cvs = sorted(CV_DIR.glob("*_CV.md"))
-        return [(cv, _find_cl_for_cv(cv)) for cv in cvs]
-
-    # Search by company + title
-    safe_company = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
-    safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:50] if title else ""
-    pattern = f"{safe_company}_{safe_title}_CV.md" if safe_title else f"{safe_company}*CV.md"
-    cvs = sorted(CV_DIR.glob(pattern))
-    return [(cv, _find_cl_for_cv(cv)) for cv in cvs]
-
-
-def _find_cl_for_cv(cv_path: Path) -> Path | None:
-    """Find the matching cover letter file for a CV."""
-    stem = cv_path.stem.removesuffix("_CV")
-    cl_path = CL_DIR / f"{stem}_CL.md"
-    if cl_path.exists():
-        return cl_path
-    # Fallback: fuzzy match
-    cls = list(CL_DIR.glob(f"{stem[:20]}*CL.md"))
-    return cls[0] if cls else None
-
-
-# ─────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate PDFs from CV/CL Markdown files")
+    parser = argparse.ArgumentParser(description="Generate PDFs using the live system renderer.")
+    parser.add_argument("--file", default="", help="Path to specific Markdown file to convert")
     parser.add_argument("--company", default="", help="Filter by company name")
     parser.add_argument("--title", default="", help="Filter by job title")
     parser.add_argument("--threshold", type=float, default=0.0,
-                        help="Only generate PDFs for jobs with match score >= threshold (default: all)")
+                        help="Only generate PDFs for jobs with match score >= threshold")
     parser.add_argument("--cv-only", action="store_true", help="Skip cover letters")
+    parser.add_argument("--force", action="store_true",
+                        help="Render even when the document's body predates the current spec")
     args = parser.parse_args()
 
     PDF_DIR.mkdir(parents=True, exist_ok=True)
 
-    # If threshold specified, load analyzed data to filter
-    eligible_prefixes = None
-    if args.threshold > 0:
-        analyzed_path = OUTPUT_DIR / "_analyzed.json"
-        if not analyzed_path.exists():
-            print("⚠ No _analyzed.json found for threshold filtering. Generating all CVs.")
-        else:
-            with open(analyzed_path) as f:
-                analyzed = json.load(f)
-            eligible_prefixes = set()
-            for job in analyzed:
-                score = job.get("match", {}).get("composite_score", 0)
-                if score >= args.threshold:
-                    safe_c = re.sub(r"[^\w\s-]", "", job.get("company", "")).strip().replace(" ", "_")[:30]
-                    safe_t = re.sub(r"[^\w\s-]", "", job.get("title", "")).strip().replace(" ", "_")[:50]
-                    eligible_prefixes.add(f"{safe_c}_{safe_t}")
-            print(f"📋 Threshold {args.threshold:.0%}: {len(eligible_prefixes)} jobs eligible for PDF")
-
-    # Find CV/CL pairs
-    pairs = find_matching_cv_cl(args.company, args.title)
-
-    if eligible_prefixes is not None:
-        pairs = [(cv, cl) for cv, cl in pairs
-                 if any(cv.stem.startswith(p) for p in eligible_prefixes)]
-
-    if not pairs:
-        print("No matching CV/CL files found.")
+    # 1. Single File Mode
+    if args.file:
+        file_path = Path(args.file).resolve()
+        if not file_path.exists():
+            print(f"❌ File not found: {file_path}")
+            sys.exit(1)
+        if not _stale_guard(file_path, args.force):
+            sys.exit(2)
+        try:
+            pdf_path, version, is_new = _convert_pdf_versioned(file_path)
+        except PdfPageCountError as e:
+            # stdout, like _stale_guard: the Obsidian plugin runs this over ssh
+            # with stderr discarded, and a refusal the user cannot read is just
+            # a failure.
+            print(f"🛑 ページ数オーバー: {e}")
+            sys.exit(3)
+        status_str = "Minted new version" if is_new else "Reused existing version"
+        print(f"✅ [{status_str}] PDF v{version}: {pdf_path}")
         return
 
-    print(f"\n📄 Generating PDFs for {len(pairs)} job(s)...\n")
+    # 2. Batch Mode
+    cv_files = sorted(CV_DIR.glob("*_CV.md"))
+    if args.company:
+        if args.title:
+            prefix = make_safe_name(args.company, args.title)
+            cv_files = [f for f in cv_files if f.stem == f"{prefix}_CV"]
+        else:
+            safe_c = canonical_company(args.company)
+            cv_files = [f for f in cv_files if safe_c.lower() in f.name.lower()]
 
-    cv_count = 0
-    cl_count = 0
+    print(f"📄 Processing {len(cv_files)} CV(s) with live renderer...")
+    count = 0
+    skipped = 0
+    overlong = 0
+    for cv_path in cv_files:
+        if not _stale_guard(cv_path, args.force):
+            skipped += 1
+            continue
+        # Per document, not per batch: one CV that renders long must not take
+        # the other fifty down with it.
+        try:
+            pdf_path, version, is_new = _convert_pdf_versioned(cv_path)
+        except PdfPageCountError as e:
+            print(f"  🛑 CV: {e}")
+            overlong += 1
+            continue
+        print(f"  ✓ CV: {cv_path.name} -> v{version}")
+        count += 1
 
-    for cv_path, cl_path in pairs:
-        # Generate CV PDF
-        cv_pdf = PDF_DIR / cv_path.stem.replace("_CV", "") / cv_path.stem
-        cv_pdf.parent.mkdir(parents=True, exist_ok=True)
-        if generate_pdf(cv_path, cv_pdf, is_cover_letter=False):
-            print(f"  ✓ CV PDF: {cv_pdf.name}")
-            cv_count += 1
+        if not args.cv_only:
+            stem = cv_path.stem.removesuffix("_CV")
+            cl_path = CL_DIR / f"{stem}_CL.md"
+            if cl_path.exists() and _stale_guard(cl_path, args.force):
+                try:
+                    cl_pdf, cl_v, _ = _convert_pdf_versioned(cl_path)
+                except PdfPageCountError as e:
+                    print(f"  🛑 CL: {e}")
+                    overlong += 1
+                    continue
+                print(f"  ✓ CL: {cl_path.name} -> v{cl_v}")
 
-        # Generate CL PDF
-        if not args.cv_only and cl_path and cl_path.exists():
-            cl_pdf = cv_pdf.parent / cl_path.stem
-            if generate_pdf(cl_path, cl_pdf, is_cover_letter=True):
-                print(f"  ✓ CL PDF: {cl_pdf.name}")
-                cl_count += 1
-
-    print(f"\n{'='*40}")
-    print(f"✅ Generated {cv_count} CV PDFs, {cl_count} Cover Letter PDFs")
-    print(f"📁 Output: {PDF_DIR}/")
-    print(f"{'='*40}")
+    print(f"✅ Rendered {count} document set(s).")
+    if skipped:
+        print(f"🛑 Skipped {skipped} stale CV(s) — regenerate them, or pass --force.")
+    if overlong:
+        print(f"🛑 Refused {overlong} document(s) over their page budget — trim and re-run.")
 
 
 if __name__ == "__main__":

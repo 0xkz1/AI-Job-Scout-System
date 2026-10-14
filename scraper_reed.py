@@ -64,18 +64,31 @@ async def _extract_reed_jobs(page) -> list[dict]:
                 // Job URL
                 const url = titleEl.href || '';
 
-                // Company — in a link after "by" text, or in a company link
-                const companyEl = article.querySelector(
-                    'a[href*="/jobs/"]:not(h2 a), ' +
-                    'a[data-qa="job-card-company-link"], ' +
-                    'sectionheader a[href*="-jobs"], ' +
-                    'a[class*="company"]'
-                );
-                // Fallback: find the link that's not the title link
+                // Company — in a link after "by" text, or in a company link.
+                //
+                // Cards in reed's "Training Course" category carry a filter link
+                // ("hide all Training Course jobs.") BEFORE the company link, and
+                // both match a[href*="/jobs/"]. querySelector returns the first
+                // match in document order, so those 8 postings were all stored
+                // under company "hide all Training Course jobs." — the real
+                // employer, IT Career Switch, sits in the next link along. Take
+                // all candidates and skip the chrome, rather than trusting
+                // position; the fallback path below already applied this test.
+                const isChrome = (t) => !t
+                    || /\bjobs?\b/i.test(t)
+                    || /^(hide|show|search|browse|view|see) /i.test(t);
                 let company = '';
-                if (companyEl) {
-                    company = companyEl.textContent.trim();
-                } else {
+                const candidates = article.querySelectorAll(
+                    'a[data-qa="job-card-company-link"], ' +
+                    'a[class*="company"], ' +
+                    'a[href*="/jobs/"]:not(h2 a), ' +
+                    'sectionheader a[href*="-jobs"]'
+                );
+                for (const el of candidates) {
+                    const t = el.textContent.trim();
+                    if (!isChrome(t)) { company = t; break; }
+                }
+                if (!company) {
                     // Try finding "by" text and getting next link
                     const allLinks = article.querySelectorAll('a');
                     const titleLink = titleEl.getAttribute('href') || '';
@@ -373,20 +386,18 @@ async def scrape_reed_all(config: dict) -> list[dict]:
     seen = set()
     cache = load_description_cache()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("reed", config)
 
     async with async_playwright() as p:
-        for kw in keywords:
-            for loc in locations:
-                jobs = await scrape_reed(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
-                for j in jobs:
-                    dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
-                    if dedup_key not in seen:
-                        seen.add(dedup_key)
-                        all_jobs.append(j)
+        for kw, loc in search_pairs(config):
+            jobs = await scrape_reed(kw, loc, max_pages=max_pages, config=config, cache=cache, playwright_instance=p)
+            for j in jobs:
+                dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
+                if dedup_key not in seen:
+                    seen.add(dedup_key)
+                    all_jobs.append(j)
 
     # --- Filter by keywords ---
     from scraper_indeed import filter_jobs_by_keywords

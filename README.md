@@ -2,7 +2,7 @@
 
 **A job search pipeline that collects postings, ranks fit, assembles CVs and cover letters from verified source material, and reviews them before human submission.** Python controls the workflow; models help with extraction, semantic matching, document selection and proofreading.
 
-**Architecture snapshot: 2026-10-14.** The current implementation is on the [development branch](https://github.com/0xkz1/AI-Job-Scout-System/tree/feat/strategy-layer-and-visa-clock); `main` remains an earlier code baseline. The operational details and diagram below describe the current local deployment. To use that implementation, check out the development branch rather than assuming these integrations are already in `main`.
+**Architecture snapshot: 2026-10-14.** `main` includes the current implementation described below. The diagram records the local deployment configuration; reusable profile sources, provider keys and scheduling remain specific to each deployment.
 
 ```python
 # One command runs the full pipeline
@@ -75,11 +75,11 @@ flowchart TD
 
 </details>
 
-**Document selection.** `JIS_DOCUMENT_MODE=jev` is enabled in the local deployment checked on 2026-10-14. The code default remains `legacy` when unset. Jev selects source-backed CV project IDs and prepared cover-letter paragraphs; it does not write new prose. Out-of-scope letters are withheld and uncertain selections produce labelled neutral drafts. Both modes still require review. See [Jev integration and measured trial](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/JEV_PIPELINE_TRIAL_2026-10-12.md).
+**Document selection.** `JIS_DOCUMENT_MODE=jev` is enabled in the local deployment checked on 2026-10-14. The code default remains `legacy` when unset. Jev selects source-backed CV project IDs and prepared cover-letter paragraphs; it does not write new prose. Out-of-scope letters are withheld and uncertain selections produce labelled neutral drafts. Both modes still require review. See [Jev integration and measured trial](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/docs/JEV_PIPELINE_TRIAL_2026-10-12.md).
 
 **Bulk model routing.** `llm_client.py` uses stage-specific primaries and configured fallbacks. The analyzer leads with Groq; the current bulk configuration uses LiteLLM Gateway for other stages, with direct-provider and local Ollama fallbacks. Prompt-size guards skip providers that cannot accept a request, and failed keys enter quarantine.
 
-**Document proofreading.** The default Python review route uses GLM-5.3 with `reasoning_effort: low`, through `review-strong-glm53-key1` to `review-strong-glm53-key7`. Each available NVIDIA key gets one attempt. The route accepts a complete stream and retains the previous review if every key fails; it does not fall back to a weaker model. `REVIEW_FALLBACKS` is an explicit override. Suggested rewrites still need factual checking. See [review routing and validation](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/REVIEW_MODEL_2026-10-09.md).
+**Document proofreading.** The default Python review route uses GLM-5.3 with `reasoning_effort: low`, through `review-strong-glm53-key1` to `review-strong-glm53-key7`. Each available NVIDIA key gets one attempt. The route accepts a complete stream and retains the previous review if every key fails; it does not fall back to a weaker model. `REVIEW_FALLBACKS` is an explicit override. Suggested rewrites still need factual checking. See [review routing and validation](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/docs/REVIEW_MODEL_2026-10-09.md).
 
 **Repair and Kanban routes.** L2 uses Hermes `builder` to repair a clean zero-yield scraper in an isolated worktree, then verifies the live scrape and runs tests before human review. The separate `jis_hermes_bridge.py` route selects high matches (default score ≥0.70), calls the document generators directly and creates `review-editor` tasks on the `jis` board. The writer profile is absent from this route. `JIS_JEV_MODE` defaults to `off`; its optional pre-audit probabilities are not a factual guarantee.
 
@@ -201,11 +201,11 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headle
 
 ## Quick Start
 
-The commands below target the [current development implementation](https://github.com/0xkz1/AI-Job-Scout-System/tree/feat/strategy-layer-and-visa-clock). Personal profile sources, CV masters and provider configuration must be supplied for your own deployment.
+The commands below use `main`. Personal profile sources, CV masters and provider configuration must be supplied for your own deployment.
 
 ```bash
-# Check out the implementation described in this snapshot
-git clone --branch feat/strategy-layer-and-visa-clock https://github.com/0xkz1/AI-Job-Scout-System.git
+# Check out the current implementation
+git clone https://github.com/0xkz1/AI-Job-Scout-System.git
 cd AI-Job-Scout-System
 
 # 1. Install Python dependencies
@@ -426,7 +426,7 @@ Hermes schedules two jobs under the **archivist** profile, with `no_agent: true`
 
 Each site runs with `--scrape-only`. The script clamps per-site timeouts to the slot's remaining budget and records clean completion, partial results, timeouts, errors and skipped sites separately. Normal completion with zero jobs on consecutive nights is the L2 repair signal; a timeout is not treated as a clean dry scraper.
 
-`nightly_scout.py` diffs against the previous state, reviews the ranked review slice and prints a Telegram summary. No new high matches can be silent; operational warnings can still produce a notification. Notifications use the archivist profile's bot. The full-run ceiling is 7020s inside Hermes's 7200s cap. See [nightly stages and repair boundaries](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/LOOP.md).
+`nightly_scout.py` diffs against the previous state, reviews the ranked review slice and prints a Telegram summary. No new high matches can be silent; operational warnings can still produce a notification. Notifications use the archivist profile's bot. The full-run ceiling is 7020s inside Hermes's 7200s cap. See [nightly stages and repair boundaries](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/LOOP.md).
 
 For a manual pass over saved input:
 
@@ -625,8 +625,8 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 
 新方式は **Filter, Not Persuasion** — 候補者の文脈(Canonical Narrative, 252語, 不変)を固定し、企業ごとに変わるのは1〜2文・35〜60語の Context Bridge のみ。設計思想はローカルの `career/cover-letter/STRATEGY.md` に記録。
 
-- 固定: [canonical_narrative_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/canonical_narrative_v1.md)(LLM書き換え禁止、バージョンで更新)
-- 選択式: [letter_facts_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/letter_facts_v1.md)(tier: core/technical/operational、求人キーワードでゲート)
+- 固定: [canonical_narrative_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/canonical_narrative_v1.md)(LLM書き換え禁止、バージョンで更新)
+- 選択式: [letter_facts_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/letter_facts_v1.md)(tier: core/technical/operational、求人キーワードでゲート)
 - 生成: Context Bridge のみLLM。主語反転・ツール名列挙・誇張表現・定型closingを複数ゲートで拒否し、通らなければ静的文へフォールバック
 - テスト: `tests/test_cover_letter_assembler.py`(303件)
 
@@ -639,7 +639,7 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 Streamlit で人間がボタンを手動実行するスタイルから、**Hermes を司令塔とする自律型マルチエージェント協働システム**へと発展。
 
 ### 1. 役割分担の3層アーキテクチャ
-- **Layer 1 (L1 Nightly Scout: 高速バッチ)**: `no_agent: true`。Python コード + **Jev System One**（`Choice`, `Noul`, `Score`）によるミリ秒単位の型安全な職種分類・スポンサー判定・適合度スコアリング。詳細は [docs/JIS_AND_JEV.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/JIS_AND_JEV.md)。
+- **Layer 1 (L1 Nightly Scout: 高速バッチ)**: `no_agent: true`。Python コード + **Jev System One**（`Choice`, `Noul`, `Score`）によるミリ秒単位の型安全な職種分類・スポンサー判定・適合度スコアリング。詳細は [docs/JIS_AND_JEV.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/main/docs/JIS_AND_JEV.md)。
 - **Layer 2 (L2 Scraper Repair: 障害自律修復)**: Hermes **`builder`** が担当。スクレイパー異常時に `git worktree` 上で自動修正・テストを実行。
 - **Layer 3 (L3 High-Match Workflow: 自動書類推敲・監査)**:
   - `jis_hermes_bridge.py` がスコア ≥ 0.75 の特級求人を Hermes Kanban (`jis` ボード) へ自動起票。

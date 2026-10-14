@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import Counter
@@ -43,7 +44,16 @@ import yaml  # noqa: E402
 
 OUTPUT = ROOT / "10_output"
 ANALYZED = OUTPUT / "_analyzed.json"
+YIELD_HISTORY = OUTPUT / "_nightly_site_yield_history.json"
+STATUS_HISTORY = OUTPUT / "_nightly_site_status_history.json"
 REVIEWS = OUTPUT / "15_reviews"
+
+# The cron script that actually runs the scrapers. It lives outside this repo, so
+# `sites` in config.yaml and the `run_site` lines in there can drift apart with
+# nothing to notice — and did: linkedin sat in `sites` for six days without ever
+# being invoked. A missing file is not treated as a violation, since the path is
+# environment-specific.
+NIGHTLY_SCRIPT = Path.home() / "dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh"
 
 # A composite spread this flat means the ranking cannot separate jobs, whatever
 # the mean looks like. Before the 2026-07-25 fixes it sat at 0.088 with every job
@@ -275,20 +285,50 @@ def check_one_entry_per_document_path(config: dict) -> list[str]:
     entries sharing it collide: the report on disk comes from whichever was
     written last while selection ranks by the other. Penguin Recruitment's
     "Geotechnical Design Engineer" was held at 0.34, 0.38 and 0.66 at once.
+
+    Two causes, reported separately because only one loses data. Genuine duplicates
+    of the same posting mean dedupe let a repeat through. Distinct postings can also
+    collide, because make_safe_name truncates the title at 50 characters and the
+    company at 30: "BTEC Tech Awards Sept 22 - Creative Media Production - Examiner"
+    and the same posting's "- Moderator" differ only past the cut. Truncation
+    collisions are common — 322 of 1895 rows truncate at all — and only matter where
+    a document is actually written, so a collision outside the generation set is
+    reported as a note rather than as data loss.
     """
     from matcher import make_safe_name
-    from selection import ranked_jobs
+    from selection import ranked_jobs, select_top
 
-    names = Counter(
-        make_safe_name(j.get("company", ""), j.get("title", "")) for j in ranked_jobs(config)
-    )
-    dupes = [n for n, c in names.items() if c > 1]
-    if dupes:
-        return [
-            f"{len(dupes)} document paths are claimed by more than one selected job "
-            f"(e.g. {dupes[0]}); dedupe in selection is not holding."
-        ]
-    return []
+    def _name(job: dict) -> str:
+        return make_safe_name(job.get("company", ""), job.get("title", ""))
+
+    def _collisions(jobs: list[dict]) -> dict[str, list[dict]]:
+        grouped: dict[str, list[dict]] = {}
+        for job in jobs:
+            grouped.setdefault(_name(job), []).append(job)
+        return {n: js for n, js in grouped.items() if len(js) > 1}
+
+    out = []
+    generated = _collisions(select_top("generation", config))
+    if generated:
+        name, jobs = next(iter(generated.items()))
+        titles = " / ".join(repr(j.get("title", "")) for j in jobs[:2])
+        out.append(
+            f"{len(generated)} document paths are written twice by the generation set "
+            f"(e.g. {name} from {titles}). Whichever is written last wins while "
+            f"selection ranks by the other."
+        )
+
+    ranked = _collisions(ranked_jobs(config))
+    outside = {n: js for n, js in ranked.items() if n not in generated}
+    if outside:
+        name, jobs = next(iter(outside.items()))
+        titles = " / ".join(repr(j.get("title", "")) for j in jobs[:2])
+        out.append(
+            f"{len(outside)} document paths are shared by ranked jobs below the "
+            f"generation cutoff (e.g. {name} from {titles}). Nothing is overwritten "
+            f"today; it becomes data loss if either job rises into the selection."
+        )
+    return out
 
 
 def check_composite_still_discriminates(config: dict) -> list[str]:
@@ -341,11 +381,24 @@ def check_review_scores_track_rubric(config: dict) -> list[str]:
     return []
 
 
-# Per-site wall-clock cap enforced by the Hermes cron wrapper (`timeout`, so a
-# breach shows up as exit 124). Not readable from this repo — the wrapper lives in
-# ~/.hermes/profiles/archivist/cron/jobs.json — so it is mirrored here and must be
-# updated alongside it.
+# Per-site wall-clock cap enforced by the nightly wrapper (`timeout`, so a breach
+# shows up as exit 124). Not readable from this repo — the script lives in
+# ~/dotfiles/hermes/profiles/archivist/scripts/job_scout_nightly.sh — so it is
+# mirrored here and must be updated alongside it.
 SITE_TIMEOUT_SECONDS = 1500
+# Sites the script gives their own cap, for reasons it records next to each:
+# indeed and linkedin because a cold description cache cannot fit 1500s, reed
+# because its measured run is 2110s (see _SECONDS_PER_SEARCH below). A site
+# absent here is judged against SITE_TIMEOUT_SECONDS.
+_SITE_TIMEOUT_OVERRIDES = {
+    "reed": 2200,
+    "indeed": 3600,
+    "linkedin": 2400,
+}
+
+
+def _site_timeout(site: str) -> int:
+    return _SITE_TIMEOUT_OVERRIDES.get(site, SITE_TIMEOUT_SECONDS)
 # MEASURED seconds per search, per site. Two earlier attempts at this were wrong:
 #   1. Modelling it as "2s setup + 2s per page" gave 14s at depth 6 — off by 5x,
 #      because page navigation is not the cost. The per-job description fetch is:
@@ -354,20 +407,34 @@ SITE_TIMEOUT_SECONDS = 1500
 #   2. Applying reed's measured 68s to every site flagged all five, including
 #      guardian, which demonstrably completes.
 # Sites differ by an order of magnitude, so each carries its own number:
-#   reed      68.0  observed directly (37 searches in 42 min, depth 6)
+#   reed      58.6  observed directly (36 searches in 2110s, depth 3, 2026-09-08)
 #   guardian  22.6  back-computed from a completing run (1421s / 63 searches)
 #   adzuna     ---  API path now; the old Playwright timeout says only ">23.8"
 #   indeed     ---  its 27s runs were instant Cloudflare failures, not work
 # A site with no entry is NOT judged: warning off a guess would train the reader
 # to ignore this check. Add a number only from `time run.py --site <site>`.
 # Stored as (seconds_per_search, depth_it_was_measured_at) so lowering depth is
-# reflected instead of ignored. Cost splits into a fixed page walk — ~2s of settle
-# per page — and the description fetch, which scales with how many postings the
-# depth returns; both fall as depth falls, so the figure is scaled linearly by
-# depth. Linear is an approximation, deliberately kept simple: it is calibrated at
-# the depth actually measured, and re-measuring is cheap (`time run.py --site X`).
+# reflected instead of ignored, and the figure is scaled linearly by depth.
+#
+# That scaling is why reed was allowed to time out for five nights while this
+# check said it fit. reed's 68s was measured at depth 6; scaled linearly it
+# predicted 34s at depth 3, so 36 searches "needed" 1224s of the 1500s cap. The
+# run re-measured AT depth 3 on 2026-09-08 took 58.6s per search — 2110s, not
+# 1224s. Cost does not halve when depth does, because a search that returns two
+# pages walks two pages at either setting; only the searches deep enough to be
+# truncated get cheaper.
+#
+# The same run says where the time actually goes, and it is not where the note
+# above assumed: 648 descriptions fetched (~648s, 31%) against ~1460s of page
+# walking across 83 page loads. Making the fetch concurrent — the fix this check
+# suggests, and which scraper_helper tried once and hit EPIPE — would bring 2110s
+# to roughly 1590s. Still over the cap. The page walk is now the cost.
+#
+# So prefer a number measured at the depth actually configured. Re-measuring is
+# cheap and unambiguous: `run.py --site <site> --scrape-only`, wall-clock over
+# the "searching" lines.
 _SECONDS_PER_SEARCH = {
-    "reed": (68.0, 6),
+    "reed": (58.6, 3),
     "guardian": (22.6, 3),
 }
 
@@ -385,10 +452,8 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
     enough NEW postings appear. reed ran at depth 10 (~1386s of the 1500s cap) until
     the multi-country expansion, then timed out.
     """
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
 
-    searches = max(1, len(config.get("keywords") or [1])) * max(
-        1, len(config.get("locations") or [1]))
     out = []
     for site in (config.get("sites") or []):
         if site == "remote_apis":  # API path, no page walking
@@ -396,18 +461,26 @@ def check_scrape_fits_its_timeout(config: dict) -> list[str]:
         measured = _SECONDS_PER_SEARCH.get(site)
         if measured is None:
             continue  # unmeasured — see _SECONDS_PER_SEARCH
+        # search_pairs, not keywords x locations: `keyword_locations` narrows some
+        # keywords to a subset of the locations, and counting the full cross product
+        # would bill the run for searches no scraper walks. Counted per site, since
+        # `site_only_locations` gives one site searches the others never make.
+        searches = max(1, len(search_pairs(config, site=site)))
         rate, measured_depth = measured
         depth = max_pages_for(site, config)
         per_search = rate * depth / measured_depth
         needed = searches * per_search
-        if needed > SITE_TIMEOUT_SECONDS:
+        cap = _site_timeout(site)
+        if needed > cap:
             out.append(
-                f"{site}: ~{needed:.0f}s needed against a {SITE_TIMEOUT_SECONDS}s cron "
+                f"{site}: ~{needed:.0f}s needed against a {cap}s cron "
                 f"timeout ({searches} searches x {per_search:.0f}s measured, depth "
                 f"{depth}). Expect exit 124 and truncated postings. Cut `keywords` x "
-                f"`locations` to at most {int(SITE_TIMEOUT_SECONDS / per_search)} "
-                f"searches, or make the description fetch concurrent — depth is not the "
-                f"main cost, the serial 1s-per-job description fetch is."
+                f"`locations` to at most {int(cap / per_search)} "
+                f"searches, lower `max_pages_per_site`, or raise this site's cron "
+                f"timeout if the nightly DEADLINE still has room. Making the "
+                f"description fetch concurrent is NOT enough on its own: measured on "
+                f"reed, it is under a third of the run."
             )
     return out
 
@@ -427,6 +500,22 @@ def check_every_site_still_yields(config: dict) -> list[str]:
     green runs, a growing database (other sites), and no signal anywhere. The
     per-site exit codes could not show it either, because the run genuinely
     succeeded.
+
+    What it measures is NEW rows, though, and "returned nothing" and "returned
+    only postings already in the database" are not the same fault. guardian is
+    the case that separates them: it is a small board that yields 2-4 matching
+    jobs a night, the same handful for weeks, so it goes for stretches with no
+    new row while its extractor is working perfectly. Reported as a stale
+    selector it sends the reader to debug a scraper that is fine. So the
+    scraper's own output — the yield history the nightly writes — is consulted
+    before the selector is blamed.
+
+    That history is not enough on its own: it records only nights a site RAN, and
+    carries no dates, so a site that has been dying at its timeout keeps showing
+    the healthy counts from the last night it finished. reed read as a saturated
+    board on five-night-old numbers while it was in fact being killed at 1500s
+    every night. The status history does carry the failures, so it is asked first
+    — "it never finished" outranks both other readings.
     """
     from datetime import date, datetime, timedelta
 
@@ -444,7 +533,7 @@ def check_every_site_still_yields(config: dict) -> list[str]:
     # Sources a site records its jobs under, where they differ from the site name.
     # remote_apis fans out to three boards and tags each with its own name, so
     # looking for source == "remote_apis" finds nothing however well it is working.
-    aliases = {"remote_apis": ("remotive", "remoteok", "arbeitnow")}
+    aliases = {"remote_apis": ("remotive", "arbeitnow")}
     for site, names in aliases.items():
         newest = max((latest[n] for n in names if n in latest), default=None)
         if newest:
@@ -470,11 +559,116 @@ def check_every_site_still_yields(config: dict) -> list[str]:
                 age = f"{days} days"
             except ValueError:
                 age = f"since {seen}"
-            out.append(
-                f"{site}: no job scraped for {age} (last {seen}) while still in "
-                f"`sites`. A stale selector yields nothing without erroring — check "
-                f"the extractor against a live page before trusting the exit code."
-            )
+            statuses = _recent_statuses(site)
+            if statuses and not any(s == "ok" for s in statuses):
+                out.append(
+                    f"{site}: no new posting for {age} (last {seen}) because it has "
+                    f"not completed a run — its last {len(statuses)} recorded nights "
+                    f"are {'/'.join(statuses)}. Nothing is wrong with the extractor; "
+                    f"the run is being killed before it finishes. Fix the budget, not "
+                    f"the selector."
+                )
+                continue
+            recent = _recent_yields(site)
+            if recent and any(recent):
+                # The scraper is returning postings; they are simply ones the
+                # database already holds. Not a fault to fix, but still worth
+                # saying — a board that has gone this long without a new posting
+                # is a board that has stopped being worth its slot in the budget.
+                out.append(
+                    f"{site}: returning jobs ({'/'.join(str(n) for n in recent)} on "
+                    f"its last {len(recent)} recorded nights) but no NEW posting for "
+                    f"{age} (last {seen}) — the extractor is working and the board is "
+                    f"saturated. Judge it on whether the slot still earns its place, "
+                    f"not as a broken selector."
+                )
+            else:
+                out.append(
+                    f"{site}: no job scraped for {age} (last {seen}) while still in "
+                    f"`sites`, and its yield history shows nothing returned either. A "
+                    f"stale selector yields nothing without erroring — check the "
+                    f"extractor against a live page before trusting the exit code."
+                )
+    return out
+
+
+def _recent_yields(site: str, keep: int = 5) -> list[int]:
+    """What the nightly recorded this site's scraper as actually RETURNING.
+
+    Distinct from the row count in the database: this is the scraper's own
+    output before the merge drops duplicates. Absent (the file, the site, or a
+    malformed entry) is reported as no evidence, not as a zero — an unrecorded
+    night must not read as a failed one.
+    """
+    try:
+        history = json.loads(YIELD_HISTORY.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    counts = history.get(site) if isinstance(history, dict) else None
+    if not isinstance(counts, list):
+        return []
+    return [n for n in counts[-keep:] if isinstance(n, int)]
+
+
+def _recent_statuses(site: str, keep: int = 4) -> list[str]:
+    """What the nightly recorded this site's run as DOING — ok, timeout, failed.
+
+    The yield history holds only nights a site ran and stamps no dates on them,
+    so it cannot say whether the numbers in it are from last night or last week.
+    This one records the failures too, which is what separates "quiet board"
+    from "killed before it finished".
+    """
+    try:
+        history = json.loads(STATUS_HISTORY.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = history.get(site) if isinstance(history, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [s for s in entries[-keep:] if isinstance(s, str)]
+
+
+def check_configured_sites_are_scheduled(config: dict) -> list[str]:
+    """Every site in `sites` must have a `run_site` line in the nightly script.
+
+    check_every_site_still_yields catches the symptom — no jobs for N days — but
+    reports it as a possible stale selector, which sends you to read a scraper that
+    is fine. linkedin was in `sites` and absent from the cron script for six days:
+    it had never once been invoked, and nothing in the repo could tell, because the
+    script is in a separate dotfiles repo.
+
+    The reverse direction matters as much. A site scraped nightly but missing from
+    `sites` still writes to the database while being excluded from every per-site
+    budget and check here.
+    """
+    import re
+
+    if not NIGHTLY_SCRIPT.exists():
+        return []
+    configured = [s for s in (config.get("sites") or []) if s]
+    if not configured:
+        return []
+    script = NIGHTLY_SCRIPT.read_text(encoding="utf-8")
+    # Only invocations count. The word also appears in comments and in the
+    # run_site() definition itself, neither of which runs anything.
+    scheduled = set(re.findall(r"^\s*run_site\s+(\S+)", script, re.MULTILINE))
+
+    out = []
+    unscheduled = [s for s in configured if s not in scheduled]
+    if unscheduled:
+        out.append(
+            f"in `sites` but never run by {NIGHTLY_SCRIPT.name}: "
+            f"{', '.join(unscheduled)}. These scrape nothing at night, so the "
+            f"'no job for N days' warning will blame a stale selector on a scraper "
+            f"that was simply never called. Add a `run_site` line or drop from `sites`."
+        )
+    unconfigured = sorted(scheduled - set(configured))
+    if unconfigured:
+        out.append(
+            f"run nightly but absent from `sites`: {', '.join(unconfigured)}. Their "
+            f"jobs still land in the database while being skipped by every per-site "
+            f"timing budget and check here."
+        )
     return out
 
 
@@ -522,14 +716,373 @@ def check_truncated_descriptions_get_enriched(config: dict) -> list[str]:
     ]
 
 
+def check_one_document_renderer(config: dict) -> list[str]:
+    """Exactly one module may turn a CV/CL markdown into a PDF.
+
+    Generation is already single-source — one generate_cv, one
+    save_cover_letter, one MASTER_COVER_LETTER — which is why a fix to the
+    letter template reaches every route for free. Rendering is not, and has
+    now been split twice. First pdf_generator.py carried an orphaned copy that
+    nothing imported but that still ran as a CLI; it never received the
+    two-A4-page CV tightening or any of the cover-letter layout rules. Then
+    pdf_core.py was added as an "extraction" that was really a rewrite: no
+    markdown preprocessing and no nl2br, so every toolkit category and entry
+    title fused into the paragraph beneath it. Both shipped documents that
+    looked wrong, and nothing said so.
+
+    The live renderer now lives in pdf_core.py — app.py imports it, so the
+    Streamlit route and the CLI cannot diverge. A second copy cannot be kept in
+    sync by discipline; this check exists so that adding one is loud instead of
+    silent.
+    """
+    import re
+
+    allowed = {"pdf_core.py"}
+    offenders = []
+    for path in sorted(ROOT.glob("*.py")):
+        if path.name in allowed:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"^\s*(from weasyprint import|import weasyprint)", text, re.MULTILINE):
+            offenders.append(path.name)
+    if not offenders:
+        return []
+    return [
+        f"a second PDF renderer lives in {', '.join(offenders)}. The live one is "
+        f"pdf_core.py:_md_to_pdf_bytes; a copy silently misses every layout fix "
+        f"applied there. Delete it, or import _convert_pdf_versioned from pdf_core "
+        f"instead of rendering its own HTML."
+    ]
+
+
+def check_cv_inputs_are_fingerprinted(config: dict) -> list[str]:
+    """Every directory the CV generator reads must feed the staleness hash.
+
+    gen_version decides whether a generated document still matches its inputs.
+    A directory the generator loads but the fingerprint ignores is the worst
+    shape available: editing a record there changes every CV while leaving each
+    fingerprint identical, so --stale-only rebuilds nothing and the stale
+    documents keep reporting themselves as current. Splitting the employment
+    records into career/cv/experience/ created exactly that gap for as long as
+    it took to add one line here.
+    """
+    try:
+        import cv_generator
+        import gen_version
+    except Exception as e:  # noqa: BLE001
+        return [f"could not import the CV generator to check fingerprints: {type(e).__name__}: {e}"]
+
+    cv_root = cv_generator._cv_root()
+    if cv_root is None:
+        return []
+    hashed = {p.resolve() for p in gen_version._GLOBAL_DIRS}
+    missing = [
+        name for name, _kind in cv_generator._ENTRY_DIRS
+        if (cv_root / name).exists() and (cv_root / name).resolve() not in hashed
+    ]
+    if not missing:
+        return []
+    return [
+        f"cv/{', cv/'.join(missing)} is loaded into every CV but absent from "
+        f"gen_version._GLOBAL_DIRS. Edits there change the documents without "
+        f"changing their fingerprint, so nothing rebuilds and stale CVs report "
+        f"themselves as current. Add it to _GLOBAL_DIRS."
+    ]
+
+
+def check_configured_sites_are_dispatched(config: dict) -> list[str]:
+    """Every site in `sites` must have a branch in run.py that scrapes it.
+
+    check_configured_sites_are_scheduled covers the other end of the same
+    wire — whether the nightly cron invokes the site — and linkedin proved
+    that end can rot for six days unnoticed. This is the hop after it. run.py
+    dispatches with six hand-written `if "<site>" in sites:` blocks, each
+    repeating the same try/except/scraper_failures shape, so adding a site
+    means remembering to copy that block. Forget, and the site sits in
+    `sites`, passes every config check, is counted in the per-site budgets,
+    and scrapes nothing — with no error, because nothing ran.
+    """
+    import re
+
+    run_py = ROOT / "run.py"
+    if not run_py.exists():
+        return []
+    configured = [s for s in (config.get("sites") or []) if s]
+    if not configured:
+        return []
+    text = run_py.read_text(encoding="utf-8")
+    dispatched = set(re.findall(r'^\s*if\s+"([^"]+)"\s+in\s+sites\s*:', text, re.MULTILINE))
+
+    missing = [s for s in configured if s not in dispatched]
+    if not missing:
+        return []
+    return [
+        f"in `sites` but never dispatched by run.py: {', '.join(missing)}. The "
+        f"site is configured and budgeted for, and no branch scrapes it, so it "
+        f"reports neither jobs nor a failure. Add an `if \"<site>\" in sites:` "
+        f"block or drop it from `sites`."
+    ]
+
+
+def check_pdf_identity_ignores_stamped_properties(config: dict) -> list[str]:
+    """Converting an unchanged document twice must reuse its PDF, not mint one.
+
+    _convert_pdf_versioned keys a version on a hash of its source, and it writes
+    a `pdf:` property back into the note when it is done; the reviewer writes a
+    `review:` one. While that hash covered the whole file, each conversion
+    rewrote the very bytes it had just hashed, so the next run saw a change that
+    had not happened and minted another visually identical version — 20 of them
+    for one outreach CV, 7 distinct. Nothing raised. Every PDF was correct;
+    there were simply dozens, and the newest was always labelled "(outdated)"
+    because the freshness badge hashed the file a third, different way.
+
+    The renderer strips frontmatter before it renders, so nothing in it can
+    reach the page and nothing in it belongs in the hash. That is the property
+    tested here directly — cheaper and more honest than trying to infer churn
+    from the PDFs afterwards, since WeasyPrint stamps a timestamp and no two
+    renders are ever byte-identical anyway.
+    """
+    import importlib
+
+    try:
+        app = importlib.import_module("app")
+    except Exception as e:  # noqa: BLE001 - Streamlit may refuse to import headless
+        return [f"could not import app to verify PDF identity: {type(e).__name__}: {e}"]
+
+    sha = getattr(app, "_pdf_source_sha", None)
+    if sha is None:
+        return [
+            "app._pdf_source_sha is gone. Conversion and the freshness badge must "
+            "derive a PDF's identity from one place; when they each computed it "
+            "separately they drifted, and every fresh PDF was shown as outdated."
+        ]
+
+    sample = next((OUTPUT / "10_cvs").glob("*_CV.md"), None)
+    if sample is None:
+        return []
+
+    import tempfile
+
+    original = sample.read_text(encoding="utf-8")
+    if not original.startswith("---"):
+        return []
+    stamped = original.replace("---\n", '---\npdf: "[[probe_v99.pdf]]"\n', 1)
+
+    with tempfile.TemporaryDirectory() as td:
+        a, b = Path(td) / "a.md", Path(td) / "b.md"
+        a.write_text(original, encoding="utf-8")
+        b.write_text(stamped, encoding="utf-8")
+        if sha(a) != sha(b):
+            return [
+                "a PDF's identity still changes when a property is stamped into its "
+                "frontmatter. Since the converter stamps `pdf:` (and the reviewer "
+                "`review:`), every conversion will invalidate itself and mint an "
+                "endless run of identical versions. app.py:_pdf_source_sha must hash "
+                "the body only — the renderer strips frontmatter before rendering."
+            ]
+    return []
+
+
+def check_sponsorship_claims_carry_evidence(config: dict) -> list[str]:
+    """A sponsorship verdict must quote the posting that produced it.
+
+    The sponsorship field is the one place in this pipeline that touches
+    immigration, and the rule it was built under is that it records evidence and
+    never infers. That rule is only enforceable if the evidence is actually there:
+    a bare "refused" with no quote is indistinguishable from a guess, and it is
+    the kind of claim someone would act on.
+
+    So both directions are checked. A verdict without a quote is a violation, and
+    a quote that does not contain the word it was matched on is one too — the
+    second case is real, not hypothetical: an early version clipped long
+    paragraphs from the left and filed "Produce electrical building services
+    designs across RIBA Stages 1-7" as the proof of a refusal.
+
+    Postings analysed before the field existed carry no key at all and are
+    skipped; this checks claims, not coverage.
+    """
+    if not ANALYZED.exists():
+        return []
+    try:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - a broken DB is another check's problem
+        return [f"could not read {ANALYZED.name}: {type(e).__name__}: {e}"]
+
+    missing, unsupported = [], []
+    for j in jobs:
+        analysis = j.get("analysis") or {}
+        state = analysis.get("sponsorship")
+        if state not in ("offered", "refused"):
+            continue
+        quote = (analysis.get("sponsorship_evidence") or "").strip()
+        title = (j.get("title") or "?")[:34]
+        if not quote:
+            missing.append(title)
+        elif "sponsor" not in quote.lower():
+            unsupported.append(title)
+
+    out = []
+    if missing:
+        out.append(
+            f"{len(missing)} jobs carry a sponsorship verdict with no evidence quote: "
+            f"{', '.join(missing[:3])}. analyzer.classify_sponsorship must return the "
+            f"sentence it matched, or the flag is an inference."
+        )
+    if unsupported:
+        out.append(
+            f"{len(unsupported)} sponsorship quotes do not contain the word they were "
+            f"matched on: {', '.join(unsupported[:3])}. The quote is clipping away the "
+            f"match — see analyzer._sentence_around."
+        )
+    return out
+
+
+def check_action_tier_respects_its_gates(config: dict) -> list[str]:
+    """The tier is a rule table, so its rules must hold on the stored data.
+
+    Two of them are worth asserting against the live DB rather than only in
+    tests, because the failure is silent: a tier is a small integer that always
+    looks plausible, and it is the field a human would sort by.
+
+      * A FILTERED posting has no documents and therefore no review. It can only
+        be watched (4) or ignored (5). A filtered job at tier 1-3 means something
+        wrote a tier without the filter reason in hand.
+      * strategic_value is renormalised over whichever terms had data, so 1.00
+        off one term and 1.00 off four are different claims. Tier 1 must never
+        rest on the first kind — that is what strategic_coverage is for, and a
+        tier 1 below the floor means the gate was bypassed.
+
+    Postings scored before the strategy layer existed carry no action_tier and
+    are skipped: this checks claims, not coverage.
+    """
+    if not ANALYZED.exists():
+        return []
+    try:
+        jobs = json.loads(ANALYZED.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - a broken DB is another check's problem
+        return [f"could not read {ANALYZED.name}: {type(e).__name__}: {e}"]
+
+    from strategy import _COVERAGE_MIN as floor
+    acted_on_a_filtered_job, thin_tier_one, out_of_range = [], [], []
+    for j in jobs:
+        match = j.get("match") or {}
+        tier = match.get("action_tier")
+        if tier is None:
+            continue
+        title = (j.get("title") or "?")[:34]
+        if j.get("_filter_reason") and tier < 4:
+            acted_on_a_filtered_job.append(f"{title} (tier {tier})")
+        coverage = match.get("strategic_coverage")
+        if tier == 1 and isinstance(coverage, (int, float)) and coverage < floor:
+            thin_tier_one.append(f"{title} (coverage {coverage})")
+        value = match.get("strategic_value")
+        if isinstance(value, (int, float)) and not (0.0 <= value <= 1.0):
+            out_of_range.append(f"{title} ({value})")
+
+    out = []
+    if acted_on_a_filtered_job:
+        out.append(
+            f"{len(acted_on_a_filtered_job)} filtered postings carry an action tier "
+            f"below 4: {', '.join(acted_on_a_filtered_job[:3])}. A filtered job has no "
+            f"documents and no review — strategy.action_tier must see _filter_reason."
+        )
+    if thin_tier_one:
+        out.append(
+            f"{len(thin_tier_one)} tier-1 postings rest on a strategic_value below the "
+            f"coverage floor of {floor}: {', '.join(thin_tier_one[:3])}. A value "
+            f"renormalised over one term is not comparable to one over four."
+        )
+    if out_of_range:
+        out.append(
+            f"{len(out_of_range)} strategic_value scores are outside 0-1: "
+            f"{', '.join(out_of_range[:3])}."
+        )
+    return out
+
+
+def check_reports_link_their_documents(config: dict) -> list[str]:
+    """A report whose CV or cover letter is on disk must link to it.
+
+    The links are what the Obsidian Bases read: the CV/CL columns, the
+    apply_priority formula, and the 🎯 優先度 view, which filters on
+    cv_review_score existing and so drops an unlinked job from the table
+    altogether. An unlinked report is therefore a document that was paid for
+    and cannot be found — and it reads as perfectly correct on its own, which
+    is why this went unnoticed.
+
+    run.py derives the links from file existence, but that check ran before the
+    expensive half wrote the files, so every job receiving its FIRST documents
+    got a report that predated them. Measured 2026-09-11: 16 of 16 such jobs in
+    one run. Two hand-run repair scripts existed for it — patch_report_doc_links
+    and patch_review_scores — and were called by nothing, so the data was fixed
+    repeatedly while the generator kept reproducing the fault.
+
+    A ceiling on what is reported, not on what is checked: the point is to say
+    that the seam has opened, and a run that has just broken it breaks it in
+    bulk.
+    """
+    # Through doc_paths, not Path.glob: a Syncthing conflict copy sits beside
+    # the real report with a .md suffix and is not a document.
+    from doc_paths import md_files
+
+    match_dir = OUTPUT / "00_matches"
+    cv_dir = OUTPUT / "10_cvs"
+    cl_dir = OUTPUT / "10_cover-letters"
+    if not match_dir.exists():
+        return []
+
+    orphaned = []
+    for report_path in md_files(match_dir):
+        stem = report_path.stem
+        has_cv = (cv_dir / f"{stem}_CV.md").exists()
+        has_cl = (cl_dir / f"{stem}_CL.md").exists()
+        if not (has_cv or has_cl):
+            continue
+        try:
+            head = report_path.read_text(encoding="utf-8")[:4000]
+        except OSError:
+            continue
+        fm = re.match(r"\A---\n(.*?)\n---\n", head, re.DOTALL)
+        if not fm:
+            continue
+        body = fm.group(1)
+        missing = []
+        if has_cv and not re.search(r"^cv:", body, re.MULTILINE):
+            missing.append("cv")
+        if has_cl and not re.search(r"^cover_letter:", body, re.MULTILINE):
+            missing.append("cover_letter")
+        if missing:
+            orphaned.append(f"{stem} ({'/'.join(missing)})")
+
+    if not orphaned:
+        return []
+    shown = ", ".join(sorted(orphaned)[:5])
+    more = f" and {len(orphaned) - 5} more" if len(orphaned) > 5 else ""
+    return [
+        f"{len(orphaned)} match report(s) do not link a document that exists on "
+        f"disk: {shown}{more}. The document was generated and cannot be reached "
+        f"from the table. Run `python patch_report_doc_links.py --apply` to "
+        f"repair the reports, then find what wrote them without the link — "
+        f"run.py re-finishes them after the generation half for this reason."
+    ]
+
+
 CHECKS = (
+    check_reports_link_their_documents,
+    check_one_document_renderer,
+    check_pdf_identity_ignores_stamped_properties,
+    check_configured_sites_are_dispatched,
+    check_cv_inputs_are_fingerprinted,
     check_submission_threshold_is_reachable,
     check_scrape_fits_its_timeout,
     check_every_site_still_yields,
+    check_configured_sites_are_scheduled,
     check_truncated_descriptions_get_enriched,
     check_floor_below_selection_cutoff,
     check_stored_weights_match_config,
     check_irrelevant_titles_excluded,
+    check_sponsorship_claims_carry_evidence,
+    check_action_tier_respects_its_gates,
     check_unscoreable_excluded,
     check_one_entry_per_document_path,
     check_composite_still_discriminates,

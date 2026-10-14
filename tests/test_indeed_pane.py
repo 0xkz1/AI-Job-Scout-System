@@ -14,6 +14,7 @@ which these tests pin.
 import asyncio
 
 from scraper_indeed import (
+    _MAX_DESCRIPTION_CHARS,
     _PANE_SELECTORS,
     _fill_descriptions_from_pane,
     _pane_description,
@@ -139,10 +140,22 @@ def test_a_card_with_no_jk_is_skipped_rather_than_mispaired():
 
 def test_pane_text_is_capped_and_short_text_rejected():
     """A Cloudflare interstitial is ~162 chars of chrome; a real posting measured
-    12,807-20,406. The >50 floor rejects the empty-pane case, the cap bounds the
-    prompt cost of the long ones."""
-    long_page = FakePage(hrefs=[], pane_text="x" * 9000)
-    assert len(run(_pane_description(long_page))) == 5000
+    12,807-20,406. The >50 floor rejects the empty-pane case; the cap only
+    bounds a runaway.
+
+    The cap was 5,000, below the measurement in this test's own docstring, and
+    it cut 203 of 438 stored Indeed descriptions at exactly that boundary.
+    Scrape-time truncation is the one kind that cannot be undone later — the
+    text is never written to disk — so the cap now sits above the observed
+    range instead of inside it.
+    """
+    normal_page = FakePage(hrefs=[], pane_text="x" * 20406)
+    assert len(run(_pane_description(normal_page))) == 20406, (
+        "a posting inside the measured range is being truncated at scrape time"
+    )
+
+    runaway_page = FakePage(hrefs=[], pane_text="x" * 40000)
+    assert len(run(_pane_description(runaway_page))) == _MAX_DESCRIPTION_CHARS
 
     short_page = FakePage(hrefs=[], pane_text="too short")
     assert run(_pane_description(short_page)) == ""
@@ -168,3 +181,69 @@ def test_viewjob_is_not_used_by_the_scraper():
     source = inspect.getsource(scraper_indeed.scrape_indeed)
     assert "_fetch_job_description" not in source
     assert "_fill_descriptions_from_pane" in source
+
+
+def _all_config():
+    return {"keywords": ["A", "B"], "locations": ["X", "Y"], "max_pages_per_site": {"indeed": 1}}
+
+
+def _patch_all(monkeypatch, results):
+    """Drive scrape_indeed_all with a scripted per-search outcome list."""
+    import scraper_indeed
+
+    calls = []
+
+    async def fake_scrape(kw, loc, **kwargs):
+        calls.append((kw, loc))
+        outcome = results[len(calls) - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(scraper_indeed, "scrape_indeed", fake_scrape)
+    monkeypatch.setattr(scraper_indeed, "load_description_cache", lambda *a, **k: {})
+    monkeypatch.setattr(scraper_indeed, "_SEARCH_PAUSE_SECONDS", 0)
+    return calls
+
+
+def _posting(title):
+    # The description has to contain a configured keyword ("A", per _all_config).
+    # scrape_indeed_all now runs its results through filter_jobs_by_keywords like
+    # every other scraper, so a posting matching nothing is dropped — correct
+    # behaviour, but it would empty these fixtures and make the tests below look
+    # like failures of the resilience they actually check.
+    return {"title": title, "company": "Acme", "location": "X",
+            "description": "keyword A appears in the body"}
+
+
+def test_one_failed_search_does_not_discard_the_others(monkeypatch):
+    """The bug this replaces: search 4 of 30 raised `Page.goto: Timeout 30000ms
+    exceeded`, the exception left scrape_indeed_all, and run.py reported "every
+    requested site failed" while binning the 6 postings already scraped."""
+    from scraper_indeed import scrape_indeed_all
+
+    calls = _patch_all(monkeypatch, [
+        [_posting("one")],
+        TimeoutError("Page.goto: Timeout 30000ms exceeded"),
+        [_posting("two")],
+        [_posting("three")],
+    ])
+
+    jobs = run(scrape_indeed_all(_all_config()))
+
+    assert [j["title"] for j in jobs] == ["one", "two", "three"]
+    # The failure must not stop the remaining searches from being attempted.
+    assert len(calls) == 4
+
+
+def test_a_wholly_failed_run_still_raises(monkeypatch):
+    """A site that scraped nothing must keep reporting failure, or the cron exit
+    code stops meaning anything — that silence is how indeed went 12 days unnoticed."""
+    import pytest
+
+    from scraper_indeed import scrape_indeed_all
+
+    _patch_all(monkeypatch, [TimeoutError("blocked")] * 4)
+
+    with pytest.raises(RuntimeError, match=r"no Indeed search succeeded \(4 failed, 0 skipped\)"):
+        run(scrape_indeed_all(_all_config()))

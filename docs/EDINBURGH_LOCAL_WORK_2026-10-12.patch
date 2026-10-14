@@ -1,0 +1,500 @@
+--- a/config.yaml
++++ b/config.yaml
+@@ -151,6 +151,15 @@
+ - Technical Support
+ - QA Analyst
+ - Research Software Engineer
++# 2026-10-12: local income work, requested alongside the professional search.
++- Administrator
++- Business Support
++- Operations Assistant
++- Warehouse Operative
++- Parcel Sorter
++- Removals Porter
++- Kitchen Porter
++- Stock Assistant
+ # Manchester dropped 2026-08-07 to pay for two keywords since removed (see above). It is the weakest
+ # location on the list for this candidate: Edinburgh-based, needs work now, and a
+ # Manchester post is neither commutable nor a better relocation than London — which
+@@ -184,8 +193,8 @@
+ #   * "Web Developer" gives up Dundee, the smallest of the four markets for it.
+ # Only "Creative Technologist" and "Digital Designer" keep every location — the two
+ # best-measured performers.
+-# Total: 42 pairs, ~1428s on reed. Two more pairs is the whole remaining headroom, so
+-# a new term needs an entry here or an existing one has to give way.
++# Total: 44 pairs: 36 professional + 8 Edinburgh-only local searches.
++# Local searches do not inherit the LinkedIn Remote (Japan) expansion.
+ keyword_locations:
+   Technical Artist: [Edinburgh, Dundee, Glasgow, Remote]
+   Web Developer: [Edinburgh, Glasgow, London, Remote]
+@@ -195,6 +204,14 @@
+   Technical Support: [Edinburgh, Glasgow, Remote]
+   QA Analyst: [Edinburgh, Glasgow, Remote]
+   Research Software Engineer: [Edinburgh, Glasgow, Remote]
++  Administrator: [Edinburgh]
++  Business Support: [Edinburgh]
++  Operations Assistant: [Edinburgh]
++  Warehouse Operative: [Edinburgh]
++  Parcel Sorter: [Edinburgh]
++  Removals Porter: [Edinburgh]
++  Kitchen Porter: [Edinburgh]
++  Stock Assistant: [Edinburgh]
+ 
+ # Locations only ONE site can search, appended to every keyword's location list
+ # for that site alone (selection.search_pairs). No other site sees them, so they
+@@ -283,12 +300,33 @@
+ # longer per-site timeout in job_scout_nightly.sh instead of more depth. Cache hits
+ # cost nothing, so only the first night pays full price.
+ max_pages_per_site:
+-  reed: 3
++  # 44 searches at the measured rate need ~2578s at depth 3 (>2200s).
++  # Depth 2 needs ~1719s and retains every keyword/location.
++  reed: 2
+   adzuna: 3
+   guardian: 3
+   indeed: 1
+   linkedin: 3
+ min_salary_gbp: 26000
++
++# The £26k career floor is not an hourly-work eligibility test. These title-only
++# profiles keep local admin/manual jobs, reference the authored shared CVs and
++# avoid spending the professional CV/CL budget on template copies. They do not
++# bypass seniority, driving, language or employment-type exclusions.
++local_job_profiles:
++  business_administration:
++    title_keywords: [Administrator, Administrative Assistant, Admin Assistant, Business Support, Operations Assistant, Operations Support, Team Assistant]
++    exclude_title_keywords: [System, Systems, Network, Database, IT, Cloud, Salesforce, ServiceNow, Linux, Windows, Azure, SharePoint, CMS, DevOps, Infrastructure]
++    min_salary_gbp: 0
++    cv: career/cv/CV_Business-Administration
++  warehouse_manual:
++    title_keywords: [Warehouse Operative, Warehouse Assistant, Warehouse Worker, Warehouse Sorter, Parcel Sorter, Parcel Sorting, Parcel Sortation, Removals Porter, Removal Porter, Removal Assistant, Removals Assistant, Stock Assistant, Stock Replenishment, Replenishment Assistant, Picker/Packer, Picker Packer, Packing Operative, Dispatch Assistant]
++    min_salary_gbp: 0
++    cv: career/cv/CV_Stock-Replenishment
++  kitchen_porter:
++    title_keywords: [Kitchen Porter, Kitchen Assistant]
++    min_salary_gbp: 0
++    cv: career/cv/CV_Kitchen-Porter
+ sites:
+ - reed
+ - guardian
+--- a/filter.py
++++ b/filter.py
+@@ -124,6 +124,10 @@
+     # and was dropped, though it annualises to roughly £67k. 33 postings in the DB
+     # carried a max under 100 — all of them hourly or daily rates.
+     min_salary = config.get("min_salary_gbp", 0)
++    from local_jobs import local_job_role
++    local_role = local_job_role(title, config)
++    if local_role:
++        min_salary = config["local_job_profiles"][local_role].get("min_salary_gbp", min_salary)
+     if min_salary > 0 and salary.get("max"):
+         annual = _annualise(salary["max"], salary.get("period"))
+         if annual is not None and annual < min_salary:
+--- a/matcher.py
++++ b/matcher.py
+@@ -2459,7 +2459,8 @@
+ 
+ 
+ def calculate_title_relevance(
+-    title: str, context_score: float | None = None, context_source: str | None = None
++    title: str, context_score: float | None = None, context_source: str | None = None,
++    config: dict | None = None
+ ) -> float:
+     """
+     Check if the job title is relevant to target roles.
+@@ -2476,6 +2477,8 @@
+         return 0.5
+         
+     title_lower = title.lower()
++    from local_jobs import local_job_role
++    local_role = local_job_role(title, config)
+     
+     # Target keywords representing the candidate's field
+     target_words = {
+@@ -2501,6 +2504,10 @@
+     }
+     
+     construction_words = {"construction", "site manager", "quantity surveyor", "bricklayer", "plumber", "electrician", "carpenter"}
++    if local_role:
++        # Only requested local domains are unlocked; nurse/driver/etc. stay excluded.
++        exclusion_words -= {"warehouse", "retail", "receptionist", "delivery"}
++        has_target = True
+     
+     has_exclusion = any(w in exclusion_words for w in words) or any(cw in title_lower for cw in construction_words)
+     # Substring, not token: Japanese is written without spaces, so there is no
+@@ -2558,6 +2565,17 @@
+     """
+     user_skills = load_user_skills()
+     user_exp = load_user_experience()
++    from local_jobs import local_job_role, local_job_cv
++    local_role = local_job_role(job.get("title", ""), config)
++
++    def job_persona():
++        persona = _load_persona_summary()
++        cv = local_job_cv(local_role, config)
++        if cv:
++            source = USER_PROFILE_DIR / (cv + ".md")
++            if source.is_file():
++                persona += "\n--- LOCAL WORK: VERIFIED SHARED CV ---\n" + source.read_text(encoding="utf-8")
++        return persona
+ 
+     analysis = job.get("analysis", {})
+     job_skills = analysis.get("skills", [])
+@@ -2656,7 +2674,7 @@
+         # here because the two errors are not equal — a false low is a job
+         # that is never seen, a false high is a CV that the review then scores
+         # and rejects for the price of generating it.
+-        persona = _load_persona_summary()
++        persona = job_persona()
+         new_ctx = _ollama_context_score(job_description, persona) if (persona and job_description) else None
+         if new_ctx:
+             # Keep the new draw's prose: it is the read that actually happened.
+@@ -2675,7 +2693,7 @@
+         ctx_match = legacy_ctx
+     else:
+         # Use LLM for context scoring (or TF-IDF fallback)
+-        persona = _load_persona_summary()
++        persona = job_persona()
+         llm_ctx = None
+         attempted_llm = bool(persona and job_description and not skip_llm_context)
+         if attempted_llm:
+@@ -2726,7 +2744,8 @@
+ 
+     # Title relevance filter
+     relevance = calculate_title_relevance(
+-        job.get("title", ""), context_score=ctx_match.get("score"), context_source=ctx_source
++        job.get("title", ""), context_score=ctx_match.get("score"), context_source=ctx_source,
++        config=config
+     )
+     composite = composite * relevance
+ 
+@@ -2797,6 +2816,7 @@
+         # apart from one produced by the intended model and refreshed on its own.
+         "context_provider": ctx_match.get("provider"),
+         "title_relevance": relevance,
++        "local_job_role": local_role,
+         "weights": weights,
+         "summary_en": summary_en,
+         "summary_ja": summary_ja,
+--- a/selection.py
++++ b/selection.py
+@@ -138,9 +138,11 @@
+     per_keyword = config.get("keyword_locations") or {}
+     extra = list((config.get("site_only_locations") or {}).get(site) or []) if site else []
+     pairs: list[tuple[str, str]] = []
++    from local_jobs import local_job_role
+     for kw in keywords:
+         locs = list(per_keyword.get(kw) or locations)
+-        locs += [loc for loc in extra if loc not in locs]
++        if not local_job_role(kw, config):
++            locs += [loc for loc in extra if loc not in locs]
+         pairs += [(kw, loc) for loc in locs]
+     return pairs
+ 
+@@ -433,6 +435,8 @@
+     CLI --limit-style override that is expressed as a percentage)."""
+     config = config if config is not None else load_config()
+     ranked = ranked_jobs(config, jobs)
++    from local_jobs import local_job_role
++    ranked = [j for j in ranked if not local_job_role(j.get("title", ""), config)]
+     pct = percent if percent is not None else stage_percent(config, stage)
+     k = top_percent_count(len(ranked), pct)
+ 
+--- a/run.py
++++ b/run.py
+@@ -620,7 +620,11 @@
+     letter_dir = os.path.join(output_dir, "10_cover-letters")
+     os.makedirs(letter_dir, exist_ok=True)
+ 
+-    passed_jobs = [j for j in jobs if not j.get("_filter_reason")]
++    from local_jobs import local_job_role, local_job_cv
++    # Local work uses the authored shared CVs; it does not consume the pool for
++    # tailored professional documents or generate a technical cover letter.
++    passed_jobs = [j for j in jobs if not j.get("_filter_reason")
++                   and not local_job_role(j.get("title", ""), config)]
+ 
+     cv_threshold = config.get("match_score_threshold", 0.50)
+     # CV/CL generation is the expensive part (one LLM pass each), so it acts only
+@@ -677,6 +681,7 @@
+         match = job.get("match", {})
+         if not match:
+             continue
++        local_role = local_job_role(job.get("title", ""), config)
+         is_filtered = bool(job.get("_filter_reason"))
+         base = make_safe_name(job.get('company', 'company'), job.get('title', 'job'))
+         # Distinct jobs can share company+title (dedupe keeps them separate when
+@@ -710,6 +715,8 @@
+         wants_documents = is_stretch or (
+             within_limit and composite_score >= cv_threshold and not is_filtered
+         )
++        if local_role:
++            wants_documents = False
+         # A job ticked applied or expired is frozen (see gen_version). Both
+         # steps below only write when the file is absent, so what this stops is
+         # a FIRST CV/CL — which is the whole point for `expired`: a closed
+@@ -772,6 +779,14 @@
+             expired=read_expired_flag(Path(report_path)),
+             applied=read_applied_flag(Path(report_path)),
+         )
++        if local_role:
++            import json
++            shared_cv = local_job_cv(local_role, config)
++            local_meta = "local_job_role: " + json.dumps(local_role)
++            if shared_cv:
++                local_meta += "\nshared_cv: " + json.dumps("[[" + shared_cv + "]]", ensure_ascii=False)
++                report += "\n\n## 応募用の共有CV\n\n[[" + shared_cv + "]]\n"
++            report = report.replace("---\n", "---\n" + local_meta + "\n", 1)
+         # Reports are fully regenerated each run, but some frontmatter is owned
+         # by the WebUI rather than the analyzer — cv_pdf/cl_pdf are written at
+         # PDF-conversion time. Carry them over or they'd vanish on every
+--- a/jis_hermes_bridge.py
++++ b/jis_hermes_bridge.py
+@@ -29,6 +29,7 @@
+     sys.path.insert(0, str(ROOT))
+ 
+ import selection
++from local_jobs import local_job_role
+ 
+ ANALYZED_FILE = ROOT / "10_output" / "_analyzed.json"
+ CV_DIR = ROOT / "10_output" / "10_cvs"
+@@ -288,8 +289,8 @@
+         sys.exit(1)
+ 
+     print(f"[{time.strftime('%H:%M:%S')}] Loading ranked jobs from {ANALYZED_FILE.name}...")
++    config = selection.load_config()
+     try:
+-        config = selection.load_config()
+         jobs = selection.ranked_jobs(config=config)
+     except Exception as e:
+         print(f"Fallback direct load (selection.ranked_jobs failed: {e})")
+@@ -304,6 +305,10 @@
+ 
+     high_matches = []
+     for job in jobs:
++        # Local jobs use shared CVs and human applications; no technical documents
++        # or autonomous review-editor task is needed for them.
++        if local_job_role(job.get("title", ""), config):
++            continue
+         score = (job.get("match", {}).get("composite_score", 0)
+                  or job.get("composite_score", 0))
+         if score >= args.min_score:
+--- /dev/null
++++ b/local_jobs.py
+@@ -0,0 +1,23 @@
++"""Configured local work, recognised from titles without model calls."""
++from __future__ import annotations
++
++import re
++
++
++def local_job_role(title: str, config: dict | None = None) -> str | None:
++    if config is None:
++        from selection import load_config
++        config = load_config()
++    for role, profile in (config.get("local_job_profiles") or {}).items():
++        def matches(phrase: str) -> bool:
++            return bool(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)",
++                                  title or "", re.IGNORECASE))
++        if any(matches(p) for p in profile.get("exclude_title_keywords", [])):
++            continue
++        if any(matches(p) for p in profile.get("title_keywords", [])):
++            return role
++    return None
++
++
++def local_job_cv(role: str | None, config: dict) -> str:
++    return (config.get("local_job_profiles", {}).get(role, {}).get("cv") or "")
+--- /dev/null
++++ b/tests/test_local_jobs.py
+@@ -0,0 +1,178 @@
++"""Local income work survives career filters without admitting unrelated jobs."""
++from pathlib import Path
++import copy
++import pytest
++import yaml
++import filter as job_filter
++import matcher
++import selection
++from local_jobs import local_job_role
++
++ROOT = Path(__file__).resolve().parents[1]
++
++@pytest.fixture
++def config():
++    return yaml.safe_load((ROOT / 'config.yaml').read_text())
++
++@pytest.mark.parametrize('title,role',[
++ ('Administrator Part Time','business_administration'),
++ ('Business Support Administrator','business_administration'),
++ ('Operations Assistant','business_administration'),
++ ('Warehouse Operative - Days - Part Time','warehouse_manual'),
++ ('Parcelforce Warehouse Sorter','warehouse_manual'),
++ ('Removals Porter','warehouse_manual'),
++ ('Stock Assistant','warehouse_manual'),
++ ('Kitchen Porter at Royal Botanic Garden Edinburgh','kitchen_porter'),
++])
++def test_local_titles_have_relevance(title,role,config):
++    assert local_job_role(title, config) == role
++    assert matcher.calculate_title_relevance(title, config=config) == 1.0
++
++@pytest.mark.parametrize('title',[
++ 'Systems Administrator','IT Support Administrator','Linux Administrator',
++ 'ServiceNow Platform Administrator','Cloud Network Administrator',
++ 'UX Designer','Customer Support Engineer','Senior Software Engineer',
++ 'Support Worker','Porter', 'Warehouse Operativeship',
++])
++def test_technical_and_unrequested_titles_are_not_local(title,config):
++    assert local_job_role(title,config) is None
++
++
++def job(title,amount=12.71,period='hourly'):
++    return {'title':title,'company':'Local Test Company','location':'Edinburgh',
++            'url':'https://example.invalid/jobs/local',
++            'description':('Receive and organise deliveries, check items carefully and work with colleagues. '
++                           'Follow the supervisor instructions, keep work areas clean and follow safety procedures. ')*4,
++            'analysis':{'salary':{'min':amount,'max':amount,'period':period},
++                        'employment_types':['part_time'],'experience_level':'entry_level',
++                        'skills':['Manual Handling'],'work_style':'onsite'}}
++
++@pytest.mark.parametrize('title',['Warehouse Operative','Kitchen Porter','Administrator Part Time'])
++def test_hourly_and_part_time_income_is_not_rejected_as_low_career_salary(title,config):
++    assert job_filter.passes_filter(job(title),config) == (True,'')
++    assert job_filter.passes_filter(job(title,18000,'annual'),config) == (True,'')
++
++@pytest.mark.parametrize('title',['Junior Web Developer','Systems Administrator','IT Support Administrator'])
++def test_professional_salary_floor_stays_active(title,config):
++    ok,reason=job_filter.passes_filter(job(title),config)
++    assert not ok and 'min £26000' in reason
++
++@pytest.mark.parametrize('title',['Senior Warehouse Operative','Warehouse Driver','Nurse Administrator'])
++def test_local_profiles_do_not_bypass_seniority_or_driving_or_clinical_exclusions(title,config):
++    assert not job_filter.passes_filter(job(title),config)[0]
++    if title != 'Senior Warehouse Operative':
++        assert matcher.calculate_title_relevance(title,config=config) == 0.0
++
++
++def test_description_mentions_do_not_unlock_an_unrequested_role(config):
++    item=job('Junior Web Developer');item['description'] += ' Support the warehouse operative and kitchen porter.'
++    assert not job_filter.passes_filter(item,config)[0]
++    assert local_job_role(item['title'],config) is None
++
++
++def test_disabling_profiles_restores_old_warehouse_gate(config):
++    cfg=dict(config,local_job_profiles={})
++    assert matcher.calculate_title_relevance('Warehouse Operative',config=cfg) == 0.0
++    assert not job_filter.passes_filter(job('Warehouse Operative'),cfg)[0]
++
++
++def test_search_budget_and_local_location_scope(config):
++    pairs=selection.search_pairs(config)
++    assert len(pairs)==44
++    assert len(pairs)==len(set(pairs))
++    local=[(kw,loc) for kw,loc in pairs if local_job_role(kw,config)]
++    assert len(local)==8 and all(loc=='Edinburgh' for kw,loc in local)
++    linkedin=selection.search_pairs(config,site='linkedin')
++    assert all(loc=='Edinburgh' for kw,loc in linkedin if local_job_role(kw,config))
++    assert ('Creative Technologist','Remote (Japan)') in linkedin
++    assert len(linkedin)==54
++
++
++def test_high_scoring_local_job_links_shared_cv_without_generating_technical_documents(config,tmp_path,monkeypatch):
++    import run
++    item=job('Warehouse Operative - Days - Part Time')
++    item['match']=matcher.analyze_match(item,config,skip_summary=True,skip_llm_context=True)
++    assert item['match']['title_relevance']==1.0
++    item['match']['composite_score']=0.95
++    def forbidden(*args,**kwargs):
++        raise AssertionError('Local work must use the shared CV, not generate technical documents')
++    monkeypatch.setattr(run,'generate_cv',forbidden)
++    monkeypatch.setattr(run,'save_cover_letter',forbidden)
++    run.generate_outputs([item],config,str(tmp_path))
++    reports=list((tmp_path/'00_matches').glob('*.md'))
++    assert len(reports)==1
++    text=reports[0].read_text()
++    assert 'local_job_role: "warehouse_manual"' in text
++    assert 'shared_cv: "[[career/cv/CV_Stock-Replenishment]]"' in text
++    assert not list((tmp_path/'10_cvs').glob('*.md'))
++    assert not list((tmp_path/'10_cover-letters').glob('*.md'))
++    # A nightly regeneration must preserve human-owned application/expiry flags.
++    reports[0].write_text(text.replace('applied: false','applied: true').replace('expired: false','expired: true'))
++    run.generate_outputs([item],config,str(tmp_path))
++    assert 'applied: true' in reports[0].read_text()
++    assert 'expired: true' in reports[0].read_text()
++
++
++def test_local_context_sees_confirmed_practical_experience(config,monkeypatch):
++    seen=[]
++    monkeypatch.setattr(matcher,'_load_persona_summary',lambda:'Professional profile')
++    def score(description,persona):
++        seen.append(persona)
++        return {'score':0.7,'reasoning':'Relevant prior removals and kitchen work.'}
++    monkeypatch.setattr(matcher,'_ollama_context_score',score)
++    result=matcher.analyze_match(job('Warehouse Operative'),config,skip_summary=True)
++    assert result['local_job_role']=='warehouse_manual'
++    assert len(seen)==1
++    assert 'Hikkoshi-sha' in seen[0] and '2015–2017' in seen[0]
++    assert 'Irohani-hoheto' in seen[0] and '2013–2015' in seen[0]
++
++
++def test_income_titles_do_not_reset_professional_document_selection(config,tmp_path,monkeypatch):
++    import run
++    captured=[]
++    original=selection.select_top
++    def selected(stage,cfg,jobs):
++        captured.append([j['title'] for j in jobs])
++        return original(stage,cfg,jobs=jobs)
++    monkeypatch.setattr(selection,'select_top',selected)
++    local=job('Warehouse Operative')
++    local['match']=matcher.analyze_match(local,config,skip_summary=True,skip_llm_context=True)
++    run.generate_outputs([local],config,str(tmp_path))
++    assert captured[0]==[]
++
++
++def test_local_jobs_remain_ranked_but_do_not_consume_document_or_review_slots(config):
++    items=[job('Warehouse Operative'),job('Junior Web Developer',35000,'annual')]
++    for item,score in zip(items,[0.99,0.7]):
++        item['url'] += item['title'].replace(' ','-')
++        item['match']=matcher.analyze_match(item,config,skip_summary=True,skip_llm_context=True)
++        item['match']['composite_score']=score
++    assert len(selection.ranked_jobs(config,jobs=items))==2
++    for stage in ['generation','review']:
++        picked=selection.select_top(stage,config,jobs=items,percent=100)
++        assert [j['title'] for j in picked]==['Junior Web Developer']
++
++
++def test_shipped_configuration_fits_measured_scraper_timeouts(config):
++    from invariants import check_scrape_fits_its_timeout
++    assert check_scrape_fits_its_timeout(config)==[]
++
++
++@pytest.mark.parametrize('mode', ['--dry-run', '--generate-only', '--review-only'])
++def test_bridge_does_not_generate_or_queue_local_jobs(config,tmp_path,monkeypatch,capsys,mode):
++    import sys
++    import jis_hermes_bridge as bridge
++    data=tmp_path/'_analyzed.json'
++    data.write_text('[]')
++    item=job('Warehouse Operative')
++    item['match']={'composite_score':0.99}
++    monkeypatch.setattr(bridge,'ANALYZED_FILE',data)
++    monkeypatch.setattr(selection,'load_config',lambda:config)
++    monkeypatch.setattr(selection,'ranked_jobs',lambda **kwargs:[item])
++    def forbidden(*args,**kwargs):
++        raise AssertionError('Local jobs must not enter autonomous document review')
++    monkeypatch.setattr(bridge,'generate_documents',forbidden)
++    monkeypatch.setattr(bridge,'create_review_task',forbidden)
++    monkeypatch.setattr(sys,'argv',['jis_hermes_bridge.py',mode])
++    bridge.main()
++    assert 'Found 0 jobs' in capsys.readouterr().out
+--- a/tests/test_japan_remote_search.py
++++ b/tests/test_japan_remote_search.py
+@@ -327,7 +327,9 @@
+     if not (config.get("site_only_locations") or {}).get("linkedin"):
+         pytest.skip("no site-only location configured")
+     aliases = config.get("keyword_aliases") or {}
+-    missing = [k for k in (config.get("keywords") or []) if not aliases.get(k)]
++    searched_in_japan = [k for k, loc in selection.search_pairs(config, site="linkedin")
++                         if loc == "Remote (Japan)"]
++    missing = [k for k in searched_in_japan if not aliases.get(k)]
+     assert not missing, f"no Japanese alias for: {missing}"
+ 
+ 

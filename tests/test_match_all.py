@@ -76,9 +76,17 @@ def test_only_first_three_failures_print_in_full(monkeypatch, capsys):
 
 def test_kwargs_reach_analyze_match(monkeypatch):
     """The reanalyze pass calls with skip_summary=True; dropping it would silently
-    re-pay for LLM job summaries on every job."""
+    re-pay for LLM job summaries on every job.
+
+    match_all now also decides skip_llm_context per job — a filter reject is not
+    worth an LLM context call — so that kwarg arrives ALONGSIDE the caller's, not
+    instead of it. Pinning the whole dict made this test fail on a change that was
+    correct; pin the kwarg the caller paid for, and that the per-job one is still
+    being passed at all.
+    """
     seen = {}
     monkeypatch.setattr(run, "analyze_match",
                         lambda job, cfg, **k: seen.update(k) or {"composite_score": 1})
     run.match_all(_jobs(1), {}, skip_summary=True)
-    assert seen == {"skip_summary": True}
+    assert seen.get("skip_summary") is True, seen
+    assert "skip_llm_context" in seen, seen

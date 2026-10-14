@@ -1,14 +1,27 @@
 """Nightly scout post-processing — run AFTER scraping/analysis/generation.
 
 1. Diff _analyzed.json against the last run's state to find NEW high matches.
-2. Auto-review the CV/CL of new matches scoring >= REVIEW_MIN.
+2. Auto-review the CV/CL of new matches in the top review_top_percent of the
+   ranked pool (selection.select_top("review", ...) — same mechanism CV/CL
+   generation already used, now shared instead of reinvented).
 3. Print a Telegram-ready summary to stdout — the Hermes cron job runs in
    no-agent mode, so stdout IS the notification. Empty stdout = silent night.
 
 First run (no state file) records a baseline silently so the existing
 backlog doesn't spam the channel.
 
-Env overrides: SCOUT_NOTIFY_MIN (default 0.70), SCOUT_REVIEW_MIN (0.80).
+Env overrides: SCOUT_NOTIFY_MIN (default 0.70).
+
+Review used to be gated on an absolute composite_score floor (REVIEW_MIN, env
+SCOUT_REVIEW_MIN = 0.80) while generation already went through
+selection.select_top() on config.yaml:generation_top_percent — two mechanisms
+answering one question. Switched 2026-08-06 to select_top("review", ...), so
+both stages rank the same pool the same way and the cut is set in one place.
+
+Selection is by composite_score rank, nothing else: the review score cannot
+inform it, because a document has no review score until it has been reviewed.
+On the current pool the top 40% cuts at composite 0.53 and covers 488 of 1178
+ranked jobs, against 23 under the old 0.80 floor.
 """
 import sys, os, json, hashlib
 from pathlib import Path
@@ -22,13 +35,39 @@ for k, v in dotenv_values(ROOT / ".env").items():
         os.environ.setdefault(k, v)
 
 NOTIFY_MIN = float(os.environ.get("SCOUT_NOTIFY_MIN", "0.70"))
-REVIEW_MIN = float(os.environ.get("SCOUT_REVIEW_MIN", "0.80"))
 
 OUTPUT_DIR = ROOT / "10_output"
 STATE_FILE = OUTPUT_DIR / "_nightly_state.json"
 RUN_SUMMARY = OUTPUT_DIR / "_nightly_run_summary.tsv"
+SITE_YIELD = OUTPUT_DIR / "_nightly_site_yield.tsv"
+YIELD_HISTORY = OUTPUT_DIR / "_nightly_site_yield_history.json"
+STATUS_HISTORY = OUTPUT_DIR / "_nightly_site_status_history.json"
+
+# Nights without a clean scrape before a site is called stale.
+#
+# summarize_sites already reports tonight's timeouts and budget skips, so none
+# of this is invisible on any single night. What one night cannot say is whether
+# it is a hiccup or the standing shape of the run. Between 2026-08-12 and
+# 08-15 guardian, adzuna and remote_apis were skipped every night — each night's
+# message said "予算切れで未実行" and each read like an unlucky night, while the
+# yield history froze at one entry apiece because a site that never runs never
+# records a zero. dry_sites cannot see this: it only judges sites that ran.
+#
+# Three, not two: the budget is genuinely spent by a slow night now and again,
+# and a warning that fires on ordinary variance is one people learn to skip.
+STALE_NIGHTS_BEFORE_WARNING = 3
+
+# Nights of zero jobs, from a site that exited cleanly, before it is reported.
+# One is normal — a narrow keyword set on a quiet night genuinely returns
+# nothing new. Two in a row is not: it means the scrape is broken in the way
+# that leaves no trace, which is how Indeed went 11 nights unnoticed. LinkedIn
+# is the standing risk here, since the guest scraper parses class names that
+# LinkedIn can rename without warning.
+DRY_NIGHTS_BEFORE_WARNING = 2
+YIELD_HISTORY_KEEP = 10
 CV_DIR = OUTPUT_DIR / "10_cvs"
 CL_DIR = OUTPUT_DIR / "10_cover-letters"
+MATCH_DIR = OUTPUT_DIR / "00_matches"
 
 
 def load_run_summary() -> list[dict]:
@@ -43,7 +82,12 @@ def load_run_summary() -> list[dict]:
             if len(parts) != 3:
                 continue
             site, rc, elapsed = parts[0], int(parts[1]), int(parts[2])
-            status = "ok" if rc == 0 else "timeout" if rc == 124 else "error"
+            # 125 is the nightly script's own code for a site it never started
+            # because the sites before it had spent the scrape budget. Reporting
+            # that as a failure would send someone to debug a scraper that is
+            # working; the fault is upstream, in how long the earlier ones took.
+            status = ("ok" if rc == 0 else "timeout" if rc == 124
+                      else "skipped" if rc == 125 else "error")
             out.append({"site": site, "exit": rc, "elapsed": elapsed, "status": status})
     except Exception:
         pass
@@ -57,11 +101,139 @@ def summarize_sites(summary: list[dict]) -> tuple[str, bool]:
     bad = [s for s in summary if s["status"] != "ok"]
     parts = []
     for s in bad:
-        label = "タイムアウト" if s["status"] == "timeout" else f"失敗(exit {s['exit']})"
+        if s["status"] == "timeout":
+            label = "タイムアウト"
+        elif s["status"] == "skipped":
+            label = "予算切れで未実行"
+        else:
+            label = f"失敗(exit {s['exit']})"
         parts.append(f"❌{s['site']} {label}")
     if ok:
         parts.append(f"✓{'・'.join(s['site'] for s in ok)}")
     return "  ".join(parts), bool(bad)
+
+
+def load_site_yield() -> dict[str, int]:
+    """Per-site job counts written by run.py via JIS_YIELD_FILE, as {site: count}.
+    Empty when the file is absent — an older nightly script, or a run that never
+    reached the scrape phase."""
+    out: dict[str, int] = {}
+    try:
+        for line in SITE_YIELD.read_text().splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2:
+                continue
+            try:
+                out[parts[0]] = int(parts[1])
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def update_yield_history(yields: dict[str, int]) -> dict[str, list[int]]:
+    """Append tonight's counts to the rolling per-site history and save it.
+
+    Only sites that ran tonight are appended, so a site removed from the nightly
+    keeps its last known run rather than accumulating phantom zeroes that would
+    eventually fire a warning about a scraper nobody is running.
+    """
+    try:
+        history = json.loads(YIELD_HISTORY.read_text())
+        if not isinstance(history, dict):
+            history = {}
+    except Exception:
+        history = {}
+
+    for site, count in yields.items():
+        past = history.get(site) or []
+        if not isinstance(past, list):
+            past = []
+        history[site] = (past + [count])[-YIELD_HISTORY_KEEP:]
+
+    try:
+        YIELD_HISTORY.write_text(json.dumps(history, indent=0))
+    except OSError:
+        pass
+    return history
+
+
+def dry_sites(history: dict[str, list[int]], yields: dict[str, int]) -> list[str]:
+    """Sites that ran tonight and have returned nothing for enough consecutive
+    nights to be reported. Judged on the recorded history, so a site is only
+    flagged once there is evidence rather than on its first quiet night."""
+    flagged = []
+    for site in yields:
+        recent = (history.get(site) or [])[-DRY_NIGHTS_BEFORE_WARNING:]
+        if len(recent) >= DRY_NIGHTS_BEFORE_WARNING and not any(recent):
+            flagged.append(f"{site}({len(recent)}晩連続0件)")
+    return flagged
+
+
+def update_status_history(summary: list[dict],
+                          yields: dict[str, int] | None = None) -> dict[str, list[str]]:
+    """Append tonight's per-site outcome to the rolling status history and save.
+
+    Unlike the yield history, a skipped or timed-out site is recorded too — that
+    is the whole point. The yield history deliberately holds only sites that
+    ran, which leaves the ones that never start with no record at all.
+
+    A site that returned jobs is recorded as "partial" rather than by its exit
+    code. adzuna exits 124 every night because the budget cuts it off, and it
+    still returns more jobs than any other site here — 845 on 2026-08-19, the
+    most any site has. Recording that as a plain timeout made it three nights
+    from being reported as 未取得, which would have been false: nothing was
+    missing from it except the tail.
+
+    Sites absent from tonight's summary are left untouched, so removing a site
+    from the nightly does not accumulate phantom failures against it.
+    """
+    yields = yields or {}
+    try:
+        history = json.loads(STATUS_HISTORY.read_text())
+        if not isinstance(history, dict):
+            history = {}
+    except Exception:
+        history = {}
+
+    for row in summary:
+        site = row["site"]
+        past = history.get(site) or []
+        if not isinstance(past, list):
+            past = []
+        outcome = row["status"]
+        if outcome != "ok" and yields.get(site, 0) > 0:
+            outcome = "partial"
+        history[site] = (past + [outcome])[-YIELD_HISTORY_KEEP:]
+
+    try:
+        STATUS_HISTORY.write_text(json.dumps(history, indent=0))
+    except OSError:
+        pass
+    return history
+
+
+def stale_sites(history: dict[str, list[str]], summary: list[dict]) -> list[str]:
+    """Sites that have not completed a scrape for enough consecutive nights to
+    be a standing problem rather than an unlucky night.
+
+    Judged only on sites in tonight's summary, so a site retired from the
+    nightly stops being reported once it stops appearing.
+    """
+    flagged = []
+    tonight = {s["site"] for s in summary}
+    for site in sorted(tonight):
+        recent = (history.get(site) or [])[-STALE_NIGHTS_BEFORE_WARNING:]
+        if len(recent) < STALE_NIGHTS_BEFORE_WARNING:
+            continue
+        # "partial" counts as productive: the site returned jobs, it was only
+        # cut off. Only a site that produced nothing for the whole window is
+        # missing in the sense this warning means.
+        if any(status in ("ok", "partial") for status in recent):
+            continue
+        flagged.append(f"{site}({len(recent)}晩連続未取得)")
+    return flagged
 
 
 def load_jobs() -> list[dict]:
@@ -129,28 +301,76 @@ def main():
         key=lambda j: j["match"]["composite_score"], reverse=True,
     )
 
+    # Same jobs list object passed to select_top so its dedup keeps the
+    # original dicts (selection._dedupe returns winners by reference, never a
+    # copy) — id() membership below is safe because of that, not despite it.
+    from selection import select_top
+    review_set_ids = {id(j) for j in select_top("review", config, jobs=jobs)}
+
     reviewed, review_failed, reviewed_jobs = [], [], set()
     ready_count = 0
+
+    # Deciding WHAT to review is local file work — existence, the lock marker,
+    # whether a stored review still matches the document's hash. Doing it up
+    # front keeps the loop that spends money down to one flat list.
+    pending: list = []
     for j in new_high:
-        if j["match"]["composite_score"] < REVIEW_MIN:
+        if id(j) not in review_set_ids:
             continue
         base = resolve_base(j.get("company", ""), j.get("title", ""), j.get("url", ""))
         for kind, d in (("CV", CV_DIR), ("CL", CL_DIR)):
             doc = d / f"{base}_{kind}.md"
             if not doc.exists():
                 continue
+            # Locked (hand-edited / applied / expired): run_review writes a
+            # backlink into the document, and a verdict on a submitted or
+            # closed application is advice that can no longer be taken.
+            import gen_version
+            if gen_version.is_locked(base, doc.read_text(encoding="utf-8"), MATCH_DIR):
+                continue
             try:
-                from reviewer import run_review, review_is_current, get_score_threshold, _extract_score
-                if not review_is_current(doc)[0]:
-                    review_path = run_review(kind, doc, j)
-                    reviewed.append(f"{base}_{kind}")
-                    reviewed_jobs.add(base)
-                    score, fact_block, _nits = _extract_score(
-                        review_path.read_text(encoding="utf-8"))
-                    if score is not None and not fact_block and score >= get_score_threshold():
-                        ready_count += 1
+                from reviewer import review_is_current
+                if review_is_current(doc)[0]:
+                    continue
             except Exception as e:
                 review_failed.append(f"{base}_{kind}: {str(e)[:60]}")
+                continue
+            pending.append((base, kind, doc, j))
+
+    def _review_one(task):
+        base, kind, doc, j = task
+        from reviewer import run_review, get_score_threshold, _extract_score
+        try:
+            review_path = run_review(kind, doc, j)
+            score, fact_block, _nits = _extract_score(
+                review_path.read_text(encoding="utf-8"))
+            ready = (score is not None and not fact_block
+                     and score >= get_score_threshold())
+            return base, kind, ready, None
+        except Exception as e:
+            return base, kind, False, str(e)[:60]
+
+    # One review is one LLM call on a long document, and the backlog they come
+    # from is not small: after the 2026-08-21 drain, 341 documents were waiting
+    # with none of them reviewed. Serial, at the measured rate, that is a night
+    # of its own — and reviews are the last stage, so everything behind them
+    # waits too. Each review reads and writes only its own pair of files.
+    workers = max(1, int((config or {}).get("analysis_workers") or 1))
+    if workers > 1 and len(pending) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(_review_one, pending))
+    else:
+        results = [_review_one(t) for t in pending]
+
+    for base, kind, ready, err in results:
+        if err:
+            review_failed.append(f"{base}_{kind}: {err}")
+            continue
+        reviewed.append(f"{base}_{kind}")
+        reviewed_jobs.add(base)
+        if ready:
+            ready_count += 1
 
     STATE_FILE.write_text(json.dumps({"seen": sorted(seen | set(current))}, indent=0))
 
@@ -160,20 +380,43 @@ def main():
     summary = load_run_summary()
     health_line, any_failure = summarize_sites(summary)
 
-    if not new_high and not any_failure:
+    # A clean exit with an empty result set is the failure the exit code cannot
+    # express, so it breaks the silence on the same terms as an outright error.
+    yields = load_site_yield()
+    dry = dry_sites(update_yield_history(yields), yields)
+    dry_line = f"🕳 収穫ゼロ: {'・'.join(dry)} — セレクタ切れの疑い" if dry else ""
+
+    # health_line already names tonight's timeouts and skips. This says how long
+    # they have been going on, which is the part a single night cannot carry: a
+    # site skipped once lost a night, a site skipped every night since Tuesday
+    # is not in the nightly at all any more and nobody decided that.
+    stale = stale_sites(update_status_history(summary, yields), summary)
+    stale_line = (f"🚨 {'・'.join(stale)} — 予算配分かタイムアウトの設定を見直す"
+                  if stale else "")
+
+    if not new_high and not any_failure and not dry:
         return  # every site ok, nothing new — the only truly silent case
 
     if not new_high:
-        # No new matches but a site failed — tell the user why it was quiet.
-        print(f"⚠️ AI Job Scout — 新着なし。スクレイプに問題:\n{health_line}")
+        # No new matches but a site failed or came back empty — say which.
+        detail = "\n".join(x for x in (health_line, stale_line, dry_line) if x)
+        print(f"⚠️ AI Job Scout — 新着なし。スクレイプに問題:\n{detail}")
         return
 
     lines = [f"🎯 AI Job Scout — 新着の高マッチ {len(new_high)}件 (新規求人{len(new_jobs)}件中)"]
     if health_line:
         lines.append(f"📡 {health_line}")
+    if stale_line:
+        lines.append(stale_line)
+    if dry_line:
+        lines.append(dry_line)
     for j in new_high[:10]:
         s = j["match"]["composite_score"]
-        flag = "🔥" if s >= REVIEW_MIN else "✨"
+        # Distinguishes "reviewed tonight" from "notified but ranked outside
+        # the top review_top_percent" — restored by the switch to select_top,
+        # which naturally leaves some of new_high out again (a fixed
+        # percentage of the pool, not everything above NOTIFY_MIN).
+        flag = "🔥" if id(j) in review_set_ids else "✨"
         lines.append(f"{flag} {s*100:.0f}%  {j.get('company','?')} — {j.get('title','?')}")
         if j.get("location"):
             lines[-1] += f"  ({j['location']})"

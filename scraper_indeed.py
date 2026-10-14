@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import os
+import sys
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -39,10 +40,101 @@ _CARD_SELECTOR = "div.job_seen_beacon"
 # wait needed.
 _PANE_TIMEOUT_MS = 8000
 
+# Pause between searches. Indeed throttles the search listing itself — three
+# back-to-back searches succeeded and the fourth timed out — and the listing is
+# fetched once per search whether it returns 2 cards or 16.
+_SEARCH_PAUSE_SECONDS = 8
+
+# Cloudflare's decision is not deterministic — on 2026-08-04, 11 of 36 searches
+# were let through and 25 were challenged; on 2026-08-05, all 36 were challenged.
+# A challenge is therefore worth re-attempting from a fresh browser context
+# rather than writing the search off, as long as the retries are paced enough to
+# not read as a burst themselves.
+_CLOUDFLARE_RETRIES = 2
+_CLOUDFLARE_RETRY_PAUSE_SECONDS = 45
+
+
+class CloudflareUnattended(RuntimeError):
+    """A challenge appeared and this run has no way to answer it, ever.
+
+    Separate from CloudflareBlocked because the two need opposite handling. A
+    transient block is worth another attempt with a fresh session. This one is a
+    property of the run, not of the request: with no terminal there is nobody to
+    solve the interstitial, and the next search will meet the same wall. Retrying
+    it is how the first attempt at this fix made the night SLOWER -- the 30-second
+    wait it removed came back as 45-second retry pauses, and indeed went from
+    2,046s/exit 0 to 2,400s/exit 124. The caller stops the run instead.
+    """
+
+
+class CloudflareBlocked(RuntimeError):
+    """The search listing served a challenge page that this run cannot solve.
+
+    Distinct from a generic failure so the caller can retry it specifically: a
+    timeout means Indeed is throttling and more requests make it worse, whereas
+    a challenge is a coin flip that is worth flipping again.
+    """
+
+
+def _a_human_is_watching() -> bool:
+    """Whether a Cloudflare interstitial has anyone who could answer it.
+
+    `_headed_display_available` says a window CAN open, which in cron on this
+    machine is true: the scheduler runs on the desktop and its X socket is live.
+    Nobody is sitting at it at 02:00. stdin is what separates the two — a person
+    running this by hand has a terminal, a cron job does not.
+    """
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
+def _can_solve_challenge() -> bool:
+    """A headed retry is only worth starting if a window can open AND be used."""
+    return _headed_display_available() and _a_human_is_watching()
+
+
+def _headed_display_available() -> bool:
+    """Whether a headed chromium could actually start.
+
+    Testing `DISPLAY` for presence alone is not enough and was the specific
+    reason Indeed produced nothing for weeks: the cron job inherits DISPLAY from
+    the desktop session that spawned the scheduler, so the variable is set while
+    no X server is reachable from the job. The headed relaunch then died with
+    "Missing X server or $DISPLAY" on every one of the 36 searches. Check that
+    the socket the display names is actually there.
+    """
+    display = os.environ.get("DISPLAY", "").strip()
+    if not display:
+        return False
+    # "host:0.0" — a remote/TCP display; no local socket to inspect, so trust it.
+    host, _, rest = display.rpartition(":")
+    if host:
+        return True
+    number = rest.split(".")[0]
+    if not number.isdigit():
+        return False
+    return os.path.exists(f"/tmp/.X11-unix/X{number}")
+
 # Description containers in the preview pane, best first. The second is the
 # wrapper and carries the "Job details / Pay / Job type" header as well, so it is
 # only a fallback — it inflates every description by the same ~220 chars.
 _PANE_SELECTORS = ("#jobDescriptionText", ".jobsearch-JobComponent-description")
+
+
+# Indeed is the only site that truncates at scrape time, and 5,000 cut 203 of
+# its 438 stored descriptions — 46% — at exactly that boundary. Unlike a prompt
+# cap this one is not recoverable: the rest of the posting is never written to
+# disk, so no later rescoring can reach it. Deliberately well above
+# matcher.JOB_DESC_CHAR_BUDGET rather than equal to it — the scorer is not the
+# only reader (the CV and cover-letter generators and the reviewer read the
+# same field), and a cap raised later cannot recover text that was never
+# stored. Sized past the 12,807-20,406 chars per posting measured on the pane
+# in _fill_descriptions_from_pane, so this cuts nothing seen so far and exists
+# only to bound a runaway. Postings already saved at 5,000 stay truncated
+# until they are scraped again.
+_MAX_DESCRIPTION_CHARS = 24000
 
 
 async def _pane_description(page) -> str:
@@ -53,7 +145,7 @@ async def _pane_description(page) -> str:
             continue
         text = (await el.inner_text()).strip()
         if len(text) > 50:
-            return text[:5000]
+            return text[:_MAX_DESCRIPTION_CHARS]
     return ""
 
 
@@ -109,7 +201,7 @@ async def _fill_descriptions_from_pane(page, jobs_by_jk: dict[str, dict]) -> int
 async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
     """
     Navigate to a job's detail page and extract the full description text.
-    Returns up to 5000 chars of cleaned text, or "" on failure.
+    Returns up to _MAX_DESCRIPTION_CHARS of cleaned text, or "" on failure.
 
     DOES NOT WORK on Indeed and cannot be made to. /viewjob is Cloudflare-blocked
     outright (see _fill_descriptions_from_pane), so every call here burns ~62s over
@@ -164,14 +256,14 @@ async def _fetch_job_description(page, url: str, retries: int = 3) -> str:
                                 continue
                             return ""
                         text = re.sub(r"\n{3,}", "\n\n", text.strip())
-                        return text[:5000]
+                        return text[:_MAX_DESCRIPTION_CHARS]
 
             # Fallback: grab the main content area
             main_el = await page.query_selector("main, #main-content, #wrapper")
             if main_el:
                 text = await main_el.inner_text()
                 if text and len(text.strip()) > 100 and "cloudflare" not in text.lower():
-                    return text.strip()[:5000]
+                    return text.strip()[:_MAX_DESCRIPTION_CHARS]
 
             return ""
         except Exception:
@@ -225,18 +317,18 @@ async def scrape_indeed(
         force_bypass = False
         import os as _os
         if cookie_path and not _os.path.exists(cookie_path):
-            if _os.environ.get("DISPLAY"):
+            if _can_solve_challenge():
                 print("  🔑 No cookies found. Launching in non-headless mode for Cloudflare verification...")
                 is_headless = False
                 force_bypass = True
             else:
                 # Same trap as the Cloudflare relaunch below: headed chromium cannot
-                # start without an X server, so forcing it here would crash instead
-                # of falling back. Stay headless and let the Cloudflare check report
-                # the real problem.
-                print("  🔑 No cookies found and DISPLAY is unset — staying headless; "
-                      "Cloudflare will likely block. Use `xvfb-run`, or run "
-                      "interactively once to create cookies/indeed_cookies.json.")
+                # start without a reachable X server, so forcing it here would crash
+                # instead of falling back. Stay headless and let the Cloudflare check
+                # report the real problem.
+                print("  🔑 No cookies found and nobody to answer a challenge — staying "
+                      "headless; Cloudflare will likely block. Run interactively "
+                      "once to create cookies/indeed_cookies.json.")
 
         browser = await p.chromium.launch(
             headless=is_headless,
@@ -270,19 +362,21 @@ async def scrape_indeed(
             print("  ⚠️ Cloudflare verification detected!")
             
             # If we are headless, we must restart in non-headless mode to let user bypass it
-            if is_headless and not _os.environ.get("DISPLAY"):
-                # No X server: chromium cannot start headed, so the relaunch below
-                # would die with "Target page, context or browser has been closed"
-                # and the caller's except would print a failure and exit 0. That is
-                # how Indeed went 11 days contributing nothing while the cron
-                # recorded success every night. Say what to do instead of retrying
-                # into a guaranteed crash.
-                print("  ⛔ Cloudflare requires a headed browser, but DISPLAY is unset "
-                      "(no X server). Indeed cannot be scraped unattended — wrap the "
-                      "command in `xvfb-run`, or run it interactively once to refresh "
-                      "cookies/<cookies/indeed_cookies.json>.")
+            if is_headless and not _can_solve_challenge():
+                # No reachable X server: chromium cannot start headed, so the
+                # relaunch below would die with "Target page, context or browser has
+                # been closed" and the caller's except would print a failure and exit
+                # 0. That is how Indeed went 11 days contributing nothing while the
+                # cron recorded success every night. Raise instead of returning [] so
+                # the caller can retry the coin flip rather than treating a challenge
+                # as "this search has no results".
+                why = ("no usable X display" if not _headed_display_available()
+                       else "no terminal, so nobody can answer the challenge")
+                print(f"  ⛔ Cloudflare challenge and {why}. Indeed cannot be read "
+                      "unattended; run it interactively to refresh "
+                      "cookies/indeed_cookies.json.")
                 await browser.close()
-                return []
+                raise CloudflareUnattended(f"{keyword}/{location}: {why}")
             if is_headless:
                 print("  🔄 Headless mode blocked by Cloudflare. Relaunching in non-headless mode...")
                 await browser.close()
@@ -505,24 +599,116 @@ async def _extract_job_card(card, base_url: str) -> dict | None:
 
 
 async def scrape_indeed_all(config: dict) -> list[dict]:
-    """Run Indeed scraper for all keyword+location combos in config."""
+    """Run Indeed scraper for all keyword+location combos in config.
+
+    One failed search must not discard the rest. Indeed starts refusing the search
+    listing after a few consecutive requests — measured 2026-07-26, three searches
+    succeeded and the fourth raised `Page.goto: Timeout 30000ms exceeded`. That one
+    exception propagated out of this function, so run.py reported "every requested
+    site failed" and threw away the 6 postings already in hand. Failures are counted
+    instead, and only a run where nothing at all succeeded is escalated, which keeps
+    the non-zero exit code meaningful for the cron summary.
+    """
     all_jobs = []
     seen = set()
 
-    locations = config.get("locations", [""])
     keywords = config.get("keywords", [])
-    from selection import max_pages_for
+    from selection import max_pages_for, search_pairs
     max_pages = max_pages_for("indeed", config)
     cache = load_description_cache()
 
-    for kw in keywords:
-        for loc in locations:
-            jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config, cache=cache)
-            for j in jobs:
-                dedup_key = (j["title"], j["company"], j["location"])
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    all_jobs.append(j)
+    searches = search_pairs(config)
+    failures = []
+    # Circuit breaker on the retries. Retrying every search costs up to
+    # 36 x 2 x 45s = 54 minutes of sleeping, which on a night where Cloudflare
+    # blocks everything would blow the 2400s per-site cron budget and turn a
+    # clean "indeed blocked" into a scheduler timeout. Once several searches in
+    # a row are blocked it is the IP being refused, not a coin flip, so the
+    # retries stop earning their keep and are switched off for the rest of the
+    # run — the first searches still get their chances.
+    consecutive_blocked = 0
+    unattended = False
+    succeeded = 0
+    _RETRY_GIVE_UP_AFTER = 3
+
+    for index, (kw, loc) in enumerate(searches):
+        if index:
+            # Pacing between searches. The listing is what gets throttled, and it is
+            # requested once per search regardless of how many cards it returns.
+            await asyncio.sleep(_SEARCH_PAUSE_SECONDS)
+
+        retries = 0 if consecutive_blocked >= _RETRY_GIVE_UP_AFTER else _CLOUDFLARE_RETRIES
+        jobs = None
+        for attempt in range(retries + 1):
+            try:
+                jobs = await scrape_indeed(kw, loc, max_pages=max_pages, config=config,
+                                           cache=cache)
+                break
+            except CloudflareUnattended as e:
+                # Structural, not transient: every remaining search meets the same
+                # wall, and walking them cost 36 x 49s measured under xvfb-run.
+                failures.append(f"{kw}/{loc}: {e}")
+                print(f"  ⛔ Indeed cannot be read unattended ({e}) — "
+                      f"skipping the remaining {len(searches) - index - 1} searches")
+                unattended = True
+                break
+            except CloudflareBlocked as e:
+                if attempt == retries:
+                    failures.append(f"{kw}/{loc}: {e}")
+                    consecutive_blocked += 1
+                    print(f"  ⚠ Indeed search blocked after {attempt + 1} attempt(s) "
+                          f"({kw} in {loc})")
+                    if consecutive_blocked == _RETRY_GIVE_UP_AFTER:
+                        print(f"  ⛔ {consecutive_blocked} searches blocked in a row — "
+                              f"retries disabled for the rest of this run")
+                    break
+                print(f"  ↻ Cloudflare challenge — retrying in "
+                      f"{_CLOUDFLARE_RETRY_PAUSE_SECONDS}s "
+                      f"({attempt + 1}/{retries})")
+                await asyncio.sleep(_CLOUDFLARE_RETRY_PAUSE_SECONDS)
+            except Exception as e:
+                failures.append(f"{kw}/{loc}: {e}")
+                print(f"  ⚠ Indeed search failed ({kw} in {loc}): {e}")
+                break
+        if unattended:
+            break
+        if jobs is None:
+            continue
+        succeeded += 1
+        consecutive_blocked = 0
+        for j in jobs:
+            dedup_key = (j["title"], j["company"], j["location"])
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                all_jobs.append(j)
+
+    if failures:
+        print(f"  ⚠ Indeed: {len(failures)} of {len(searches)} searches failed, "
+              f"kept {len(all_jobs)} jobs")
+    # Counted by successes, not failures: the unattended stop records one
+    # failure and skips the rest, so on 2026-10-13 a run that read nothing was
+    # "1 of 44 failed", returned [] and went into the yield file as a quiet 0.
+    if searches and not succeeded:
+        raise RuntimeError(
+            f"no Indeed search succeeded ({len(failures)} failed, "
+            f"{len(searches) - len(failures)} skipped); first: {failures[0]}")
+
+    # Indeed was the only site that skipped this, trusting its own search
+    # relevance. It should not be trusted: measured 2026-08-05, 133 of the 296
+    # postings a full run returned contained none of the configured keywords
+    # anywhere — not in the title, not in the description. Searching "Technical
+    # Artist" brought back "Technologist - Analog Design" and "Non-Apparel
+    # Technologist"; semiconductor and garment roles, priced at an LLM
+    # enrichment call each because the drop happened after that spend, if at all.
+    #
+    # The filter reads title + description + snippet, so it keeps the postings
+    # whose relevance only shows in the body — of the jobs currently scoring
+    # 0.80+, six match on the body alone and would be lost to a title-only test.
+    from_search = len(all_jobs)
+    all_jobs = filter_jobs_by_keywords(all_jobs, keywords)
+    if from_search:
+        print(f"  ✓ Indeed: {len(all_jobs)} of {from_search} postings match a "
+              f"configured keyword")
 
     return all_jobs
 
@@ -564,11 +750,15 @@ def filter_jobs_by_keywords(jobs: list[dict], keywords: list[str]) -> list[dict]
     if not keywords:
         return jobs
     kw_lower = [k.lower() for k in keywords]
+    from selection import load_config
+    from local_jobs import local_job_role
+    config = load_config()
+    local_search = any(local_job_role(kw, config) for kw in keywords)
     kept = []
     removed = 0
     for j in jobs:
         text = f"{j.get('title', '')} {j.get('description', '')} {j.get('snippet', '')}".lower()
-        if any(kw in text for kw in kw_lower):
+        if any(kw in text for kw in kw_lower) or (local_search and local_job_role(j.get("title", ""), config)):
             kept.append(j)
         else:
             removed += 1

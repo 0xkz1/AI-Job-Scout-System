@@ -1,6 +1,6 @@
 import json
 import os
-from matcher import analyze_match, generate_match_report, _ollama_job_summary, _ollama_context_score
+from matcher import analyze_match, save_match_report, _ollama_job_summary, _ollama_context_score
 from run import load_config, make_safe_name
 
 def update_high_matches():
@@ -21,20 +21,20 @@ def update_high_matches():
             new_match = analyze_match(job, config)
             job["match"] = new_match
             
-            # Re-generate the markdown report
+            # Re-generate the markdown report. Via save_match_report, not
+            # generate_match_report directly: the renderer defaults
+            # expired/applied to False and carried to None, so calling it raw
+            # and writing the result clears hand-ticked checkboxes and drops
+            # the cv_pdf/cl_pdf/cv_review/cl_review links. save_match_report
+            # reads all of them off the file it is about to overwrite.
             base_name = make_safe_name(job['company'], job['title'])
-            match_filename = f"{base_name}.md"
             cv_filename = f"{base_name}_CV.md"
             cl_filename = f"{base_name}_CL.md"
-            
-            report_md = generate_match_report(job, new_match, cv_filename=cv_filename, cl_filename=cl_filename)
-            
-            # Overwrite the match report
-            report_path = os.path.join("10_output/00_matches", match_filename)
-            os.makedirs("10_output/00_matches", exist_ok=True)
-            with open(report_path, "w", encoding="utf-8") as rf:
-                rf.write(report_md)
-                
+
+            save_match_report(job, new_match, "10_output/00_matches",
+                              cv_filename=cv_filename, cl_filename=cl_filename)
+
+
             updated = True
             
     if updated:

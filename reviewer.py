@@ -12,13 +12,16 @@ frontmatter (cv_review / cl_review).
 """
 
 import hashlib
+import itertools
 import os
 import re
 import yaml
 from datetime import date
 from pathlib import Path
 
-from llm_client import call_llm
+from llm_client import (
+    GLM53_REVIEW_KEY_MODELS, call_llm, current_served_model, quarantine_scope,
+)
 from matcher import USER_PROFILE_DIR, _load_persona_summary
 
 ROOT = Path(__file__).resolve().parent
@@ -28,45 +31,56 @@ ARCHIVE_DIR = REVIEWS_DIR / ".archive"      # old versions saved on re-review / 
 
 # Review deserves a stronger model than bulk analysis: it runs only on
 # shortlisted applications and its output gates what actually gets sent.
-REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "mistral-medium-latest")
+REVIEW_MODEL = os.environ.get("REVIEW_MODEL", "review-strong-glm53")
 
 # Single source of truth for which Mistral keys exist, in priority order. Read from
 # llm_client rather than restated here: the two lists drifted before, and a chain
 # entry with no dispatch branch fails every call to that provider.
 from llm_client import MISTRAL_PROVIDERS as _MISTRAL_PROVIDERS  # noqa: E402
+from doc_paths import md_files  # noqa: E402
 
 MISTRAL_KEYS = tuple(_MISTRAL_PROVIDERS)
+_MISTRAL_ROTATION_COUNTER = itertools.count()
+
+
+def _rotate_active_mistral_entries(
+    chain: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Spread concurrent reviews across the direct Mistral keys still active.
+
+    Quarantine filtering must happen first. Rotating the full key list and then
+    dropping quarantined entries makes several offsets collapse onto the same
+    first survivor, recreating the thundering herd this rotation prevents.
+    """
+    positions = [
+        index for index, (provider, _model) in enumerate(chain)
+        if provider in MISTRAL_KEYS
+    ]
+    if len(positions) <= 1:
+        return chain
+
+    entries = [chain[index] for index in positions]
+    offset = next(_MISTRAL_ROTATION_COUNTER) % len(entries)
+    rotated = entries[offset:] + entries[:offset]
+    result = list(chain)
+    for index, entry in zip(positions, rotated):
+        result[index] = entry
+    return result
+
+
+def _prepare_review_chain(
+    chain: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Filter unavailable providers, then distribute the surviving Mistral keys."""
+    return _rotate_active_mistral_entries(_drop_quarantined(chain))
 
 
 def _review_chain() -> list[tuple[str, str]]:
-    """Ordered (provider, model) candidates for a review call, tried in turn.
+    """Try the vetted GLM-5.3 model's seven key slots in order.
 
-    Unlike the global FALLBACK_PROVIDERS chain, each entry carries its OWN model
-    name — a model id is provider-specific (mistral-medium does not exist on
-    stepfun), so the single-`model` override could never fall back across
-    providers. Override via env REVIEW_FALLBACKS="prov:model,prov:model,...".
-
-    Default chain, best → last-resort. Reliable non-reasoning cloud models come
-    FIRST; the free reasoning model (deepseek-v4-flash) sits low because it can
-    silently return empty content on long docs (burns max_tokens on hidden
-    reasoning) — llm_client now raises on empty so the chain falls through, but
-    it's still a poor primary. Every MISTRAL_API_KEY* in the environment becomes an
-    entry (each key has its own allowance); nvidia is a fully independent provider,
-    so it survives a mistral.ai outage that would take out all of them at once:
-
-      1..N. mistral / mistral-backup / mistral-tertiary / ...  (see MISTRAL_KEYS)
-      N+1.  nvidia    / mistralai/mistral-medium-3.5-128b — independent (NIM)
-      N+2.  opencode  / deepseek-v4-flash-free            — FREE reasoning (Zen)
-      N+3.  opencode  / big-pickle                        — independent Zen model
-      N+4.  ollama    / local                             — offline last resort
-
-    Key depth is not redundancy for its own sake: a single day of work (182 reviews
-    plus analysis) exhausted the first three keys AND nvidia AND stepfun, leaving
-    one live cloud provider. Free-tier Mistral allowances are monthly, so depth buys
-    throughput for exactly that kind of bulk day. Entries whose key is unset raise
-    on call and are skipped, so listing a key that does not exist is harmless —
-    which is why the list is fixed here rather than probed from os.environ. Dead
-    accounts (zai 429) are left out; add back via REVIEW_FALLBACKS once recharged.
+    A failed or unusable answer advances to the next key of the same model.
+    Raise only after every available key fails. Keep overrides explicit.
+    REVIEW_FALLBACKS can supply an operator-approved ordered provider:model list.
     """
     env = os.environ.get("REVIEW_FALLBACKS", "").strip()
     if env:
@@ -76,12 +90,8 @@ def _review_chain() -> list[tuple[str, str]]:
         ]
         if chain:
             return _drop_quarantined(chain)
-    return _drop_quarantined([
-        *((provider, REVIEW_MODEL) for provider in MISTRAL_KEYS),
-        ("nvidia", "mistralai/mistral-medium-3.5-128b"),
-        ("opencode", "deepseek-v4-flash-free"),
-        ("opencode", "big-pickle"),
-        ("ollama", os.environ.get("OLLAMA_MODEL", "gemma-4-26b-a4b-it-gguf")),
+    return _prepare_review_chain([
+        ("litellm-gateway", model) for model in GLM53_REVIEW_KEY_MODELS
     ])
 
 
@@ -92,7 +102,7 @@ def _drop_quarantined(chain: list[tuple[str, str]]) -> list[tuple[str, str]]:
     empty — if every provider is sidelined, fall back to the full chain.
 
     A missing provider here is EXPECTED, not a fault to repair. Quarantine
-    entries expire on their own (key_quarantine.DEFAULT_COOLDOWN_DAYS = 5); do
+    entries expire on their own (key_quarantine.DEFAULT_COOLDOWN_DAYS = 14); do
     not `key_quarantine.py --release` them to "restore" the chain. Nor does a
     small probe call prove a key recovered — a max_tokens=5 request can succeed
     on a key whose allowance is spent, because a real review sends a long prompt
@@ -101,7 +111,7 @@ def _drop_quarantined(chain: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """
     try:
         from key_quarantine import is_quarantined
-        active = [(p, m) for p, m in chain if not is_quarantined(p)]
+        active = [(p, m) for p, m in chain if not is_quarantined(quarantine_scope(p, m))]
         return active or chain
     except Exception:
         return chain
@@ -127,7 +137,7 @@ def _load_skills_md() -> str:
         pass
     toolkit_dir = ROOT.parent / "cv" / "skill-toolkit"
     try:
-        for f in sorted(toolkit_dir.glob("*.md")):
+        for f in md_files(toolkit_dir):
             parts.append(f"--- skill-toolkit/{f.name} ---\n"
                          + f.read_text(encoding="utf-8"))
     except Exception:
@@ -147,6 +157,7 @@ DECISIONS_FILE = ROOT.parent / "cv" / "review-decisions.md"
 _SOURCE_GLOBS = [
     ("profile", ROOT.parent / "cv" / "profile", "*.md"),
     ("project", ROOT.parent / "cv" / "projects", "*.md"),
+    ("employment", ROOT.parent / "cv" / "experience", "*.md"),
     ("toolkit", ROOT.parent / "cv" / "skill-toolkit", "*.md"),
     ("CL template", ROOT.parent / "cover-letter", "*.md"),
 ]
@@ -183,7 +194,7 @@ def _load_review_facts() -> str:
     That starved base produced false fabrication findings: "Product designer
     with a systems-level approach to UX and UI" was flagged as unverified even
     though portfolio_website.md ("Portfolio Website Design & Development" —
-    HTML/CSS/JS/GSAP/Front-End Engineering) and feral-research-living-archive
+    HTML/CSS/JS/GSAP/Front-End Engineering) and taifunome-research-platform
     .md (Web Design, Frontend Engineering, React) evidence exactly that. The
     CV is GENERATED from these project files, so they must be part of what it
     is checked against — otherwise the reviewer calls the CV's own sources
@@ -191,7 +202,15 @@ def _load_review_facts() -> str:
     """
     persona = _load_persona_summary() or ""
     try:
-        from cv_generator import _ALL_ENTRIES
+        from cv_generator import _ALL_ENTRIES, CONTACT
+        # These are the same user-maintained values used by the CV header.
+        # An absent value in profile.md alone does not make them invented.
+        contact = "\n".join(f"{key}: {CONTACT[key]}" for key in
+                            ("name", "name_ja", "location", "email", "phone") if CONTACT.get(key))
+        if contact:
+            persona += ("\n\n--- CONFIGURED APPLICATION CONTACT (user-maintained CV settings; "
+                        "source for the document's contact values, not an independent "
+                        "verification of reachability) ---\n" + contact)
         blocks = []
         for p in _ALL_ENTRIES:
             head = " | ".join(x for x in (p.get("title", ""), p.get("role", ""),
@@ -218,9 +237,150 @@ def _load_review_facts() -> str:
     )
 
 
+# --- ❗事実 findings that cannot be a false statement in the document -----------
+
+# The section is for claims the document makes that are FALSE. The model fills it
+# with other things: its own all-clear written as a bullet ("記載なし", "矛盾する記述は
+# 存在しません", "No factual inaccuracies found"), requirements the document lacks
+# (which the prompt sends to 🎯 求人適合), and quotes of the JOB POSTING that it
+# presents as the CV's claim. Each of those set fact_block, and a Wooden Books CV
+# was marked ⛔ 事実要修正 for "InDesignとPhotoshopに精通している" — a sentence that
+# is in neither the CV nor the facts. 330 of 348 blocked reviews on disk (2026-10-08)
+# held nothing else.
+_FACT_CLEAN_RE = re.compile(
+    r"(記載なし|虚偽な?記載なし|誤記なし|不整合なし|誤認なし|相違なし"
+    r"|問題(は)?(ない|ありません|見当たらない)|指摘は不要|事実としては正しい"
+    r"|矛盾(する記述)?は(存在|見られ|あり)ません|と一致(?![しせ])|に合致"
+    r"|検証済み(です|であり|。)"
+    r"|no (?:factual )?(?:inaccuracies|issues|problems|errors)|none found"
+    r"|^\W*(?:なし|none)\W*$)", re.IGNORECASE)
+_FACT_VIOLATION_RE = re.compile(
+    r"(事実に反する|捏造|虚偽の(記載|記述)|存在しない|裏付け(が)?(ない|無い)|矛盾している)")
+_FACT_ABSENCE_RE = re.compile(
+    r"(見当たらない|見当たりません|不記載|記載(が|は)?(ない|なし|されていない|されていません|がありません)"
+    r"|明記されていない|含まれていない|言及(が|は)?(ない|されていない)|示されていない"
+    r"|触れていない|不明|確認できない|欠けている|満たして(い)?(ない|いません)"
+    r"|経験(が|は)?(ない|ありません|なし))")
+_FACT_QUOTE_RE = re.compile(
+    r'\*\*"(.+?)"\*\*|"([^"\n]{12,}?)"|“([^”\n]{12,}?)”|「([^」\n]{12,}?)」|^\s*>\s*(.+?)\s*$',
+    re.MULTILINE)
+_FOLD = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "–": "-", "—": "-",
+                       "\u2011": "-", "\u00a0": " "})
+
+
+def _fold(s: str) -> str:
+    return _norm(s.translate(_FOLD))
+
+
+def verify_fact_findings(body: str, document: str) -> tuple[str, list[str]]:
+    """Take ❗事実 bullets that cannot be a false statement out of fact_block.
+
+    A finding that the document says something untrue has to point at what the
+    document says, so a bullet is demoted when
+      - it is the reviewer's all-clear written as a bullet,
+      - every passage it quotes is absent from the document (typically the job
+        posting, quoted as though the CV had claimed it), or
+      - it quotes nothing and only says something is missing — an absence is a
+        fit question, not a fabrication.
+    A bullet that quotes the document stays whatever it concludes, and so does
+    an unquoted one that does not read as an absence: the error to avoid is a
+    real fabrication let through, not a review that blocks too often.
+
+    Demoted bullets keep their text, prefixed ※未検証 and without the bullet
+    marker, so the reader still sees them and _has_findings no longer counts them.
+    Returns (body, [notes]) — body unchanged when there is nothing to correct.
+    """
+    import re
+    match = re.search(r'(###\s*❗\s*事実)(.*?)(?=\n###|\Z)', body, re.DOTALL)
+    if not match:
+        return body, []
+    haystack = _fold(document)
+    lines = match.group(2).split("\n")
+    starts = [i for i, ln in enumerate(lines) if _ITEM_RE.match(ln)]
+    notes: list[str] = []
+    for n, i in enumerate(starts):
+        end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+        end = next((j for j in range(i + 1, end) if not lines[j].strip()), end)
+        first, item = lines[i], "\n".join(lines[i:end])
+        if _NO_FINDING_RE.search(first) or not first.strip(" -*0123456789."):
+            continue
+        violation = _FACT_VIOLATION_RE.search(item)
+        quotes = [next(g for g in m if g).strip().strip('"“”「」`\'') for m in _FACT_QUOTE_RE.findall(item)]
+        reason = None
+        if _FACT_CLEAN_RE.search(first) and not violation:
+            reason = "指摘ではない記述"
+        elif quotes:
+            segments = [s.strip() for q in quotes for s in re.split(r"…|\.\.\.", q)]
+            if not any(len(s) >= 8 and _fold(s) in haystack for s in segments):
+                reason = "引用が本文に無い"
+        elif _FACT_ABSENCE_RE.search(item) and not violation:
+            reason = "欠落の指摘であり事実誤認ではない"
+        if reason:
+            lines[i] = _ITEM_RE.sub(f"※未検証（{reason}）: ", first, count=1)
+            notes.append(f"{reason}: {first.strip(' -*')[:50]}")
+    if not notes:
+        return body, []
+    return body[:match.start(2)] + "\n".join(lines) + body[match.end(2):], notes
+
+
 def _norm(s: str) -> str:
     import re
     return re.sub(r"\s+", " ", s.replace("**", "").replace("*", "")).strip().lower()
+
+
+def verify_rubric_evidence(body: str, document: str) -> tuple[str, list[str]]:
+    """Downgrade a Strong rubric row whose quote is not in the document.
+
+    The score is the rubric, and the rubric was the reviewer's unshown opinion:
+    a Meltwater AI Engineer posting naming NLP, Transformers, fine-tuning and
+    transfer learning throughout scored `Strong` on exactly that requirement
+    against a CV that contains none of those words in any form. That is 14
+    points on a 100-point scale, and it reached apply_priority through
+    cv_review_score at 0.6 weight.
+
+    So `Strong` now has to carry a line from the document, and the line has to
+    be there. Matching is normalised the way finding quotes are (_norm), since
+    the document is markdown and a model reliably drops the bold markers.
+
+    Deliberately partial: a quote that IS in the CV but does not actually
+    support the requirement still passes. What this buys against that case is
+    that the reviewer has to commit to a specific piece of evidence, where the
+    reader can see it is thin — which was impossible when the verdict was a
+    bare "Strong". The demotion is to `Weak`, not `None`, so a wrongly rejected
+    quote costs half a rubric row rather than a whole one.
+
+    Returns (body, [notes]) — body unchanged when there is nothing to correct.
+    """
+    import re
+    match = re.search(r'```yaml\s*\n(.*?)\n```', body, re.DOTALL)
+    if not match:
+        return body, []
+    try:
+        block = yaml.safe_load(match.group(1)) or {}
+        rubric = block.get("rubric") or []
+    except Exception as e:
+        print(f"  ⚠ rubric parse error during evidence check: {e}")
+        return body, []
+
+    haystack = _norm(document)
+    notes: list[str] = []
+    for item in rubric:
+        if not isinstance(item, dict) or str(item.get("evidence", "")).lower() != "strong":
+            continue
+        quote = str(item.get("evidence_quote") or "").strip()
+        if quote and _norm(quote) in haystack:
+            continue
+        item["evidence"] = "Weak"
+        item["downgraded_from"] = "Strong"
+        item["downgrade_reason"] = ("引用なし" if not quote
+                                    else "引用が本文に見つからない")
+        notes.append(str(item.get("requirement", "?"))[:60])
+
+    if not notes:
+        return body, []
+    rewritten = yaml.safe_dump({"rubric": rubric}, allow_unicode=True,
+                               sort_keys=False, default_flow_style=False)
+    return body.replace(match.group(0), f"```yaml\n{rewritten.strip()}\n```", 1), notes
 
 
 def trace_finding_sources(review_path: Path) -> list[tuple[str, str | None]]:
@@ -247,6 +407,22 @@ def trace_finding_sources(review_path: Path) -> list[tuple[str, str | None]]:
         hit = next((label for label, body in corpus if len(nq) >= 25 and nq in body), None)
         out.append((q, hit))
     return out
+
+
+CV_RUBRIC_INSTRUCTION = """FIRST, you MUST output a YAML block evaluating the job's key requirements against the document.
+List 3-5 major requirements from the job posting. For each, determine the evidence level in the document: 'Strong', 'Weak', or 'None'.
+
+`Strong` additionally requires `evidence_quote`: ONE sentence or bullet copied VERBATIM from the document under review, which a reader would accept as evidence for that requirement on its own. Copy it exactly — it is checked against the document, and a quote that is not found there is downgraded to `Weak` automatically. If nothing in the document can be quoted for a requirement, the evidence level is not `Strong`; say `Weak` or `None` and leave `evidence_quote` out.
+
+Format exactly as follows at the very beginning of your response:
+```yaml
+rubric:
+  - requirement: "Requirement description in Japanese"
+    evidence: "Strong"  # or "Weak" or "None"
+    evidence_quote: "the verbatim sentence from the document"  # Strong only
+  - requirement: "..."
+    evidence: "None"
+```"""
 
 
 REVIEW_PROMPT = """You are a rigorous UK hiring reviewer. Review ONE application document ({doc_kind}) against the job posting and the candidate's verified profile.
@@ -277,17 +453,7 @@ LANGUAGE RULES (important):
 - Quote the document's original ENGLISH sentences verbatim when referencing a passage.
 - Suggested replacement sentences must be in ENGLISH (they will be pasted into the English document as-is).
 
-FIRST, you MUST output a YAML block evaluating the job's key requirements against the document.
-List 3-5 major requirements from the job posting. For each, determine the evidence level in the document: 'Strong', 'Weak', or 'None'.
-
-Format exactly as follows at the very beginning of your response:
-```yaml
-rubric:
-  - requirement: "Requirement description in Japanese"
-    evidence: "Strong"  # or "Weak" or "None"
-  - requirement: "..."
-    evidence: "None"
-```
+{scope_section}
 
 Then, provide the detailed findings using the following categories:
 
@@ -328,12 +494,50 @@ UK英語の問題、クリシェ、冗長表現、日付の不整合、不自然
 
 {translation_section}"""
 
-# CL のみ: オープニング段落は求人ごとに LLM が新規生成する文で、どのソース MD
-# にも和訳が存在しない — そこだけ訳す。第2段落以降は role 別テンプレ
-# (career/cover-letter/*.md) の使い回しなので、レビューごとに訳す価値はない。
+# CL のみ: 求人ごとに新規に書かれるのは最終段落 (context bridge) だけで、どの
+# ソース MD にも和訳が存在しない — そこだけ訳す。冒頭の一文は固定テンプレ、
+# 中間の身上段落は canonical_narrative_v1.md の逐語コピー、実績段落は
+# letter_facts_v1.md の locked block なので、レビューごとに訳す価値はない。
+# (旧テンプレ方式では新規生成だったのは冒頭段落で、この指示もそう書いていた。
+#  assembler で可変部分が末尾に移ったため、訳す対象も入れ替わっている。)
 # CV は再利用ブロックの組み立てなので和訳自体を載せない (ソース側を参照)。
 CL_TRANSLATION_INSTRUCTION = """
-総評のあとに区切り線 (---) を置き、続けて `## 冒頭段落の和訳` という見出しを付けて、カバーレターの最初の本文段落（"Dear ..." の直後の段落。この求人のために新規に書かれた部分）だけを自然な日本語に訳して記載すること。第2段落以降はテンプレートの使い回しなので訳さないこと。この和訳は参照用であり指摘ではないので、修正案の引用形式（**"..."**）は絶対に使わないこと。"""
+総評のあとに区切り線 (---) を置き、続けて `## Bridge の和訳` という見出しを付けて、カバーレター本文の最終段落（"Yours sincerely," の直前の段落。この求人のために新規に書かれた唯一の部分）だけを自然な日本語に訳して記載すること。それ以外の段落は固定文の使い回しなので訳さないこと。この和訳は参照用であり指摘ではないので、修正案の引用形式（**"..."**）は絶対に使わないこと。"""
+
+
+# CL のみ: レビュー対象を bridge に絞る。
+#
+# rubric (求人要件のカバレッジ) は CV の設問であって CL のものではない。
+# assembler 方式のレターは求人要件に応えないことを設計として選んでいる —
+# スタックの証明は CV と GitHub の担当で、レターは方法論と接続だけを書く。
+# その文書に「Three.js の経験が None」と減点するのは、レターに CV の仕事を
+# 採点させることになる。よって CL は rubric を出さず、submission_score は
+# null になる (_extract_score は rubric 不在で None を返す)。求人適合の
+# 数値は cv_review_score が持っており、Job Matches.base の apply_priority も
+# それしか読んでいないので、優先度の算出には影響しない。
+#
+# 文体指摘も同じ理由で bridge に限る。canonical は全レター同一なので、
+# そこへの指摘は 583 通で同じ内容が繰り返されるだけで、直す先は個々の
+# レターではなく canonical_narrative_v1.md 一箇所しかない。
+CL_SCOPE_INSTRUCTION = """レビュー対象は **本文の最終段落 (context bridge) のみ**。この求人のために新規に書かれたのはそこだけで、それ以外はすべて確定済みの固定文である:
+- 冒頭の一文 (`I am writing to apply for ...`) — テンプレート
+- 続く身上の段落群 — `canonical_narrative_v1.md` の逐語コピー。全レター共通で、LLM は書き換えない
+- その後の実績段落 (1〜2件) — `letter_facts_v1.md` の locked block。CV の記載から起こした検証済みの文
+
+**固定部分への指摘は一切しないこと**（文体・求人適合・冗長さを含む）。それらは全レターで同一なので、指摘しても直す先はこのレターではなくソース1ファイルであり、レビューごとに繰り返しても意味がない。固定部分は bridge を読むための文脈として使うだけでよい。
+
+YAML の rubric ブロックは **出力しないこと**。求人要件をどれだけ満たすかは CV レビューの設問であり、このレターは意図的にそれに応えない設計になっている。
+
+bridge について見るべきことは3点。下の見出しはそのまま使い、それぞれ次の意味で埋めること:
+- **❗ 事実** — bridge が検証済み事実に無い経歴・実績・業界経験を主張していないか。相手企業のシステム・組織・技術構成について、求人票に書かれていないことを既知のように述べていないか。
+- **🎯 求人適合** — 主眼は **接続の質**。bridge が述べる「この会社と候補者の接点」は求人票に実際に書かれている内容に基づいているか。どの会社に送っても成立する汎用文になっていないか。加えて、この求人と候補者の適合度が低いと判断したならそれも述べてよい（数値ではなく所見として）。ただしその場合も、埋められないギャップに対して経歴の捏造で埋めさせる修正案を出してはならない — `→ 補強不可（検証済み事実に該当経験なし。この求人は適合度が低い）` と正直に書くこと。
+- **✍️ 文体** — UK英語、クリシェ、冗長表現、定型的な締め。**bridge の2文に対してのみ**。
+
+**修正案に使ってはならない語**（このセクションに限らず、レビュー全体の修正案に適用）:
+`align` を含む一切の語形（"aligns with", "aligned", "alignment"）、`mirrors`、`directly enables`、`directly matches`、`perfectly matches`、`is a natural fit`、`maps directly`、`translates directly`。
+生成側の `_vet_bridge` がこれらを語幹で却下するため、提案しても適用できない。特に **"feels relevant to" を "aligns with" に変える提案は禁止** — この接続強度は意図的な選択である。求人広告から言えるのは「関連がありそう」までで、"aligns with" や "mirrors" は構造の同一性を主張しており、広告からは知り得ない。"feels relevant" が弱い・主観的だという指摘自体をしないこと。
+
+総評も bridge についてのみ述べること。スコアには言及しないこと（この文書にスコアは付かない）。"""
 
 
 def _ensure_review_backlink(md_path: Path) -> str:
@@ -356,6 +560,103 @@ def _ensure_review_backlink(md_path: Path) -> str:
     return updated
 
 
+# Blocks that are byte-identical on every generated document, because they come
+# from the master template rather than from the job: the contact/links lines
+# under the name, and the whole EDUCATION & LANGUAGES section. Nothing in them
+# can distinguish one review from another, so an edit there — correcting the
+# university's name from "Hokkai University" to "Hokkai Gakuen University", say —
+# used to invalidate every review on disk at once. 450 documents were marked for
+# re-review by a two-word spelling fix.
+#
+# The trade is deliberate and narrow: a review whose findings were ABOUT one of
+# these lines keeps reporting itself current after the line is corrected. That is
+# acceptable because these lines state the record rather than argue from it —
+# fixing them is what a finding against them would ask for — and because the
+# alternative is re-running every review whenever boilerplate is touched.
+_REVIEW_IGNORED_LINE = re.compile(
+    r"^(?:Edinburgh, Scotland, UK \|"
+    r"|Portfolio Website:"
+    r"|\*\*Hokkai[^\n]*\|[^\n]*\*\*"
+    r"|\*\*Escuela Falcon[^\n]*\*\*"
+    r"|\*\*Languages:\*\*)",
+)
+
+
+def review_source_sha(md_path: Path | None = None, document: str | None = None) -> str:
+    """The identity of what a review actually judged.
+
+    Both the writer and the freshness check must ask the same question, so they
+    ask it here. They used to compute it separately — run_review hashed the
+    document string it had just written the backlink into, review_is_current
+    hashed the file's raw bytes — which happened to agree only because the two
+    were the same bytes; any divergence in preprocessing would have silently
+    marked every fresh review stale, the way the PDF badge did.
+
+    Frontmatter is excluded: run_review writes a `review:` link back into the
+    document it is reviewing, so hashing it would mean every review invalidated
+    itself the moment it was written.
+    """
+    text = document if document is not None else md_path.read_text(encoding="utf-8")
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    kept = [l for l in text.split("\n") if not _REVIEW_IGNORED_LINE.match(l.strip())]
+    return hashlib.sha1("\n".join(kept).strip().encode()).hexdigest()
+
+
+def _mark_unusable_bridge_suggestions(body: str) -> str:
+    """Neutralise replacement sentences the bridge generator would reject.
+
+    Told plainly not to, the reviewer still proposes "aligns with" and
+    "resonates with" for "feels relevant to" on roughly half of runs — the pull
+    toward a stronger connector is hard to instruct away. Those words are in
+    _BRIDGE_NEVER_ECHO, so applying such a fix writes a sentence the next
+    regeneration throws out; worse, apply_review_fixes can push it into the
+    authored sources. Dropping the finding outright would hide the reviewer's
+    reasoning, so the quote marker is stripped instead: parse_review_fixes only
+    lifts **"..."** quotes, so an un-marked line is visible but not applicable.
+    """
+    from cover_letter_generator import _BRIDGE_NEVER_ECHO
+
+    banned = tuple(p for p in _BRIDGE_NEVER_ECHO if len(p) > 4) + ("align",)
+
+    def _defuse(match: re.Match) -> str:
+        replacement = match.group(2)
+        if not any(word in replacement.lower() for word in banned):
+            return match.group(0)
+        # Drop the quotes, not the text: parse_review_fixes pairs a finding only
+        # when it can read a quoted replacement, so an unquoted one stays
+        # readable while ceasing to be applicable.
+        return (f'{match.group(1)}: ~~{replacement}~~ '
+                f'← 適用不可（生成側の bridge ゲートが却下する語を含む）')
+
+    # Same shape parse_review_fixes reads a replacement out of, so anything it
+    # would lift is something this has already had the chance to defuse.
+    return re.sub(r'((?:修正案|Fix)\*{0,2})\s*[::]\s*\*{0,2}"(.+?)"\*{0,2}',
+                  _defuse, body, flags=re.DOTALL)
+
+
+def _review_is_unusable(body: str, doc_kind: str) -> str | None:
+    """Why this reply cannot be stored as a review, or None if it can.
+
+    The provider chain fell through on exceptions only, so a model that
+    answered 200 with an empty or off-format body ended the search. Weaker
+    models do exactly that under a 62k-character prompt: they reply, briefly,
+    with nothing the format asks for. The result is indistinguishable from a
+    clean review once written — same `submission_score: null`, same
+    `fact_block: false` — so it reads as "reviewed, nothing found" forever.
+
+    Checks the shape the prompt asks for, not the content: at least one of the
+    three finding headings, and for a CV the YAML rubric the score comes from.
+    """
+    text = (body or "").strip()
+    if len(text) < 200:
+        return f"body is {len(text)} chars"
+    if not re.search(r"###?\s*(❗|🎯|✍️)", text):
+        return "no finding sections"
+    if doc_kind == "CV" and not re.search(r"```yaml\s*\n.*?rubric", text, re.DOTALL):
+        return "no rubric block"
+    return None
+
+
 def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
     """Review a CV or CL markdown against its job. Returns the review file path.
 
@@ -364,7 +665,7 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
     a review that silently degrades to a weak model would be worse than none.
     """
     document = _ensure_review_backlink(md_path)
-    doc_sha = hashlib.sha1(document.encode()).hexdigest()
+    doc_sha = review_source_sha(document=document)
 
     prompt = REVIEW_PROMPT.format(
         doc_kind=doc_kind,
@@ -374,7 +675,9 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
         persona=_load_review_facts(),
         skills=_load_skills_md(),
         decisions=_load_decisions(),
-        document=document[:7000],
+        document=document,
+        scope_section=(CL_SCOPE_INSTRUCTION if doc_kind == "CL"
+                       else CV_RUBRIC_INSTRUCTION),
         translation_section=CL_TRANSLATION_INSTRUCTION if doc_kind == "CL" else "",
     )
     # Try each (provider, model) in turn; a single model name is provider-
@@ -389,7 +692,7 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
     errors: list[str] = []
     for prov, model in _review_chain():
         try:
-            review_body = call_llm(
+            candidate = call_llm(
                 messages=[{"role": "user", "content": prompt}],
                 system_prompt=system_prompt,
                 temperature=0.2,
@@ -398,13 +701,45 @@ def run_review(doc_kind: str, md_path: Path, job: dict) -> Path:
                 model=model,
                 use_fallbacks=False,
             )
-            used_model = f"{prov}/{model}"
-            break
         except Exception as e:  # missing key, rate limit, bad model id, timeout
             errors.append(f"{prov}:{model}: {e}")
             continue
+        unusable = _review_is_unusable(candidate, doc_kind)
+        if unusable:
+            # Returning 200 with nothing in it is the failure mode a try/except
+            # cannot see, and it is not hypothetical: 28 CL and 3 CV reviews
+            # were written on 2026-08-12 carrying only frontmatter and "未算出".
+            # The local fallback answered every one of them — it is the only
+            # entry in the chain that accepts a 62k-character prompt, so once
+            # mistral and zai are rate-limited every review lands there, and it
+            # does not follow the output format. A review that says nothing is
+            # worse than no review: nothing distinguishes it in frontmatter
+            # from a clean one, so it reads as "checked, no findings".
+            errors.append(f"{prov}:{model}: {unusable}")
+            print(f"  ⚠ {prov} returned an unusable review ({unusable}); trying next")
+            continue
+        review_body = candidate
+        # `model` is what was asked for. The gateway answers 200 with whatever its
+        # fallback chain ended on, so for it the served name is the one that judged.
+        served = current_served_model() if prov == "litellm-gateway" else None
+        used_model = f"{prov}/{served or model}"
+        break
     if review_body is None:
         raise RuntimeError("All review providers failed — " + "; ".join(errors))
+
+    review_body, unverified = verify_fact_findings(review_body, document)
+    for note in unverified:
+        print(f"  ⚠ 事実欄の指摘を未検証に降格 — {note}")
+
+    if doc_kind == "CL":
+        review_body = _mark_unusable_bridge_suggestions(review_body)
+    else:
+        # Before _extract_score reads it, so the stored score and the stored
+        # rubric agree — invariants recompute from the body on disk and would
+        # otherwise report every corrected review as drifted.
+        review_body, demoted = verify_rubric_evidence(review_body, document)
+        for requirement in demoted:
+            print(f"  ⚠ rubric Strong→Weak, evidence not in the CV: {requirement}")
 
     # Deterministic score from the rubric; ready is derived with the CURRENT
     # config threshold (display recomputes live, this is for nightly filters)
@@ -705,6 +1040,7 @@ def respond_to_annotations(doc_kind: str, md_path: Path, job: dict) -> Path:
 
     # Dialogue may withdraw findings or change the rubric — recompute the
     # score so the badge tracks the revised review, not the original.
+    new_body, _ = verify_fact_findings(new_body, md_path.read_text(encoding="utf-8"))
     score, fact_block, style_nits = _extract_score(new_body)
     ready = score is not None and not fact_block and score >= get_score_threshold()
     for key, val in (("submission_score", score if score is not None else "null"),
@@ -746,9 +1082,13 @@ def parse_review_fixes(review_path: Path) -> list[tuple[str, str]]:
     import re
     text = review_path.read_text(encoding="utf-8")
     # Never mine the translation block for fixes — it is Japanese prose, not
-    # findings, and any quotes in it are not replacements. (Old reviews use
-    # 全文和訳, current CL reviews use 冒頭段落の和訳.)
-    text = re.split(r"\n#+\s*(?:全文和訳|冒頭段落の和訳)", text, maxsplit=1)[0]
+    # findings, and any quotes in it are not replacements. Every heading the
+    # translation has ever been filed under has to stay listed: reviews on disk
+    # are not regenerated when the instruction changes, so dropping an old name
+    # would start mining years of stored reviews for fixes. (全文和訳 →
+    # 冒頭段落の和訳 → Bridge の和訳, as the letter's variable part moved.)
+    text = re.split(r"\n#+\s*(?:全文和訳|冒頭段落の和訳|Bridge の和訳)",
+                    text, maxsplit=1)[0]
     pairs = []
     # A finding starts with a list marker — "- ", "* " or a numbered "1." — then
     # the verbatim quote in **"..."**, and later offers 修正案:/Fix: "<replacement>"
@@ -912,6 +1252,11 @@ def review_is_current(md_path: Path) -> tuple[bool, Path | None]:
     review_path = REVIEWS_DIR / f"{md_path.stem}_review.md"
     if not review_path.exists() or not md_path.exists():
         return False, review_path if review_path.exists() else None
-    doc_sha = hashlib.sha1(md_path.read_bytes()).hexdigest()
+    doc_sha = review_source_sha(md_path)
     head = review_path.read_text(encoding="utf-8")[:400]
-    return (f'reviewed_sha: "{doc_sha}"' in head), review_path
+    # Quotes optional: the file is written with them, but Obsidian rewrites the
+    # frontmatter without them the first time the note is opened and edited, and
+    # a substring test for the quoted form then failed to match its own stamp —
+    # so any review the user had actually looked at reported itself stale.
+    m = re.search(r'^reviewed_sha:\s*"?([0-9a-f]+)"?', head, re.MULTILINE)
+    return (bool(m) and m.group(1) == doc_sha), review_path

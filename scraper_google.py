@@ -476,18 +476,16 @@ async def scrape_google_all(config: dict) -> list[dict]:
     all_jobs = []
     seen = set()
 
-    locations = config.get("locations", [""])
-    keywords = config.get("keywords", [])
     max_pages = config.get("max_pages_per_search", 3)
+    from selection import search_pairs
 
-    for kw in keywords:
-        for loc in locations:
-            jobs = await scrape_google(kw, loc, max_pages=max_pages, config=config)
-            for j in jobs:
-                dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
-                    all_jobs.append(j)
+    for kw, loc in search_pairs(config):
+        jobs = await scrape_google(kw, loc, max_pages=max_pages, config=config)
+        for j in jobs:
+            dedup_key = (j["title"], j.get("company", ""), j.get("location", ""))
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                all_jobs.append(j)
 
     return all_jobs
 

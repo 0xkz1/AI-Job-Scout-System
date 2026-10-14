@@ -59,8 +59,11 @@ def main():
         p = CL_DIR / f"{base}_CL.md"
         if not p.exists():
             continue
-        # A template opening was never model-written — nothing to audit.
-        if 'opening_source: "template"' in p.read_text(encoding="utf-8"):
+        # Nothing model-written to audit: the old template fallback, and the
+        # assembler's static-bridge fallback, are both authored text.
+        cl_text = p.read_text(encoding="utf-8")
+        if 'opening_source: "template"' in cl_text \
+                or 'opening_source: "assembled-static"' in cl_text:
             template += 1
             continue
         text = opening_of(p)

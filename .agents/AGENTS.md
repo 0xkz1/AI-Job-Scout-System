@@ -23,7 +23,7 @@ See `README.md` for full architecture.
 | `cv_generator.py` | Generates tailored CV markdown. Contains contact info template. |
 | `cover_letter_generator.py` | Generates tailored CL markdown. Contains contact info template. |
 | `profile/skills.md` | Kazuki's canonical skill list with proficiency levels. Source of truth for scoring. |
-| `profile/contact.md` | Correct contact details. Always use `CANDIDATE_EMAIL`. |
+| `contact_details.py` | The only place contact details enter the code. Values come from `.env` (`CV_EMAIL`, `CV_PHONE`, …); never write an address into tracked source — this repository is public. |
 | `config.yaml` | Keywords, locations, filters, scoring weights. |
 
 ---
@@ -32,8 +32,11 @@ See `README.md` for full architecture.
 
 ### 1. Email address
 
-The correct email is **`CANDIDATE_EMAIL`**.
-`CANDIDATE_EMAIL_OBSOLETE` is obsolete. Never use it. Check both generators if in doubt.
+There is one address, and it is set as `CV_EMAIL` in `.env`. Read it through
+`contact_details.CONTACT["email"]` — do not paste a literal into a generator,
+a template or a Streamlit label. Two generators once carried an address that
+had been obsolete for months precisely because it was written in three places
+and corrected in one.
 
 ### 2. Skill keyword matching — use word boundaries
 
@@ -199,3 +202,43 @@ LLM の分析結果がおかしい場合、まずプロンプトに `Note: ...` 
 - `view_file` で JSON の先頭数十行を直接読む
 - `RunPersistent: true` のターミナルを使い回す（一度確立した Terminal ID は安定している）
 - `WaitMsBeforeAsync` は 8000ms 以上に設定する
+
+### 14. 修復ループ（`loop_repair.py`）— エージェントにツールを足さず、ループで往復させる
+
+`loop_repair.py` は人間の依頼なしにソースを書き換える唯一の仕組み。安全性は
+**指示ではなく構造**で担保されている。以下を弱める変更をしないこと。
+
+**エージェントに Bash / terminal を渡さない。** `-t file` で `patch` / `read_file` /
+`search_files` / `write_file` だけを与えている。検証はループ側が実行する。
+無人の実行環境で任意コマンドを許すのが、修復ループがインシデントに変わる経路。
+
+エージェントが自分の修正を試せないのは事実で、それは**ツールを足して**解決しない。
+**ループ側で往復させる**（verify の失敗理由を同じ Hermes セッションに返して再挑戦させる）。
+攻撃面を増やさず、判定は既存の検証ゲートのまま、かつセッション記憶が効く。
+`claude -p` / `opencode run` は毎回コールドスタートなのでこれができない
+（だから既定は Hermes）。
+
+**検証は「件数が 0 より大きい」ではない。** それはエージェントが 1 件でっち上げれば
+通るテストで、パーサーを直すより偽装の方が安い。実際に staging された JSON を読み、
+**重複排除した絶対 URL 数**を、そのサイト自身の最良夜の 1/4（最低 3）と比較する。
+タイトルの重複でも水増しを弾く。
+
+2026-08-21 の実測: エージェントは間違った箇所（location フィールド）を直した上で
+「`url` キーは保たれている」と報告した。事実は逆。**自信のある誤りは例外ではなく通常。**
+機械検証だけがそれを分離できる。
+
+**テストゲートはベースライン比較。** 絶対的な green を要求すると、worktree 固有の
+既存の赤（`tests/test_pdf_bare_name_stays_frozen.py` は fresh worktree の collection で
+`NameError: name 'jobs'`）が正しい修正を落とす。エージェント実行**前**に赤の集合を取り、
+新しく赤くなったものだけを失格とする。`-x` は使わない — 最初の失敗で止まると既存と新規を
+区別できない。
+
+**トリガーは `dry_sites` であって `stale_sites` ではない。** dry は「走って、exit 0 で、
+0 件」= スクレイパーが壊れている。stale は予算スキップやタイムアウトを含み、その場合
+スクレイパーは正常で、原因は手前のサイトが時間を使ったこと。予算切れを理由に
+`scraper_guardian.py` にエージェントを当てるのは、間違ったファイルへの修正。
+
+**LiteLLM ゲートウェイにモデルを足す場合**は
+`atelier/forge/litellm-gateway/AGENTS.md` を読むこと。エイリアスは taifunome /
+open-design-docker / obsidian プラグインと共有されており、既存エイリアスの差し替えや
+既存 fallback 鎖への高価なモデルの挿入は、他プロジェクトを黙って壊す。

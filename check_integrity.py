@@ -8,6 +8,7 @@ Checks consistency between match reports, CVs, and cover letters.
 import os
 import re
 from pathlib import Path
+from doc_paths import md_files
 
 OUTPUT_DIR = Path(__file__).parent / "10_output"
 MATCHES_DIR = OUTPUT_DIR / "00_matches"
@@ -36,7 +37,7 @@ def extract_company_title(filename: str, file_type: str) -> tuple[str, str] | No
 def scan_directory(dir_path: Path, file_type: str) -> dict[tuple[str, str], str]:
     """Scan directory and return mapping of (company, title) -> filename."""
     result = {}
-    for f in dir_path.glob("*.md"):
+    for f in md_files(dir_path):
         extracted = extract_company_title(f.name, file_type)
         if extracted:
             # Normalize for comparison
