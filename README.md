@@ -1,13 +1,15 @@
-# AI Job Scout System
+# Job Scout System
 
-**An end-to-end job search pipeline** — scrape hundreds of listings, score them against your profile with an LLM, and auto-generate tailored CVs and cover letters for every match. Cheap cloud models do the heavy batches; a local Ollama model is always there as the final fallback.
+**A job search pipeline that collects postings, ranks fit, assembles CVs and cover letters from verified source material, and reviews them before human submission.** Python controls the workflow; models help with extraction, semantic matching, document selection and proofreading.
+
+**Architecture snapshot: 2026-10-14.** The current implementation is on the [development branch](https://github.com/0xkz1/AI-Job-Scout-System/tree/feat/strategy-layer-and-visa-clock); `main` remains an earlier code baseline. The operational details and diagram below describe the current local deployment. To use that implementation, check out the development branch rather than assuming these integrations are already in `main`.
 
 ```python
 # One command runs the full pipeline
 python run.py --site all
 
 # → Scrape  → Save to 00_saved/ staging → Analyze → Match → Generate CV/CL
-#    500+ jobs   stored as raw JSON          LLM      5-axis   tailored per job
+#    raw jobs   reusable cached input       rules + LLM   ranked top slice
 
 # Re-analyze from staging only (skip scraping, use cached raw data)
 python run.py --from-saved
@@ -22,65 +24,78 @@ python run.py --saved
 
 I'm a perfectionist about the job search. If I'm going to do it, I want **exhaustive coverage of the entire market I'm eligible for** and **precision about which roles actually fit me** — done efficiently, without reading thousands of listings by hand.
 
-That was the original thesis, scoped to the UK. It hasn't changed — it just **grew from the UK to EU/EMEA + remote**. As a UK resident on a Youth Mobility Scheme (YMS) visa I can hold remote roles for foreign employers, so the reachable market is far larger than "UK jobs." The system encodes *my own eligibility* — visa, timezone, relocation limits — as a scoring function, so **"the whole market" means "the whole market I can actually work in,"** not raw job count.
+That was the original thesis, scoped to the UK. It hasn't changed — it just **grew from the UK to EU/EMEA + remote**. As a UK resident on a Youth Mobility Scheme (YMS) visa I can hold remote roles for foreign employers, so the reachable market is far larger than "UK jobs." The system encodes *my own eligibility* — visa, timezone, relocation limits — as filtering rules and ranking signals. Sponsorship is recorded only from explicit posting evidence; it is not inferred from salary or scored from silence. Human review still checks work eligibility and employer requirements.
 
 The pipeline:
 
-1. **Scrapes** the full reachable market — Reed, Guardian Jobs, Indeed, LinkedIn (UK) + **Adzuna's multi-country API (GB/DE/NL/FR/AT/ES)** + **remote-native boards (Remotive, RemoteOK, Arbeitnow)** that surface Nordics/CH/LU remote roles Adzuna doesn't cover — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
+1. **Scrapes** the full reachable market — Reed, Guardian Jobs, Indeed, LinkedIn (UK) + **Adzuna's multi-country API (GB/DE/NL/FR/AT/ES)** + **remote-native boards (Remotive, Arbeitnow)** that surface Nordics/CH/LU remote roles Adzuna doesn't cover — plus manual intake (`url-list.md`, watched-list, saved bookmarks)
 2. **Guards** the widened pool *before* matching — timezone-locked (Americas-hours) and on-site-abroad roles are dropped or down-scored, so a bigger pool doesn't become a noisier one
-3. **Analyzes** each job with an LLM — salary parsing, skill extraction, title-only seniority classification
+3. **Analyzes** each job with Python rules and targeted LLM calls — skills, salary and employment metadata; seniority starts with the job title
 4. **Matches** each job on 5 weighted axes, including an **eligibility-aware location model** (target-country remote 0.85, EU/EMEA remote 0.80, US remote 0.18 — the timezone penalty is deliberate)
-5. **Selects** the top-ranked slice (top N%, capped) and **generates** a tailored CV + cover letter *only* for those — quality over spray-and-pray, human review before anything is sent
-6. **Outputs** Obsidian-ready Markdown with YAML frontmatter (incl. `country` + `categories`) — queryable via Dataview, operated via a Streamlit UI, delivered nightly via Telegram
+5. **Selects** the ranked professional slice — currently top 30% for generation, with a 0.50 floor and count cap. Edinburgh admin/manual/kitchen jobs instead reference verified shared CVs and do not consume professional generation or auto-review slots
+6. **Assembles and reviews** documents — the configured Jev route selects existing project IDs and prepared letter paragraphs; Python assembles their source text. GLM-5.3 checks the documents, and a human makes the final application decision
+7. **Outputs** Obsidian-ready Markdown with YAML frontmatter (including scores, strategy metadata and source links), operated through Streamlit and summarised nightly through Telegram
 
-All LLM calls go through one provider chain — **Mistral (cloud, primary) → StepFun step-3.5-flash (cloud, fallback) → Ollama Gemma-4 (local, last resort on an RTX 5080)** — so batches are fast and cheap, and the pipeline keeps working offline. Job text and your persona are sent to the cloud providers; switch `ANALYSIS_PROVIDER=ollama` for a fully local run. See [2-Tier LLM Strategy](#2-tier-llm-strategy) below.
+Bulk LLM calls use the provider chain configured in `llm_client.py`. Job text and your persona are sent to the selected cloud providers. `ANALYSIS_PROVIDER=ollama` selects a local bulk primary; stage overrides and the separate review and Jev routes must be configured independently. CV/CL proofreading uses a separate review route described below.
 
 ---
 
 ## Architecture
 
+![Job Scout System architecture — 2026-10-14](docs/job-scout-system-2026-10-v3.png)
+
+[Full-size PNG](docs/job-scout-system-2026-10-v3.png) · [Editable SVG](docs/architecture_v3.svg) · [Previous diagram — July 2026](docs/architecture_v2.svg)
+
+The updated diagram preserves the original detailed layout and shows the collection sources, profile inputs, staging, matching, model routes, document assembly, reviews, repair paths and reading surfaces.
+
+<details>
+<summary>Pipeline overview</summary>
+
 ```mermaid
 flowchart TD
-    subgraph SRC["Sources — full reachable market (UK → EU/EMEA + remote)"]
-        UK["UK boards<br/>Reed · Guardian · Indeed · LinkedIn"]
-        ADZ["Adzuna API<br/>GB · DE · NL · FR · AT · ES"]
-        REM["Remote-native boards<br/>Remotive · RemoteOK · Arbeitnow"]
-        MAN["Manual intake<br/>url-list · watched · saved"]
-    end
-    SRC --> STG["00_saved/ staging<br/>raw JSON, URL-deduped"]
-    STG --> GUARD["Guard — filter.py<br/>drop timezone-locked / on-site-abroad"]
-    GUARD --> AN["analyzer.py<br/>salary · skills · seniority (LLM)"]
-    AN --> MATCH["matcher.py — 5-axis score<br/>skills · exp · eligibility-location · salary · context"]
-    MATCH --> DB[("_analyzed.json<br/>incremental DB")]
-    MATCH --> SEL["selection.py<br/>rank → top N% → cap"]
-    SEL --> GEN["cv_generator + cover_letter_generator<br/>tailored, per top match"]
-    GEN --> REV["reviewer.py<br/>LLM review dialogue"]
-    GEN --> OUT["10_output/*.md<br/>Obsidian frontmatter (country · categories)"]
-    OUT --> UIS["Streamlit UI · Obsidian Dataview"]
-    OUT --> CRON["nightly Hermes cron<br/>→ Telegram (new high matches only)"]
+    SRC["UK boards + Adzuna + remote APIs + manual intake"] --> STG["00_saved/ staging"]
+    CRON["Hermes archivist: 02:00 / 04:30; no_agent"] --> SRC
+    STG --> AN["analyzer.py: rules + LLM extraction"]
+    AN --> FILTER["filter.py: eligibility / level / salary guards"]
+    FILTER --> MATCH["matcher.py: weighted fit + title gate"]
+    MATCH --> DB[("_analyzed.json + match reports")]
+    MATCH --> LOCAL["Edinburgh local work: verified shared CVs"]
+    MATCH --> SEL["selection.py: ranked professional slice"]
+    SEL --> GEN["Jev selection + Python assembly; legacy route available"]
+    FACTS["Verified CV records + letter facts"] --> GEN
+    GEN --> REVIEW["reviewer.py: GLM-5.3 + factual sources"]
+    GEN --> BRIDGE["Optional bridge: score >= 0.70; jis Kanban"]
+    BRIDGE --> EDITOR["Hermes review-editor: factual audit"]
+    REVIEW --> HUMAN["Human final review + application"]
+    EDITOR --> HUMAN
+    LOCAL --> HUMAN
+    MONITOR["Clean zero yield on consecutive nights"] --> REPAIR["L2 builder: worktree, live verification, tests"]
+    REPAIR --> REVIEWFIX["Human review of repair branch"]
 ```
 
-*High-level render: [docs/architecture.svg](docs/architecture.svg). The Mermaid flow above is the maintained source of truth.*
+</details>
 
-**Flow in one line:** UK Playwright scrapers + Adzuna/remote-board **APIs across UK + EU/EMEA** + manual intake → `00_saved/` staging (auto-ingested every run) → **eligibility guard** → `run.py` pipeline (`analyzer` → `filter` → `matcher` → `selection` → generators) → `_analyzed.json` incremental DB → `10_output/` Markdown → read in **Obsidian**, operated from **Streamlit** — then an **LLM review dialogue** (annotate findings in Obsidian, LLM replies, apply agreed fixes per-fix to the document or back to the reusable masters), and a **nightly Hermes cron** that runs the whole pipeline unattended and Telegram-notifies only new high matches. Details: [ARCHITECTURE.md](ARCHITECTURE.md) §6–7.
+**Document selection.** `JIS_DOCUMENT_MODE=jev` is enabled in the local deployment checked on 2026-10-14. The code default remains `legacy` when unset. Jev selects source-backed CV project IDs and prepared cover-letter paragraphs; it does not write new prose. Out-of-scope letters are withheld and uncertain selections produce labelled neutral drafts. Both modes still require review. See [Jev integration and measured trial](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/JEV_PIPELINE_TRIAL_2026-10-12.md).
 
-CV headers (title + tagline) are **per-role**: each `career/cv/profile/<role>.md` carries `role_title` / `role_tagline` frontmatter that `cv_generator.py` injects, so a Product Designer application leads with a different identity than a Creative Technologist one.
+**Bulk model routing.** `llm_client.py` uses stage-specific primaries and configured fallbacks. The analyzer leads with Groq; the current bulk configuration uses LiteLLM Gateway for other stages, with direct-provider and local Ollama fallbacks. Prompt-size guards skip providers that cannot accept a request, and failed keys enter quarantine.
 
-Every LLM task (skill extraction, context/ethos scoring, EN+JA summaries, CV & cover-letter drafting) goes through `llm_client.py`, which walks the provider chain **Mistral → StepFun → local Ollama** on rate limits, 5xx errors, timeouts, or missing API keys.
+**Document proofreading.** The default Python review route uses GLM-5.3 with `reasoning_effort: low`, through `review-strong-glm53-key1` to `review-strong-glm53-key7`. Each available NVIDIA key gets one attempt. The route accepts a complete stream and retains the previous review if every key fails; it does not fall back to a weaker model. `REVIEW_FALLBACKS` is an explicit override. Suggested rewrites still need factual checking. See [review routing and validation](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/REVIEW_MODEL_2026-10-09.md).
+
+**Repair and Kanban routes.** L2 uses Hermes `builder` to repair a clean zero-yield scraper in an isolated worktree, then verifies the live scrape and runs tests before human review. The separate `jis_hermes_bridge.py` route selects high matches (default score ≥0.70), calls the document generators directly and creates `review-editor` tasks on the `jis` board. The writer profile is absent from this route. `JIS_JEV_MODE` defaults to `off`; its optional pre-audit probabilities are not a factual guarantee.
 
 ---
 
 ## Match Scoring
 
-Each job is scored on five weighted axes:
+The current configuration uses five axes. `config.yaml` is authoritative; the composite is also multiplied by `title_relevance`:
 
-| Axis         | Default Weight | Method                                           |
+| Axis         | Current Weight | Method                                           |
 | ------------ | --------------- | ------------------------------------------------ |
-| **Skills**   | 40%             | Word-boundary keyword + synonym mapping + TF-IDF name similarity |
-| **Experience** | 25%           | Seniority level matching (entry/mid/senior/director) |
+| **Skills**   | 45%             | Verified skill identity, synonyms and contextual coverage |
+| **Experience** | 5%            | Seniority / experience fit |
 | **Location** | 10%             | **Eligibility model** — UK city match; target-country & EU/EMEA remote rewarded; US-remote (timezone) & on-site-abroad penalised |
-| **Salary**   | 5%              | Salary range vs. minimum expectation              |
-| **Context**  | 20%             | Brand & ethos alignment (profile, ethos, about) via TF-IDF max-similarity |
+| **Salary**   | 0%              | Salary evidence and filter remain; no composite weight |
+| **Context**  | 40%             | LLM role-fit reading against the profile, with TF-IDF fallback |
 
 Weights are **adjustable in real-time** via the Streamlit UI — no code changes needed.
 
@@ -101,11 +116,11 @@ Country priority (drives Adzuna's country list and board relevance): **DE > NL >
 
 ### Tier System
 
-| Tier | Score Range | Icon | CV/CL Generated? |
+| Tier | Score Range | Icon | Document eligibility |
 | ---- | ----------- | ---- | ---------------- |
-| Strong | 80%+ | 🟢 | ✅ Yes |
-| Good | 60–79% | 🟡 | ✅ Yes |
-| Partial | 40–59% | 🟠 | ✅ If ≥ 50% threshold |
+| Strong | 80%+ with LLM context | 🟢 | Ranked selection + guards |
+| Good | 60–79% | 🟡 | Ranked selection + guards |
+| Partial | 40–59% | 🟠 | Only at ≥50% and inside the selected slice |
 | Weak | < 40% | 🔴 | ❌ No |
 
 ### Sample Match Report
@@ -136,7 +151,7 @@ url: "https://indeed.com/..."
 ## 📊 Breakdown
 | Category | Score | Weight |
 |----------|-------|--------|
-| Skills   | 81%   | 40%    |
+| Skills   | 81%   | 45%    |
 | ...
 
 ## 📎 Related Documents
@@ -173,30 +188,37 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headle
 | Layer | Technology | Why |
 | ----- | ---------- | --- |
 | Scraping | Playwright + stealth | Anti-bot evasion, headless browsing |
-| LLM calls | `llm_client.py` chain: Mistral → StepFun → Ollama (Gemma-4-26b local) | Cheap fast batches, offline-safe fallback |
+| LLM calls | Stage-specific routes through `llm_client.py` / LiteLLM Gateway | Prompt-size guards, key rotation and quarantine |
 | Skill Matching | Word-boundary keywords + `SKILL_SYNONYMS` + TF-IDF (scikit-learn) | Deterministic, tunable, no model download |
 | Scoring | Custom weighted engine | 5-axis, adjustable via UI |
-| CV/CL Generation | Same LLM chain | Tailored per job, no templates |
-| PDF Export | weasyprint + markdown | One-click A4 from the Kanban board |
+| CV/CL Assembly | Verified masters + Jev selection, or the legacy route | Source-backed content; human review |
+| PDF Export | weasyprint + markdown | A4 export from the PDF view |
 | UI | Streamlit | Lightweight, 1-file, no build step |
 | Output | Obsidian Markdown + Dataview | Queryable knowledge base (`categories`, scores in frontmatter) |
-| Scheduling | Cron | Nightly scrape + reanalyze |
+| Scheduling | Hermes archivist cron (`no_agent`) | Separate early and late collection slots |
 
 ---
 
 ## Quick Start
 
+The commands below target the [current development implementation](https://github.com/0xkz1/AI-Job-Scout-System/tree/feat/strategy-layer-and-visa-clock). Personal profile sources, CV masters and provider configuration must be supplied for your own deployment.
+
 ```bash
+# Check out the implementation described in this snapshot
+git clone --branch feat/strategy-layer-and-visa-clock https://github.com/0xkz1/AI-Job-Scout-System.git
+cd AI-Job-Scout-System
+
 # 1. Install Python dependencies
 pip install -r requirements.txt
 playwright install chromium
 
-# 2. Configure LLM providers in .env (any subset works; the chain skips missing keys)
-#    MISTRAL_API_KEY=...          primary (cloud)
-#    STEPFUN_API_KEY=...          fallback (cloud)
-#    FALLBACK_PROVIDERS=stepfun,ollama
-#    Local last resort: install Ollama and pull the model set in OLLAMA_MODEL
-#    (default: gemma-4-26b-a4b-it-gguf)
+# 2. Configure your provider routes and keys in .env
+#    ANALYSIS_PROVIDER selects the bulk primary; FALLBACK_PROVIDERS sets fallbacks.
+#    JIS_STAGE_PRIMARY controls stage overrides (the analyzer defaults to Groq).
+#    REVIEW_FALLBACKS separately overrides the document review route.
+#    JIS_DOCUMENT_MODE=legacy is the code default.
+#    Jev selection needs JIS_DOCUMENT_MODE=jev, TYPESAFE_API_KEY and its SDK.
+#    Ollama uses the model named by OLLAMA_MODEL.
 
 # 3. Configure search
 #    Edit config.yaml — keywords, locations, salary, sites
@@ -223,7 +245,9 @@ locations:
   - Remote
 
 min_salary_gbp: 26000
-match_score_threshold: 0.50    # Generate CV/CL only for ≥ 50% match
+match_score_threshold: 0.50    # quality floor within ranked selection
+generation_top_percent: 30
+review_top_percent: 40
 
 sites:
   - indeed
@@ -239,14 +263,18 @@ sites:
 | `run.py` | Orchestration — scrape → stage → analyze → filter → match → CV/CL, dedupe, DB writes |
 | `matcher.py` | Scoring engine — 5-axis match, skill synonyms, context scoring, report generation |
 | `analyzer.py` | Job analysis — skills, salary, title-only seniority, employment type (word-boundary) |
-| `llm_client.py` | Unified LLM client — Mistral → StepFun → Ollama provider chain |
-| `app.py` | Streamlit UI — Scraper / Weights / Saved / Kanban tabs, PDF export |
+| `llm_client.py` | Per-stage provider routing, prompt-size guards and key quarantine |
+| `app.py` | Streamlit — scraping, matching, saved jobs, review and PDF views |
 | `scraper_indeed.py` / `scraper_linkedin.py` / `scraper_reed.py` / `scraper_guardian.py` / `scraper_adzuna.py` | Site scrapers (Playwright stealth) |
 | `scraper_url_list.py` | url-list.md intake — Playwright fetch + LLM extraction |
 | `scraper_saved.py` | Scrape favorited/saved jobs from Indeed + LinkedIn |
 | `watched_matcher.py` | Match manually watched job descriptions |
 | `bulk_analyze_cloud.py` | One-shot cloud batch analysis of unanalyzed jobs |
-| `cv_generator.py` / `cover_letter_generator.py` | LLM-generated tailored CV / cover letters |
+| `cv_generator.py` / `cover_letter_generator.py` | Source-text assembly with Jev or legacy selection |
+| `jev_document_trial.py` | Shared mode switch for CV / prepared-letter selection |
+| `local_jobs.py` | Edinburgh local-role detection and verified shared CV routing |
+| `jis_hermes_bridge.py` | Direct document assembly and Hermes Kanban review tasks |
+| `loop_repair.py` | Isolated scraper repair, live verification and tests |
 | `filter.py` | Config-based job filtering |
 
 ---
@@ -265,8 +293,9 @@ Job-Intelligence-System/
 │   └── watched-list/                     ← Watched List (manual paste fallback for raw text/PDFs)
 ├── 10_output/
 │   ├── 00_matches/            # Match reports (.md, YAML frontmatter, Dataview-ready)
-│   ├── 10_cvs/                # Tailored CVs (one per match ≥ threshold)
+│   ├── 10_cvs/                # Tailored CVs for selected professional matches
 │   ├── 10_cover-letters/      # Tailored cover letters
+│   ├── 15_reviews/            # Findings, annotation dialogue and review cache
 │   ├── 20_pdfs/               # PDF exports (per-company subdirectories)
 │   ├── _debug/                # Playwright debug screenshots
 │   ├── _analyzed.json         # Full analyzed job data
@@ -370,7 +399,9 @@ GROUP BY type
 
 ---
 
-## Real Results
+## Historical Results
+
+These retained measurements come from earlier local-only runs. They are not measurements or cost guarantees for the October cloud/Jev deployment.
 
 | Metric | Value |
 | ------ | ----- |
@@ -386,26 +417,29 @@ GROUP BY type
 
 ## Cron Scheduling
 
-The nightly run is scheduled in the **Hermes archivist profile's cron** (not plain crontab): `~/.hermes/profiles/archivist/cron/jobs.json` fires `job_scout_nightly.sh` at 02:00 in `no_agent` mode — the script's stdout is delivered verbatim to **Telegram** via the archivist profile's own bot (`deliver: telegram:<chat_id>`).
+Hermes schedules two jobs under the **archivist** profile, with `no_agent: true` and zero sub-agent spawns. The shell script calls Python stages; it does not run an autonomous agent inside the data loop.
 
-What happens each night (see [ARCHITECTURE.md](ARCHITECTURE.md) §7):
-1. `scraper_saved.py` — LinkedIn/Indeed saved-jobs staging → `00_saved/_saved_index.json`
-2. `run.py --site indeed|reed|guardian|adzuna --pages 5` — scrape → analyze → match → generate CV/CL (LinkedIn excluded: interactive login)
-3. `nightly_scout.py` — diff against `_nightly_state.json`, auto-review new matches ≥ 80%, print a summary of new matches ≥ 70% to stdout → Telegram. No new high matches = empty stdout = silent night.
+| Slot | Collection | Following stages |
+| --- | --- | --- |
+| 02:00 early | LinkedIn, Adzuna, Indeed | Stage raw results; leave analysis and notification to late |
+| 04:30 late | Reed, remote APIs, Guardian | Merge staged input once, analyse, match, assemble selected documents, run bounded follow-up passes and notify |
 
-All scraper output goes to `10_output/_nightly_scout.log`; only the notification summary reaches stdout. Script timeout: 7200 s (`cron.script_timeout_seconds`, archivist `config.yaml`).
+Each site runs with `--scrape-only`. The script clamps per-site timeouts to the slot's remaining budget and records clean completion, partial results, timeouts, errors and skipped sites separately. Normal completion with zero jobs on consecutive nights is the L2 repair signal; a timeout is not treated as a clean dry scraper.
 
-For ad-hoc reanalysis without re-scraping:
+`nightly_scout.py` diffs against the previous state, reviews the ranked review slice and prints a Telegram summary. No new high matches can be silent; operational warnings can still produce a notification. Notifications use the archivist profile's bot. The full-run ceiling is 7020s inside Hermes's 7200s cap. See [nightly stages and repair boundaries](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/LOOP.md).
+
+For a manual pass over saved input:
+
 ```bash
-cd /path/to/Job-Intelligence-System && python3 run.py --from-saved
+python3 run.py --from-saved
 ```
 
 ---
 
 ## Philosophy
 
-- **Local-first** — no API keys, no cloud costs, no rate limits
-- **Privacy-aware** — run fully local with `ANALYSIS_PROVIDER=ollama`; the default cloud chain sends job text + persona to Mistral/StepFun (no free-tier providers that train on prompts)
+- **Local control** — Python owns collection, ranking, state and document assembly; model routes are explicit configuration
+- **Explicit data routes** — cloud models receive job text and profile material. Selecting Ollama for bulk work does not automatically change stage overrides, Jev selection or the separate review route
 - **Composable** — each stage is a standalone module; swap any part
 - **Observable** — every output is human-readable Markdown with structured metadata
 
@@ -417,7 +451,7 @@ cd /path/to/Job-Intelligence-System && python3 run.py --from-saved
 - [ ] Company research enrichment (Glassdoor, companies house)
 - [x] ~~Application status tracking via Obsidian Dataview~~ *(source/type/saved_at でクエリ可能)*
 - [x] ~~PDF export for CVs and cover letters~~ *(20_pdfs/ ディレクトリ + コマンド)*
-- [ ] Streaming LLM generation (view CV as it's written)
+- [ ] Evaluation of document fit and reviewer accuracy on human-labelled cases
 - [ ] 00_saved/ → 00_matches/ stage-gating threshold per source
 
 ---
@@ -427,6 +461,8 @@ cd /path/to/Job-Intelligence-System && python3 run.py --from-saved
 ---
 
 ## System Evolution Log
+
+The dated sections below preserve earlier experiments and proposals. Provider orders, costs and proposed roles in these records are historical; the 2026-10-14 architecture above describes the current local deployment.
 
 A running record of non-obvious decisions, bugs, and design pivots — written for both humans and AI agents picking up this project.
 
@@ -460,7 +496,7 @@ A running record of non-obvious decisions, bugs, and design pivots — written f
 
 #### Email Address Bug
 
-**Problem**: `cv_generator.py` and `cover_letter_generator.py` had an old email (`CANDIDATE_EMAIL_OBSOLETE`) hardcoded, despite `contact.md` and `contact_ja.md` already having the correct address (`CANDIDATE_EMAIL`).
+**Problem**: `cv_generator.py` and `cover_letter_generator.py` each had an address hardcoded, and it had been obsolete for months — while `contact.md` and `contact_ja.md` carried the current one. Three copies, corrected in one.
 
 **Fix**:
 - Updated both generator templates.
@@ -580,3 +616,33 @@ MISTRAL_API_KEY=<your-api-key>     # プロバイダ固有のキー
 4. **マスターのドリフト問題**: 求人ごとのレビューが毎回マスターを書き換えると、マスターが直近の求人に引きずられる。→ 修正案ごとに適用先を選択制(この文書のみ[デフォルト] / 元ファイル+この文書 / 適用しない)。frontmatter のみに一致する引用はソース適用から除外(確定ブランドの `role_tagline` を誤って上書きしかけた実例あり)。
 5. **対話履歴の整合性**: 却下された旧修正案を後から合意版に差し替えると、ユーザーのコメントが「何に反論したのか」読めなくなる。→ 差し替え時は旧案を取り消し線で残す(パーサーは引用符内の合意版だけを抽出)。
 6. **Streamlit のモジュールキャッシュ**: `app.py` は自動リロードされるが import 先(`reviewer.py` 等)はプロセス再起動まで古いまま。`ImportError: cannot import name ...` が出たらサーバー再起動。
+
+---
+
+## カバーレター: Draft/Critique/Revise から Assembler へ (2026-08-11)
+
+`cover_letter_generator.py` を再設計。旧方式(LLMが全文を起草・批評・書き直し)は求人ごとに人物像が揺れ、未経験の実績を捏造するリスクを持っていた(上の「2段階LLM戦略」節にある「テンプレート式、LLM不要」はさらに前の段階の話で、いずれも現状ではない)。
+
+新方式は **Filter, Not Persuasion** — 候補者の文脈(Canonical Narrative, 252語, 不変)を固定し、企業ごとに変わるのは1〜2文・35〜60語の Context Bridge のみ。設計思想はローカルの `career/cover-letter/STRATEGY.md` に記録。
+
+- 固定: [canonical_narrative_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/canonical_narrative_v1.md)(LLM書き換え禁止、バージョンで更新)
+- 選択式: [letter_facts_v1.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/letter_facts_v1.md)(tier: core/technical/operational、求人キーワードでゲート)
+- 生成: Context Bridge のみLLM。主語反転・ツール名列挙・誇張表現・定型closingを複数ゲートで拒否し、通らなければ静的文へフォールバック
+- テスト: `tests/test_cover_letter_assembler.py`(303件)
+
+---
+
+## 自律型マルチエージェント & System One 統合 (2026-09-20・当時の構想)
+
+> この節は当時の構想記録です。L1でのJev職種・スポンサー分類やwriter役は現行運用ではありません。現在は書類の実績・段落選択にJevを使い、Pythonで直接組み立て、review-editorが事実監査を担当します。
+
+Streamlit で人間がボタンを手動実行するスタイルから、**Hermes を司令塔とする自律型マルチエージェント協働システム**へと発展。
+
+### 1. 役割分担の3層アーキテクチャ
+- **Layer 1 (L1 Nightly Scout: 高速バッチ)**: `no_agent: true`。Python コード + **Jev System One**（`Choice`, `Noul`, `Score`）によるミリ秒単位の型安全な職種分類・スポンサー判定・適合度スコアリング。詳細は [docs/JIS_AND_JEV.md](https://github.com/0xkz1/AI-Job-Scout-System/blob/feat/strategy-layer-and-visa-clock/docs/JIS_AND_JEV.md)。
+- **Layer 2 (L2 Scraper Repair: 障害自律修復)**: Hermes **`builder`** が担当。スクレイパー異常時に `git worktree` 上で自動修正・テストを実行。
+- **Layer 3 (L3 High-Match Workflow: 自動書類推敲・監査)**:
+  - `jis_hermes_bridge.py` がスコア ≥ 0.75 の特級求人を Hermes Kanban (`jis` ボード) へ自動起票。
+  - **`writer`**: Canonical Narrative を保ちつつ、Context Bridge の下書きを非同期作成。
+  - **`review-editor`**: `letter_facts_v1.md` に基づきハルシネーション・誇張を厳密に監査。
+  - 人間（Kazuki）は Telegram で完成書類の通知を受け取り、最終確認（Apply）するのみ。
