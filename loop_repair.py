@@ -169,11 +169,40 @@ def load_json(path: Path, default):
         return default
 
 
-def save_repair_state(state: dict) -> None:
+def save_repair_state(state: dict) -> bool:
     try:
         REPAIR_STATE.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+        return True
     except OSError as e:
         _log(f"  could not write repair state: {e}")
+        return False
+
+
+def report_exhaustion(state: dict) -> None:
+    """Emit one scheduler message per exhausted attempt, including old state.
+
+    The marker records emission, not successful Slack delivery: the scheduler
+    owns delivery. A proposed fix waits on review rather than on another retry.
+    """
+    messages = []
+    for site in dry_candidates():
+        entry = state.get(site) or {}
+        attempts = entry.get("attempts", 0)
+        if attempts < MAX_ATTEMPTS_PER_SITE or entry.get("branch"):
+            continue
+        stamp = f"{entry.get('last_attempt', '')}:{attempts}"
+        if entry.get("exhaustion_reported_for") == stamp:
+            continue
+        entry["exhaustion_reported_for"] = stamp
+        messages.append(
+            f"⚠️ loop-repair: {site} の自動修復を停止 — 試行上限"
+            f"({attempts}/{MAX_ATTEMPTS_PER_SITE}回)\n"
+            f"   最終結果: {entry.get('outcome', 'unknown')} / "
+            f"{entry.get('detail') or '詳細未記録'}\n"
+            f"   最終試行: {entry.get('last_attempt', 'unknown')}\n"
+            "   loop-run-log.md と修復状態を確認してください。自動再試行はしません。")
+    if messages and save_repair_state(state):
+        print("\n".join(messages))
 
 
 # ── Candidate selection ──────────────────────────────────────────────────────
@@ -358,11 +387,20 @@ def agent_command(prompt: str) -> list[str]:
 
 def run_agent(work: Path, site: str, scraper: str, nights: int,
               retry: dict | None = None) -> str:
+    # subprocess cwd alone does not select Hermes's file-tool workspace when
+    # the cron gateway exports its own TERMINAL_CWD. October 8/9 agents edited
+    # the production checkout while this loop saw an empty worktree diff.
+    work = work.resolve()
+    scraper = str(work / scraper)
     if retry:
         prompt = RETRY_PROMPT.format(scraper=scraper, max_rounds=MAX_ROUNDS, **retry)
     else:
-        prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
-    env = {"HERMES_HOME": AGENT_HERMES_HOME} if AGENT_KIND == "hermes" else None
+        prompt = PROMPT.format(scraper=scraper, nights=nights, doc=work / SKILL_DOC)
+    prompt = (f"Work ONLY inside the isolated worktree `{work}`. "
+              "Do not search for or edit another checkout.\n\n" + prompt)
+    env = {"TERMINAL_CWD": str(work)}
+    if AGENT_KIND == "hermes":
+        env["HERMES_HOME"] = AGENT_HERMES_HOME
     result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT, env=env)
     if result.returncode != 0:
         _log(f"  agent exited {result.returncode}: {result.stderr[-400:]}")
@@ -378,6 +416,8 @@ def run_agent(work: Path, site: str, scraper: str, nights: int,
                    "Unknown provider", "Check 'hermes model'"):
         if marker.lower() in out.lower():
             raise RuntimeError(f"agent could not start: {marker}")
+    if result.returncode != 0:
+        raise ChildProcessError(f"agent exited {result.returncode}")
     return out[-2000:]
 
 
@@ -615,6 +655,9 @@ def main() -> int:
         _log("nightly is still running, not starting a repair")
         return 0
 
+    if not args.dry_run:
+        report_exhaustion(load_json(REPAIR_STATE, {}))
+
     site, why_not = pick_site(args.site)
     if not site:
         _log(f"nothing to repair: {why_not}")
@@ -640,6 +683,7 @@ def main() -> int:
     outcome = "no-op"
     detail = ""
     count = 0
+    rounds = 0
     try:
         # Before the agent touches anything, so a failure it did not cause
         # cannot be charged to it.
@@ -686,6 +730,7 @@ def main() -> int:
             discard_worktree(work, branch)
 
     entry["outcome"] = outcome
+    entry["detail"] = detail
     save_repair_state(state)
 
     append_run_log({
@@ -714,6 +759,7 @@ def main() -> int:
     elif outcome == "blocked":
         print(f"⚠️ loop-repair: エージェントを起動できず — {detail}\n"
               f"   {site} は未着手のまま。試行回数は消費していない。")
+    report_exhaustion(state)
     return 0
 
 
