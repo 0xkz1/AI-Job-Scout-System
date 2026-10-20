@@ -10,6 +10,8 @@ whole time. A loop that reads "no jobs for five nights" as "the selectors moved"
 would spend a model on rewriting a scraper that was never given a chance to run.
 """
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -503,3 +505,124 @@ def test_the_agent_timeout_covers_the_measured_runs(state):
     assert lr.AGENT_TIMEOUT >= 1000
     assert lr.AGENT_TIMEOUT * lr.MAX_ROUNDS <= 3600, (
         "three rounds must still fit inside an hour")
+
+
+@pytest.mark.parametrize("retry", [None, {
+    "why": "agent changed nothing", "diff": "", "round": 2, "floor_note": "3 URLs",
+}])
+def test_agent_file_tools_and_prompt_use_the_worktree(state, monkeypatch, retry):
+    seen = {}
+    monkeypatch.setenv("TERMINAL_CWD", "/wrong/production/checkout")
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setattr(lr, "AGENT_KIND", "hermes")
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        seen["prompt"] = cmd[-1]
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(lr, "_run", fake_run)
+    lr.run_agent(state, "reed", "scraper_reed.py", 2, retry)
+    assert seen["cwd"] == state.resolve()
+    assert seen["env"]["TERMINAL_CWD"] == str(state.resolve())
+    assert seen["env"]["HERMES_HOME"] == lr.AGENT_HERMES_HOME
+    assert str(state / "scraper_reed.py") in seen["prompt"]
+    assert "Do not search for or edit another checkout" in seen["prompt"]
+    if retry is None:
+        assert str(state / lr.SKILL_DOC) in seen["prompt"]
+
+
+def test_nonzero_agent_exit_is_not_a_successful_noop(state, monkeypatch):
+    monkeypatch.setattr(lr, "_run", lambda cmd, **kw:
+                        subprocess.CompletedProcess(cmd, 7, stdout="", stderr="failed"))
+    with pytest.raises(ChildProcessError, match="agent exited 7"):
+        lr.run_agent(state, "reed", "scraper_reed.py", 2)
+
+
+@pytest.fixture
+def main_loop(state, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["loop_repair.py"])
+    monkeypatch.setattr(lr, "KILL_SWITCH", state / "pause")
+    monkeypatch.setattr(lr, "RUN_LOG", state / "log.md")
+    (state / "log.md").write_text("<!-- Loop appends below this line -->\n")
+    write(state / "yield.json", {"reed": [0, 0]})
+    write(state / "status.json", {"reed": ["ok", "ok"]})
+    monkeypatch.setattr(lr, "_run", lambda cmd, **kw:
+                        subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""))
+    monkeypatch.setattr(lr, "prepare_worktree", lambda *a: state)
+    monkeypatch.setattr(lr, "discard_worktree", lambda *a: None)
+    monkeypatch.setattr(lr, "failing_tests", lambda *a: (set(), ""))
+    monkeypatch.setattr(lr, "attempt_repair", lambda *a:
+                        (False, 0, "agent changed nothing", [], lr.MAX_ROUNDS))
+    return state
+
+
+def test_second_noop_reports_exhaustion_once_across_runs(main_loop, capsys):
+    write(main_loop / "repair.json", {"reed": {"attempts": 1}})
+    assert lr.main() == 0
+    assert "試行上限(2/2回)" in capsys.readouterr().out
+    entry = lr.load_json(main_loop / "repair.json", {})["reed"]
+    assert entry["detail"] == "agent changed nothing"
+    assert entry["outcome"] == "no-op"
+    assert lr.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_legacy_exhaustion_is_reported_once(main_loop, capsys):
+    write(main_loop / "repair.json", {"reed": {
+        "attempts": 2, "last_attempt": "2026-10-09T07:00:50", "outcome": "no-op",
+    }})
+    lr.main()
+    message = capsys.readouterr().out
+    assert "no-op" in message and "2026-10-09T07:00:50" in message
+    assert "詳細未記録" in message
+    lr.main()
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("mode", ["dry-run", "paused", "fix-proposed", "recovered"])
+def test_exhaustion_does_not_notify_inactive_cases(main_loop, monkeypatch, capsys, mode):
+    entry = {"attempts": 2, "outcome": "no-op"}
+    if mode == "dry-run":
+        monkeypatch.setattr(sys, "argv", ["loop_repair.py", "--dry-run"])
+    elif mode == "paused":
+        lr.KILL_SWITCH.touch()
+    elif mode == "fix-proposed":
+        entry["branch"] = "loop/repair-reed-reviewed-later"
+    elif mode == "recovered":
+        write(main_loop / "yield.json", {"reed": [0, 5]})
+    write(main_loop / "repair.json", {"reed": entry})
+    before = (main_loop / "repair.json").read_bytes()
+    lr.main()
+    assert capsys.readouterr().out == ""
+    assert (main_loop / "repair.json").read_bytes() == before
+
+
+def test_cannot_acknowledge_exhaustion_if_state_write_failed(main_loop, monkeypatch, capsys):
+    write(main_loop / "repair.json", {"reed": {"attempts": 2, "outcome": "no-op"}})
+    monkeypatch.setattr(lr, "save_repair_state", lambda state: False)
+    lr.main()
+    assert capsys.readouterr().out == ""
+    assert "exhaustion_reported_for" not in (main_loop / "repair.json").read_text()
+
+
+def test_agent_startup_failure_keeps_attempt_budget_and_records_reason(main_loop, monkeypatch, capsys):
+    def blocked(*a):
+        raise RuntimeError("agent could not start: Unknown provider")
+    monkeypatch.setattr(lr, "attempt_repair", blocked)
+    lr.main()
+    entry = lr.load_json(main_loop / "repair.json", {})["reed"]
+    assert entry["attempts"] == 0 and entry["outcome"] == "blocked"
+    assert "Unknown provider" in entry["detail"]
+    assert "試行回数は消費していない" in capsys.readouterr().out
+
+
+def test_worker_error_consumes_an_attempt_and_has_a_diagnostic(main_loop, monkeypatch, capsys):
+    def failed(*a):
+        raise ChildProcessError("agent exited 7")
+    monkeypatch.setattr(lr, "attempt_repair", failed)
+    lr.main()
+    entry = lr.load_json(main_loop / "repair.json", {})["reed"]
+    assert entry["attempts"] == 1 and entry["outcome"] == "failed"
+    assert "agent exited 7" in entry["detail"]
+    assert "失敗" in capsys.readouterr().out
