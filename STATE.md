@@ -30,7 +30,8 @@ Last verified: 2026-08-28
   tests and two fixtures) were applied to the production working tree at
   2026-10-29 05:44 JST; related tests **86 passed**. Files were backed up first
   and post-apply bytes matched candidate `347dbef`. The branch is pushed to
-  `github.com/0xkz1/AI-Job-Scout-System` (no PR). No state reset, scheduler
+  `github.com/0xkz1/AI-Job-Scout-System`; draft review PR #1 is open and
+  unmerged. No state reset, scheduler
   change, direct notification, paid API call, merge or commit to the production
   tree was performed. Runbook: `docs/scraper-repair.md`.
 
