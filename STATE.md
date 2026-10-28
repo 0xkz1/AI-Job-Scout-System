@@ -5,6 +5,30 @@ means nobody updated it, **not** that a loop stopped. See [LOOP.md](LOOP.md).
 
 Last verified: 2026-08-28
 
+## Loop Engineering diagnostics and offline drills — 2026-10-29
+
+- Continued the authorized improvements on isolated `codex/loop-evidence-20261029`.
+  Reused reviewed commit `261807b` (workspace pinning, exhaustion stdout and
+  worker-exit classification); it was not installed into the production tree.
+- Read-only `--diagnose [--data-root PATH]` distinguishes observed empty yield,
+  timeout/partial, budget skip, access block, error, positive yield and missing
+  evidence without claiming selectors broke. Prompts describe observations;
+  no-op explanations are retained and `--site` cannot bypass the attempt cap.
+- Actual Guardian JS runs on synthetic saved HTML in offline Chromium. Healthy
+  extraction passes, a planted selector fault fails, its scripted restoration
+  passes, repeated rows fail, and a legitimate empty page returns zero. This is
+  parser/verifier evidence, not proof of a model repairing a live scraper.
+- Related final tests **86 passed**. Full baseline **1350 passed /4 failed /
+  20 skipped**; expanded full run **1379 passed /4 failed /20 skipped**, followed
+  by the final focused tests after the prompt/trailing-zero wording change.
+  The same failures concern CL year claims, external nightly expiry ordering,
+  Jev source records and external saved-collector text. No tests were disabled.
+  Independent reviewer found no P1/P2 issue; final diagnostics rerun17 passed.
+- Guardian's production state remains2/2 attempts, outcome no-op. No state reset,
+  scheduler change, direct notification, new paid API call, production promotion,
+  push or merge performed for this continuation. Deployment/push need separate
+  approval under this project's rules. Runbook: `docs/scraper-repair.md`.
+
 ## Edinburgh local-work overnight follow-up — 2026-10-13
 
 - Checked actual early/late run evidence: LinkedIn timed out at 2400s after

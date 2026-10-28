@@ -62,8 +62,12 @@ before matching; that throws the signal away.
 
 ## What a real fix looks like
 
-The site moved its markup and the selectors match nothing. The scraper finds no
-elements, returns an empty list, and exits 0.
+One possible fault is changed markup: selectors match nothing, the scraper
+returns an empty list and exits 0. An empty search is not proof of that fault.
+Check the recorded status first. Timeout/partial results, budget skips, access
+failures and ordinary errors need different action; missing status is unknown.
+A legitimate empty search needs no selector repair. Leave the scraper unchanged
+and explain that finding rather than fabricating listings or reducing the gate.
 
 Prefer a selector that survives markup churn — a stable data attribute, a role,
 a structural relationship — over one tuned to today's DOM. Where a fallback
@@ -77,8 +81,30 @@ migrated yet.
 reads what was actually staged rather than the count the scraper printed:
 
 - distinct absolute URLs, against a floor of a quarter of that site's best
-  recorded night (minimum 3)
+  recorded night (minimum 3); each counted URL needs a host and a nonblank title
 - distinct titles, at least half the record count — filler repeats
 - the test suite still passes
 
 A diff touching any file but the one scraper is discarded without being read.
+
+## Reproducible checks and diagnosis
+
+`python3 loop_repair.py --diagnose` prints read-only JSON observations, attempt
+state and branches awaiting review. `--data-root /path/to/checkout` reads another
+checkout's `10_output` only in this mode. It neither calls an agent nor marks a
+notification delivered. Restored scraper count stays unknown until adoption and
+subsequent successful collection have evidence.
+
+Run `python3 -m pytest tests/test_loop_repair.py tests/test_loop_diagnostics.py
+tests/test_loop_repair_drill.py tests/test_guardian_search_url.py -q` for the
+offline repair drill. Synthetic saved HTML is rendered in Chromium; all network
+requests are blocked. A normal parser passes, a broken selector fails, restoring
+it passes, repeated records fail, and a legitimate empty page parses to zero.
+The repair is scripted: this measures parser and verifier behavior, not a model's
+ability to diagnose or repair a live site.
+
+The two-attempt cap also applies to `--site`. Unchanged exhausted dry sites emit
+one scheduler message per last-attempt marker, including legacy state. A saved
+marker records stdout emission, not Slack receipt. A review branch, recovered
+site, pause or dry-run does not emit an exhaustion notice. No attempt reset or
+automatic merge is part of this behavior.
