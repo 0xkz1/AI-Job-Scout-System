@@ -9,7 +9,8 @@ Last verified: 2026-08-28
 
 - Continued the authorized improvements on isolated `codex/loop-evidence-20261029`.
   Reused reviewed commit `261807b` (workspace pinning, exhaustion stdout and
-  worker-exit classification); it was not installed into the production tree.
+  worker-exit classification). After Kazuki said **「じゃあ、Go」**, the selected
+  files were applied to the production working tree and the branch was pushed.
 - Read-only `--diagnose [--data-root PATH]` distinguishes observed empty yield,
   timeout/partial, budget skip, access block, error, positive yield and missing
   evidence without claiming selectors broke. Prompts describe observations;
@@ -23,11 +24,15 @@ Last verified: 2026-08-28
   by the final focused tests after the prompt/trailing-zero wording change.
   The same failures concern CL year claims, external nightly expiry ordering,
   Jev source records and external saved-collector text. No tests were disabled.
-  Independent reviewer found no P1/P2 issue; final diagnostics rerun17 passed.
-- Guardian's production state remains2/2 attempts, outcome no-op. No state reset,
-  scheduler change, direct notification, new paid API call, production promotion,
-  push or merge performed for this continuation. Deployment/push need separate
-  approval under this project's rules. Runbook: `docs/scraper-repair.md`.
+  Independent reviewer found no P1/P2 issue; the final diagnostics rerun passed 17 tests.
+- Guardian's production state remains 2/2 attempts, outcome no-op. The selected
+  files (`loop_repair.py`, `docs/scraper-repair.md`, repair/diagnostic/Guardian
+  tests and two fixtures) were applied to the production working tree at
+  2026-10-29 05:44 JST; related tests **86 passed**. Files were backed up first
+  and post-apply bytes matched candidate `347dbef`. The branch is pushed to
+  `github.com/0xkz1/AI-Job-Scout-System` (no PR). No state reset, scheduler
+  change, direct notification, paid API call, merge or commit to the production
+  tree was performed. Runbook: `docs/scraper-repair.md`.
 
 ## Edinburgh local-work overnight follow-up — 2026-10-13
 
