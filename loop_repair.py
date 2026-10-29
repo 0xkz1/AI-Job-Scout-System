@@ -23,7 +23,8 @@ What it will not do, by construction rather than by instruction:
     a standing bill with no ceiling.
 
 Trigger is `dry_sites`, not `stale_sites`. Dry means the site ran, exited clean
-and returned nothing — a broken scraper. Stale includes budget skips and
+and returned nothing — a signal to investigate, not proof of broken selectors.
+Stale includes budget skips and
 timeouts, where the scraper is usually fine and the fault is in how long the
 sites before it took; pointing an agent at scraper_guardian.py because the
 budget ran out would be a fix for the wrong file.
@@ -45,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "10_output"
@@ -169,14 +171,87 @@ def load_json(path: Path, default):
         return default
 
 
-def save_repair_state(state: dict) -> None:
+def save_repair_state(state: dict) -> bool:
     try:
         REPAIR_STATE.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+        return True
     except OSError as e:
         _log(f"  could not write repair state: {e}")
+        return False
+
+
+def report_exhaustion(state: dict) -> None:
+    """Emit one scheduler message per exhausted attempt, including old state.
+
+    The marker records emission, not successful Slack delivery: the scheduler
+    owns delivery. A proposed fix waits on review rather than on another retry.
+    """
+    messages = []
+    for site in dry_candidates():
+        entry = state.get(site) or {}
+        attempts = entry.get("attempts", 0)
+        if attempts < MAX_ATTEMPTS_PER_SITE or entry.get("branch"):
+            continue
+        stamp = f"{entry.get('last_attempt', '')}:{attempts}"
+        if entry.get("exhaustion_reported_for") == stamp:
+            continue
+        entry["exhaustion_reported_for"] = stamp
+        messages.append(
+            f"⚠️ loop-repair: {site} の自動修復を停止 — 試行上限"
+            f"({attempts}/{MAX_ATTEMPTS_PER_SITE}回)\n"
+            f"   最終結果: {entry.get('outcome', 'unknown')} / "
+            f"{entry.get('detail') or '詳細未記録'}\n"
+            f"   最終試行: {entry.get('last_attempt', 'unknown')}\n"
+            "   loop-run-log.md と修復状態を確認してください。自動再試行はしません。")
+    if messages and save_repair_state(state):
+        print("\n".join(messages))
 
 
 # ── Candidate selection ──────────────────────────────────────────────────────
+
+def diagnose_site(site: str, yields: dict | None = None, statuses: dict | None = None) -> dict:
+    """Report observations without inferring a selector fault from zero yield."""
+    yields = ((load_json(YIELD_HISTORY, {}) if yields is None else yields).get(site) or [])[-DRY_NIGHTS:]
+    statuses = ((load_json(STATUS_HISTORY, {}) if statuses is None else statuses).get(site) or [])[-DRY_NIGHTS:]
+    latest = statuses[-1] if statuses else None
+    if latest in {"auth", "unauthorized", "forbidden", "blocked"}:
+        diagnosis = "access-blocked"
+    elif latest in {"timeout", "partial"}:
+        diagnosis = "timeout-or-partial"
+    elif latest == "skipped":
+        diagnosis = "budget-skipped"
+    elif latest == "error":
+        diagnosis = "scrape-error"
+    elif yields and isinstance(yields[-1], int) and yields[-1] > 0:
+        diagnosis = "returning-jobs"
+    elif len(yields) == DRY_NIGHTS and all(n == 0 for n in yields):
+        diagnosis = "empty-unexplained" if statuses == ["ok"] * DRY_NIGHTS else "insufficient-evidence"
+    else:
+        diagnosis = "insufficient-evidence"
+    return {"site": site, "diagnosis": diagnosis,
+            "recent_yields": yields, "recent_statuses": statuses,
+            "selector_failure_proven": False}
+
+
+def diagnostic_report(data_root: Path | None = None) -> dict:
+    """Read-only execution state; never claims a verified repair was adopted."""
+    folder = data_root / "10_output" if data_root is not None else None
+    state = load_json(folder / REPAIR_STATE.name if folder else REPAIR_STATE, {})
+    yields = load_json(folder / YIELD_HISTORY.name if folder else YIELD_HISTORY, {})
+    statuses = load_json(folder / STATUS_HISTORY.name if folder else STATUS_HISTORY, {})
+    sites = sorted(set(yields) | set(statuses) | set(state))
+    rows = []
+    for site in sites:
+        entry = state.get(site) or {}
+        rows.append({**diagnose_site(site, yields, statuses), "attempts": entry.get("attempts", 0),
+                     "outcome": entry.get("outcome"), "detail": entry.get("detail"),
+                     "branch": entry.get("branch"),
+                     "exhausted": entry.get("attempts", 0) >= MAX_ATTEMPTS_PER_SITE})
+    return {"execution": rows, "outcome": {
+        "fixes_awaiting_review": sum(bool(r["branch"]) for r in rows),
+        "restored_scrapers": None,
+        "note": "A proposed branch or a positive yield alone does not establish an adopted repair."}}
+
 
 def dry_candidates() -> list[str]:
     """Sites that ran and returned nothing for DRY_NIGHTS consecutive nights.
@@ -226,6 +301,9 @@ def pick_site(forced: str | None) -> tuple[str | None, str]:
     if forced:
         if not scraper_path(forced):
             return None, f"no scraper file for {forced}"
+        entry = state.get(forced) or {}
+        if entry.get("branch") or entry.get("attempts", 0) >= MAX_ATTEMPTS_PER_SITE:
+            return None, f"{forced} already attempted or waiting on a human"
         return forced, ""
 
     candidates = dry_candidates()
@@ -257,17 +335,21 @@ def pick_site(forced: str | None) -> tuple[str | None, str]:
 SKILL_DOC = "docs/scraper-repair.md"
 
 PROMPT = """\
-`{scraper}` in this repository has stopped returning results. It runs to
-completion and exits 0, and has scraped exactly zero jobs on each of the last
-{nights} nightly runs. Every other site is still returning normally, so the
-fault is in this file rather than in the network or the pipeline around it.
+Investigate whether `{scraper}` in this repository has stopped returning results.
+The yield history contains {nights} trailing zero entries. The attached status
+observations say whether it completed, timed out or was skipped; missing status
+is unknown. Zero jobs alone does not prove a selector failure.
+Investigate whether this is a legitimate empty search, access/authentication,
+a timeout/budget limit, or a parser defect. Do not invent listings or weaken
+the verifier to make an empty search pass. If evidence does not support a
+scraper edit, leave it unchanged and explain what a human needs to check.
 
 Read `{doc}` first. It covers the shape every scraper here has, the one key a
 returned job must carry, the budget mechanism not to rewrite, the measured time
 each site is allowed, and how your change will be judged. It exists so you do
 not have to work any of that out from the code.
 
-Then read `{scraper}` and fix the selection so it matches the page again.
+Then read `{scraper}` and repair it only when the evidence supports that change.
 
 Constraints, all of them enforced after you finish:
 
@@ -358,11 +440,22 @@ def agent_command(prompt: str) -> list[str]:
 
 def run_agent(work: Path, site: str, scraper: str, nights: int,
               retry: dict | None = None) -> str:
+    # subprocess cwd alone does not select Hermes's file-tool workspace when
+    # the cron gateway exports its own TERMINAL_CWD. October 8/9 agents edited
+    # the production checkout while this loop saw an empty worktree diff.
+    work = work.resolve()
+    scraper = str(work / scraper)
     if retry:
         prompt = RETRY_PROMPT.format(scraper=scraper, max_rounds=MAX_ROUNDS, **retry)
     else:
-        prompt = PROMPT.format(scraper=scraper, nights=nights, doc=SKILL_DOC)
-    env = {"HERMES_HOME": AGENT_HERMES_HOME} if AGENT_KIND == "hermes" else None
+        prompt = PROMPT.format(scraper=scraper, nights=nights, doc=work / SKILL_DOC)
+    prompt = (f"Work ONLY inside the isolated worktree `{work}`. "
+              "Do not search for or edit another checkout.\n\n"
+              + "Recorded observations (not a root-cause verdict):\n"
+              + json.dumps(diagnose_site(site), ensure_ascii=False) + "\n\n" + prompt)
+    env = {"TERMINAL_CWD": str(work)}
+    if AGENT_KIND == "hermes":
+        env["HERMES_HOME"] = AGENT_HERMES_HOME
     result = _run(agent_command(prompt), cwd=work, timeout=AGENT_TIMEOUT, env=env)
     if result.returncode != 0:
         _log(f"  agent exited {result.returncode}: {result.stderr[-400:]}")
@@ -378,6 +471,8 @@ def run_agent(work: Path, site: str, scraper: str, nights: int,
                    "Unknown provider", "Check 'hermes model'"):
         if marker.lower() in out.lower():
             raise RuntimeError(f"agent could not start: {marker}")
+    if result.returncode != 0:
+        raise ChildProcessError(f"agent exited {result.returncode}")
     return out[-2000:]
 
 
@@ -418,8 +513,15 @@ def inspect_staged(work: Path, site: str) -> tuple[int, int, int]:
             continue
         for row in rows if isinstance(rows, list) else []:
             records += 1
+            if not isinstance(row, dict):
+                continue
             url = str(row.get("url") or "")
-            if url.startswith(("http://", "https://")):
+            try:
+                parsed = urlsplit(url)
+                absolute = parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+            except ValueError:
+                absolute = False
+            if absolute and str(row.get("title") or "").strip():
                 urls.add(url)
             title = str(row.get("title") or "").strip()
             if title:
@@ -450,6 +552,8 @@ def failing_tests(work: Path) -> tuple[set[str], str]:
         for prefix in ("FAILED ", "ERROR "):
             if line.startswith(prefix):
                 red.add(line[len(prefix):].split(" ")[0])
+    if result.returncode != 0 and not red:
+        return {"__unmeasurable__"}, f"test runner exited {result.returncode} without test verdicts"
     return red, ""
 
 
@@ -568,11 +672,11 @@ def attempt_repair(work: Path, site: str, scraper: str, nights: int,
 
     for rnd in range(1, MAX_ROUNDS + 1):
         if rnd == 1:
-            run_agent(work, site, scraper, nights)
+            report = run_agent(work, site, scraper, nights)
         else:
             _log(f"  round {rnd}: {why}")
             diff = _run(["git", "diff", "--", scraper], cwd=work, timeout=60)
-            run_agent(work, site, scraper, nights, retry={
+            report = run_agent(work, site, scraper, nights, retry={
                 "why": why,
                 "diff": (diff.stdout or "")[:3000],
                 "round": rnd,
@@ -589,6 +693,8 @@ def attempt_repair(work: Path, site: str, scraper: str, nights: int,
             break  # out of scope: no point verifying or retrying
         if not source_touched:
             why = "agent changed nothing"
+            if report:
+                why += ": " + report[-1500:]
             continue
         ok, count, why = verify(work, site, baseline)
         if ok:
@@ -602,7 +708,16 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="Decide and report, spawn nothing")
     ap.add_argument("--site", default=None, help="Force a candidate")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="Print read-only JSON observations; never run an agent or notify")
+    ap.add_argument("--data-root", type=Path, help="Read another checkout with --diagnose only")
     args = ap.parse_args()
+
+    if args.diagnose:
+        print(json.dumps(diagnostic_report(args.data_root), ensure_ascii=False, indent=2))
+        return 0
+    if args.data_root is not None:
+        ap.error("--data-root requires --diagnose")
 
     if KILL_SWITCH.exists():
         _log(f"paused: {KILL_SWITCH.name} exists")
@@ -615,13 +730,20 @@ def main() -> int:
         _log("nightly is still running, not starting a repair")
         return 0
 
+    if not args.dry_run:
+        report_exhaustion(load_json(REPAIR_STATE, {}))
+
     site, why_not = pick_site(args.site)
     if not site:
         _log(f"nothing to repair: {why_not}")
         return 0
 
     scraper = scraper_path(site).name
-    nights = len((load_json(YIELD_HISTORY, {}).get(site) or []))
+    nights = 0
+    for count in reversed(load_json(YIELD_HISTORY, {}).get(site) or []):
+        if count != 0:
+            break
+        nights += 1
     _log(f"candidate: {site} ({scraper})")
 
     if args.dry_run:
@@ -640,6 +762,7 @@ def main() -> int:
     outcome = "no-op"
     detail = ""
     count = 0
+    rounds = 0
     try:
         # Before the agent touches anything, so a failure it did not cause
         # cannot be charged to it.
@@ -655,7 +778,7 @@ def main() -> int:
         if source_touched and source_touched != [scraper]:
             outcome, detail = "rejected", f"touched {', '.join(source_touched)}"
         elif not source_touched:
-            outcome, detail = "no-op", "agent changed nothing"
+            outcome, detail = "no-op", why
         else:
             if ok:
                 _run(["git", "add", scraper], cwd=work, timeout=60)
@@ -686,6 +809,7 @@ def main() -> int:
             discard_worktree(work, branch)
 
     entry["outcome"] = outcome
+    entry["detail"] = detail
     save_repair_state(state)
 
     append_run_log({
@@ -714,6 +838,7 @@ def main() -> int:
     elif outcome == "blocked":
         print(f"⚠️ loop-repair: エージェントを起動できず — {detail}\n"
               f"   {site} は未着手のまま。試行回数は消費していない。")
+    report_exhaustion(state)
     return 0
 
 
