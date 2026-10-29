@@ -1,0 +1,216 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="1752" viewBox="0 0 1180 1752" font-family="ui-sans-serif, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.5 L7.5,4 L0,7.5 Z" fill="#8a8a8a" />
+    </marker>
+    <marker id="arrAccent" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0.5 L7.5,4 L0,7.5 Z" fill="#944040" />
+    </marker>
+  </defs>
+
+  <title>Job Scout System — architecture v3, 2026-10-14</title><desc>Updated from the July 2026 architecture: nightly collection, staged analysis, matching, Jev document selection, factual review, repair, outputs and human application.</desc><rect width="1180" height="1752" fill="#fbfaf9" />
+
+
+  <rect x="40" y="34" width="5" height="34" fill="#944040" />
+  <text x="58" y="52" font-size="22" font-weight="800" fill="#1a1a1a" letter-spacing="1">JOB SCOUT SYSTEM</text>
+  <text x="58" y="70" font-size="11.5" fill="#777">scrape → analyze → match → generate → review → export — LLM-assisted pipeline, run nightly and by hand, surfaced in Obsidian, Streamlit &amp; Telegram</text>
+  <text x="1140" y="52" font-size="10" fill="#999" text-anchor="end">v3 · 2026-10-14</text>
+
+
+  <rect x="40" y="90" width="1100" height="54" rx="8" fill="#fdf8f7" stroke="#944040" stroke-width="1.3" stroke-dasharray="5 4" />
+  <text x="58" y="110" font-size="11.5" font-weight="800" fill="#944040" letter-spacing="1">L1 NIGHTLY AUTOMATION — job_scout_nightly.sh · Hermes archivist · no_agent: true · 0 agent spawns</text>
+  <text x="58" y="128" font-size="10" fill="#777">02:00 LinkedIn / Adzuna / Indeed → staging only · 04:30 Reed / remote APIs / Guardian → one analysis pass, scoring, review &amp; digest</text>
+  <text x="1122" y="119" font-size="10" font-weight="700" fill="#944040" text-anchor="end">digest → Telegram ⤵</text>
+
+
+  <rect x="40" y="152" width="660" height="104" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2" />
+  <text x="58" y="175" font-size="11" font-weight="700" fill="#555" letter-spacing="2">SOURCES</text>
+  <g font-size="11.5" font-weight="600" fill="#1a1a1a" text-anchor="middle">
+    <rect x="58" y="186" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1" /><text x="101" y="203">Indeed</text>
+    <rect x="152" y="186" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1" /><text x="195" y="203">LinkedIn</text>
+    <rect x="246" y="186" width="76" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1" /><text x="284" y="203">Reed</text>
+    <rect x="330" y="186" width="86" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1" /><text x="373" y="203">Guardian</text>
+    <rect x="424" y="186" width="80" height="26" rx="13" fill="#f1efec" stroke="#d9d5d1" /><text x="464" y="203">Adzuna</text>
+  </g>
+  <text x="58" y="232" font-size="10" fill="#999">Also: Remotive / Arbeitnow APIs · UK + European searches · Edinburgh local-work searches</text>
+
+  <line x1="522" y1="186" x2="522" y2="241" stroke="#e4e0dc" />
+  <g font-size="11" fill="#1a1a1a">
+    <text x="538" y="197" font-weight="600">url-list.md</text><text x="618" y="197" font-size="9.5" fill="#999">URL intake</text>
+    <text x="538" y="215" font-weight="600">watched-list/</text><text x="628" y="215" font-size="9.5" fill="#999">manual paste</text>
+    <text x="538" y="233" font-weight="600">bookmarks</text><text x="635" y="233" font-size="9.5" fill="#999">manual intake</text>
+  </g>
+
+
+  <rect x="740" y="152" width="400" height="180" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2" />
+  <text x="758" y="175" font-size="11" font-weight="700" fill="#555" letter-spacing="2">PROFILE — SINGLE SOURCE OF TRUTH</text>
+  <g font-size="11.5" fill="#1a1a1a">
+    <text x="758" y="198" font-weight="600">skills.md</text><text x="836" y="198" font-size="10" fill="#999">verified levels · aspirational skills</text>
+    <text x="758" y="218" font-weight="600">about.md / profile.md</text><text x="908" y="218" font-size="10" fill="#999">identity · work eligibility</text>
+    <text x="758" y="238" font-weight="600">ethos.md / interests.md</text><text x="918" y="238" font-size="10" fill="#999">+ timeline.md / education.md</text>
+  </g>
+  <line x1="758" y1="252" x2="1122" y2="252" stroke="#eeebe8" />
+  <text x="758" y="272" font-size="10" fill="#999">lives OUTSIDE the repo · never overwritten by generators</text>
+  <text x="758" y="288" font-size="10" fill="#999">SKILL_SYNONYMS maps job wording → your skills</text>
+  <text x="758" y="312" font-size="10.5" fill="#944040" font-weight="600">feeds matcher (5-axis) + LLM persona ↓</text>
+
+
+  <line x1="370" y1="256" x2="370" y2="288" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+
+
+  <rect x="40" y="292" width="660" height="66" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2" />
+  <text x="58" y="315" font-size="11" font-weight="700" fill="#555" letter-spacing="2">STAGING — 00_saved/</text>
+  <g font-size="10.5" fill="#666">
+    <text x="58" y="337">_raw_&lt;site&gt;_*.json · url_list_jobs.json · _saved_index.json · watched-list/</text>
+    <text x="58" y="351" fill="#944040" font-weight="600">scrape-only stages raw jobs; late phase merges and processes the saved pool once</text>
+  </g>
+
+
+  <line x1="370" y1="358" x2="370" y2="386" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+
+  <path d="M 940 332 L 940 440 L 706 440" fill="none" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+
+
+  <rect x="40" y="390" width="1100" height="210" rx="8" fill="#ffffff" stroke="#b9b4af" stroke-width="1.4" />
+  <text x="58" y="413" font-size="11" font-weight="700" fill="#555" letter-spacing="2">PIPELINE — run.py</text>
+
+  <g font-size="12" font-weight="700" fill="#1a1a1a" text-anchor="middle">
+    <rect x="58" y="428" width="130" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="123" y="451">analyzer.py</text>
+    <text x="123" y="467" font-size="9.5" font-weight="400" fill="#777">skills · salary · level</text>
+
+    <rect x="216" y="428" width="110" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="271" y="451">filter.py</text>
+    <text x="271" y="467" font-size="9.5" font-weight="400" fill="#777">level · location · salary</text>
+
+    <rect x="354" y="428" width="130" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="419" y="451">matcher.py</text>
+    <text x="419" y="467" font-size="9.5" font-weight="400" fill="#777">5-axis weighted score</text>
+
+    <rect x="512" y="428" width="170" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="597" y="451">generators</text>
+    <text x="597" y="467" font-size="9.5" font-weight="400" fill="#777">CV · letter · match report</text>
+  </g>
+  <line x1="188" y1="457" x2="212" y2="457" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="326" y1="457" x2="350" y2="457" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="484" y1="457" x2="508" y2="457" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+
+
+  <g font-size="9" font-weight="800" fill="#ffffff" text-anchor="middle">
+    <rect x="96" y="420" width="34" height="15" rx="7.5" fill="#944040" /><text x="113" y="431">LLM</text>
+    <rect x="392" y="420" width="34" height="15" rx="7.5" fill="#944040" /><text x="409" y="431">LLM</text>
+    <rect x="570" y="420" width="34" height="15" rx="7.5" fill="#944040" /><text x="587" y="431">JEV</text>
+  </g>
+
+
+  <rect x="740" y="428" width="250" height="58" rx="6" fill="#f7f5f3" stroke="#c9c4bf" stroke-width="1.2" stroke-dasharray="4 3" />
+  <text x="865" y="450" font-size="12" font-weight="700" fill="#1a1a1a" text-anchor="middle">watched_matcher.py</text>
+  <text x="865" y="466" font-size="9.5" fill="#777" text-anchor="middle">--watched · manual paste · optional --llm-context</text>
+  <text x="740" y="505" font-size="10" fill="#999">manual branch: bypasses analyzer/filter; separate run.py subprocess</text>
+  <path d="M 700 335 L 760 335 L 760 424" fill="none" stroke="#8a8a8a" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arr)" />
+
+  <g font-size="10" fill="#777">
+    <text x="58" y="514">· level classification is <tspan font-weight="700" fill="#1a1a1a">title-only</tspan> + word-boundary keywords; unknown → LLM reads the description</text>
+    <text x="58" y="528">· DB dedupe: URL + matching descriptions; document selection dedupes by output path, keeping the fullest usable posting</text>
+    <text x="58" y="542">· 5 axes: skills 45 · context 40 · location 10 · experience 5 · salary 0 — multiplied by title_relevance</text>
+  </g>
+
+
+  <path d="M 113 600 L 113 628" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrAccent)" />
+  <path d="M 409 600 L 409 628" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrAccent)" />
+  <rect x="40" y="628" width="1100" height="234" rx="8" fill="#faf3f3" stroke="#944040" stroke-width="1.8" />
+  <rect x="40" y="628" width="5" height="234" fill="#944040" />
+  <g text-anchor="middle">
+    </g>
+  <g font-size="9.5" fill="#777">
+    </g>
+
+
+  <g text-anchor="middle">
+    </g>
+  <rect x="40" y="1082" width="1100" height="120" rx="8" fill="#ffffff" stroke="#b9b4af" stroke-width="1.4" />
+  <text x="58" y="1105" font-size="11" font-weight="700" fill="#555" letter-spacing="2">REVIEW — reviewer.py · ranked auto-review + manual document review / annotation dialogue</text>
+  <text x="58" y="1121" font-size="10" fill="#777">full CV / letter + job posting + source facts → findings; unchanged documents cached by reviewed_sha</text>
+
+  <g font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">
+    <rect x="58" y="1132" width="220" height="50" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="168" y="1161">① generated / hand-edited docs</text>
+
+    <rect x="310" y="1132" width="240" height="50" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="430" y="1161">② GLM-5.3 checks</text>
+
+    <rect x="582" y="1132" width="240" height="50" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="702" y="1161">③ saved → 15_reviews/</text>
+
+    <rect x="854" y="1132" width="260" height="50" rx="6" fill="#f7f5f3" stroke="#c9c4bf" />
+    <text x="984" y="1161" font-size="10.5">④ score ≥85 → ready badge</text>
+  </g>
+  <rect x="393" y="1124" width="34" height="15" rx="7.5" fill="#944040" /><text x="410" y="1135" font-size="9" font-weight="800" fill="#ffffff" text-anchor="middle">LLM</text>
+  <line x1="278" y1="1157" x2="306" y2="1157" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="550" y1="1157" x2="578" y2="1157" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+  <line x1="822" y1="1157" x2="850" y2="1157" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+  <text x="58" y="1192" font-size="10" fill="#999">review_top_percent: 40 · review_score_threshold: 85 — a badge is advisory; human checks facts and submits</text>
+
+
+  <rect x="40" y="1422" width="500" height="150" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2" />
+  <text x="58" y="1445" font-size="11" font-weight="700" fill="#555" letter-spacing="2">DATABASE — _analyzed.json</text>
+  <g font-size="10.5" fill="#666">
+    <text x="58" y="1468">incremental job DB · URL-dedup against every known posting</text>
+    <text x="58" y="1485">context_source: llm | tfidf · analysis / matches / model provenance retained</text>
+    <text x="58" y="1502" font-weight="700" fill="#1a1a1a">never shrinks — filtered jobs stay in the DB</text>
+    <text x="58" y="1526" fill="#999">_analyzed_full.json snapshot · timestamped backups</text>
+  </g>
+
+  <rect x="580" y="1422" width="560" height="150" rx="8" fill="#ffffff" stroke="#d9d5d1" stroke-width="1.2" />
+  <text x="598" y="1445" font-size="11" font-weight="700" fill="#555" letter-spacing="2">OUTPUT — 10_output/</text>
+  <g font-size="11" fill="#1a1a1a">
+    <text x="598" y="1468" font-weight="600">00_matches/</text><text x="700" y="1468" font-size="10" fill="#999">per-job folders · strategy / scores / source links in YAML</text>
+    <text x="598" y="1485" font-weight="600">10_cvs/ · 10_cover-letters/</text><text x="795" y="1485" font-size="9.5" fill="#999">top 30% + score floor · edits locked</text>
+    <text x="598" y="1502" font-weight="600">15_reviews/</text><text x="705" y="1502" font-size="10" fill="#999">reviewer.py findings · linked from report frontmatter</text>
+    <text x="598" y="1519" font-weight="600">20_pdfs/</text><text x="682" y="1519" font-size="10" fill="#999">A4 export on demand from the PDF tab</text>
+    <text x="598" y="1536" font-weight="600">00_kanban/</text><text x="695" y="1536" font-size="10" fill="#999">application-pipeline board data, read by Obsidian</text>
+  </g>
+  <line x1="540" y1="1482" x2="576" y2="1482" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" />
+
+
+  <line x1="220" y1="1572" x2="220" y2="1602" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)" />
+  <line x1="590" y1="1572" x2="590" y2="1602" stroke="#944040" stroke-width="1.6" marker-end="url(#arrAccent)" />
+
+
+  <path d="M 1145 117 L 1160 117 L 1160 1590 L 960 1590 L 960 1602" fill="none" stroke="#944040" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#arrAccent)" />
+  <text x="955" y="1585" font-size="9" fill="#944040" text-anchor="end">nightly digest ⤵</text>
+
+
+  <rect x="40" y="1602" width="360" height="110" rx="8" fill="#1e1c1b" stroke="#1e1c1b" />
+  <rect x="40" y="1602" width="360" height="30" rx="8" fill="#944040" />
+  <rect x="40" y="1618" width="360" height="14" fill="#944040" />
+  <text x="58" y="1622" font-size="12" font-weight="800" fill="#ffffff" letter-spacing="2">OBSIDIAN</text>
+  <g font-size="10" fill="#d8d4d0">
+    <text x="58" y="1652">Dataview queries over YAML frontmatter — filter by</text>
+    <text x="58" y="1669">categories · report ⇄ CV ⇄ cover letter wikilinks</text>
+    <text x="58" y="1686">00_kanban/ — application tracking + shared local CV references</text>
+    <text x="58" y="1701" fill="#a89b9b">the reading, deciding &amp; tracking surface</text>
+  </g>
+
+  <rect x="410" y="1602" width="360" height="110" rx="8" fill="#1e1c1b" stroke="#1e1c1b" />
+  <rect x="410" y="1602" width="360" height="30" rx="8" fill="#944040" />
+  <rect x="410" y="1618" width="360" height="14" fill="#944040" />
+  <text x="428" y="1622" font-size="12" font-weight="800" fill="#ffffff" letter-spacing="2">STREAMLIT — :8501</text>
+  <g font-size="10" fill="#d8d4d0">
+    <text x="428" y="1652">🔍 Scraper · 🎯 Match Analysis · 👁 Saved</text>
+    <text x="428" y="1669">🧐 Review — reviewer.py findings · 📄 PDF export</text>
+    <text x="428" y="1686">live re-scoring · watched-list &amp; url-list intake</text>
+    <text x="428" y="1701" fill="#a89b9b">the operating surface</text>
+  </g>
+
+  <rect x="780" y="1602" width="360" height="110" rx="8" fill="#1e1c1b" stroke="#1e1c1b" />
+  <rect x="780" y="1602" width="360" height="30" rx="8" fill="#944040" />
+  <rect x="780" y="1618" width="360" height="14" fill="#944040" />
+  <text x="798" y="1622" font-size="12" font-weight="800" fill="#ffffff" letter-spacing="2">TELEGRAM</text>
+  <g font-size="10" fill="#d8d4d0">
+    <text x="798" y="1652">🌙 nightly_scout.py digest — new matches since last run</text>
+    <text x="798" y="1669">delivered via Archivist profile's own bot (Hermes gateway)</text>
+    <text x="798" y="1686">unattended overnight run · quiet night → nothing sent</text>
+    <text x="798" y="1701" fill="#a89b9b">the passive surface</text>
+  </g>
+<g id="current-architecture-details"><text x="64" y="653" font-size="12" fill="#944040" font-weight="800" letter-spacing="0.6">LLM LAYER — llm_client.py · per-stage routing, prompt-size guards and key quarantine</text><rect x="64" y="668" width="240" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="184.0" y="690" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">Groq — analyzer</text><text x="184.0" y="707" font-size="10" fill="#777" font-weight="400" text-anchor="middle">openai/gpt-oss-120b</text><text x="184.0" y="722" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">fast extraction; stage-specific primary</text><rect x="380" y="668" width="240" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="500.0" y="690" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">LiteLLM Gateway</text><text x="500.0" y="707" font-size="10" fill="#777" font-weight="400" text-anchor="middle">primary for other bulk stages</text><text x="500.0" y="722" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">model alias: mistral-medium</text><rect x="696" y="668" width="240" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="816.0" y="690" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">Configured fallbacks</text><text x="816.0" y="707" font-size="10" fill="#777" font-weight="400" text-anchor="middle">Mistral / NVIDIA / Z.ai / others</text><text x="816.0" y="722" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">local Ollama remains the last resort</text><line x1="304" y1="700" x2="376" y2="700" stroke="#944040" stroke-width="1.4" marker-end="url(#arrAccent)" /><line x1="620" y1="700" x2="692" y2="700" stroke="#944040" stroke-width="1.4" marker-end="url(#arrAccent)" /><text x="340" y="690" font-size="9" fill="#944040" font-weight="700" text-anchor="middle">fallback</text><text x="656" y="690" font-size="9" fill="#944040" font-weight="700" text-anchor="middle">fallback</text><text x="960" y="690" font-size="9.5" fill="#777" font-weight="400">tasks: skills / level</text><text x="960" y="703" font-size="9.5" fill="#777" font-weight="400">role-fit + ethos</text><text x="960" y="716" font-size="9.5" fill="#777" font-weight="400">EN + JA summaries</text><text x="960" y="729" font-size="9.5" fill="#777" font-weight="400">oversize routes skipped</text><text x="64" y="762" font-size="11" fill="#944040" font-weight="800">REVIEW ROUTE — GLM-5.3 / reasoning: low · key1 → key2 → … → key7 · same model throughout</text><rect x="64" y="780" width="310" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="219.0" y="802" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">reviewer.py</text><text x="219.0" y="819" font-size="10" fill="#777" font-weight="400" text-anchor="middle">complete CV / letter + factual references</text><rect x="428" y="780" width="310" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="583.0" y="802" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">LiteLLM Gateway</text><text x="583.0" y="819" font-size="10" fill="#777" font-weight="400" text-anchor="middle">review-strong-glm53-key1 … key7</text><rect x="792" y="780" width="322" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="953.0" y="802" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">NVIDIA NIM — GLM-5.3</text><text x="953.0" y="819" font-size="10" fill="#777" font-weight="400" text-anchor="middle">one attempt per key; failures advance</text><line x1="374" y1="812" x2="424" y2="812" stroke="#944040" stroke-width="1.4" marker-end="url(#arrAccent)" /><line x1="738" y1="812" x2="788" y2="812" stroke="#944040" stroke-width="1.4" marker-end="url(#arrAccent)" /><text x="58" y="556" font-size="10" fill="#777" font-weight="400">· selection.py: top 30% generate / top 40% review + 0.50 floor; unscoreable, expired and locked jobs stay out</text><text x="58" y="570" font-size="10" fill="#777" font-weight="400">· Edinburgh admin / manual / kitchen jobs use verified shared CVs; professional generation and auto-review slots are preserved</text><text x="58" y="584" font-size="10" fill="#777" font-weight="400">· contract / sponsorship / remote scope / runway_fit / action_tier are metadata; sponsorship uses verbatim evidence, never inference</text><rect x="40" y="892" width="1100" height="160" fill="#ffffff" stroke="#b9b4af" stroke-width="1.4" rx="8" /><text x="58" y="915" font-size="11" fill="#555" font-weight="700" letter-spacing="1.4">DOCUMENT ASSEMBLY — cv_generator.py + cover_letter_generator.py</text><rect x="64" y="932" width="310" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="219.0" y="954" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">Verified masters</text><text x="219.0" y="971" font-size="10" fill="#777" font-weight="400" text-anchor="middle">career/cv/ · career/cover-letter/</text><text x="219.0" y="986" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">project records · profiles · letter_facts_v1.md</text><rect x="428" y="932" width="310" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="583.0" y="954" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">Jev 1.13.0 — typed selection</text><text x="583.0" y="971" font-size="10" fill="#777" font-weight="400" text-anchor="middle">CV project IDs + prepared letter paragraphs</text><text x="583.0" y="986" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">source text selected; no new prose generated</text><rect x="792" y="932" width="322" height="64" fill="#ffffff" stroke="#944040" stroke-width="1.3" rx="6" /><text x="953.0" y="954" font-size="12" fill="#1a1a1a" font-weight="800" text-anchor="middle">Python assemblers</text><text x="953.0" y="971" font-size="10" fill="#777" font-weight="400" text-anchor="middle">CV + cover letter + source trace</text><text x="953.0" y="986" font-size="9.5" fill="#777" font-weight="400" text-anchor="middle">out-of-scope letters withheld; uncertainty labelled</text><line x1="374" y1="964" x2="424" y2="964" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" /><line x1="738" y1="964" x2="788" y2="964" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" /><text x="58" y="1018" font-size="10" fill="#944040" font-weight="700">CURRENT SETTING: JIS_DOCUMENT_MODE=jev · if unset, code defaults to legacy (LLM ranking / bridge + source assembly)</text><text x="58" y="1036" font-size="10" fill="#777" font-weight="400">Every selected document still needs review. Shared local-work CVs bypass tailored generation; applied / hand-edited documents remain locked.</text><rect x="40" y="1232" width="530" height="160" fill="#fdf8f7" stroke="#944040" stroke-width="1.3" rx="8" /><rect x="590" y="1232" width="550" height="160" fill="#fdf8f7" stroke="#944040" stroke-width="1.3" rx="8" /><text x="58" y="1256" font-size="11" fill="#944040" font-weight="800" letter-spacing="1">L2 SCRAPER REPAIR — Hermes builder</text><text x="58" y="1280" font-size="10" fill="#666" font-weight="400">normal exit + zero jobs on two consecutive nights → select one site</text><text x="58" y="1298" font-size="10" fill="#666" font-weight="400">loop_repair.py → dispatch_worker.py → isolated git worktree</text><text x="58" y="1316" font-size="10" fill="#666" font-weight="400">worker fix → live scrape verification → tests → branch for human review</text><text x="58" y="1334" font-size="10" fill="#666" font-weight="400">up to 3 rounds / attempt; per-site attempt budget; never auto-merge</text><text x="58" y="1370" font-size="10" fill="#666" font-weight="400">timeout / partial / error is recorded separately from a clean dry scrape</text><text x="608" y="1256" font-size="11" fill="#944040" font-weight="800" letter-spacing="1">L3 KANBAN REVIEW — bridge route</text><text x="608" y="1280" font-size="10" fill="#666" font-weight="400">jis_hermes_bridge.py: score ≥0.70 → generate directly → jis board</text><text x="608" y="1298" font-size="10" fill="#666" font-weight="400">review-editor checks facts against sources; no writer profile</text><text x="608" y="1316" font-size="10" fill="#666" font-weight="400">JIS_JEV_MODE defaults to off; shadow / on are explicit settings</text><text x="608" y="1334" font-size="10" fill="#666" font-weight="400">Jev pre-audit probabilities do not guarantee factual accuracy</text><text x="608" y="1370" font-size="10" fill="#666" font-weight="400">human has final responsibility for document approval and application</text><path d="M 44 1202 L 24 1202 L 24 1422 L 36 1422" fill="none" stroke="#8a8a8a" stroke-width="1.4" marker-end="url(#arr)" /></g></svg>

@@ -30,10 +30,35 @@ Last verified: 2026-08-28
   tests and two fixtures) were applied to the production working tree at
   2026-10-29 05:44 JST; related tests **86 passed**. Files were backed up first
   and post-apply bytes matched candidate `347dbef`. The branch is pushed to
-  `github.com/0xkz1/AI-Job-Scout-System`; draft review PR #1 is open and
-  unmerged. No state reset, scheduler
-  change, direct notification, paid API call, merge or commit to the production
-  tree was performed. Runbook: `docs/scraper-repair.md`.
+  `github.com/0xkz1/AI-Job-Scout-System`; review PR #1 was merged into main
+  (2026-10-29). No state reset, scheduler change, direct notification, paid API
+  call or commit to the production working tree was performed. Runbook:
+  `docs/scraper-repair.md`.
+
+## GitHub main integration — 2026-10-14
+
+- The user requested that the default GitHub branch show the current system
+  for recruiter review. Integrated the 191 published development commits from
+  `feat/strategy-layer-and-visa-clock` (`eb064ea`) into the updated README/image
+  baseline on `main` (`958d300`), in an isolated worktree.
+- The only merge conflict was README.md. Preserved the current Job Scout System
+  title and detailed v3 diagram, and updated checkout instructions and links
+  to use main. All Python files match the published development commit.
+- Preserved main's `.env.example` because `.env.*` is protected. Actual
+  environment files and the production checkout's uncommitted work were not
+  imported or changed. The current local deployment's scraper_indeed.py edit
+  and untracked manual probes remain outside this publication.
+- Validation: 216 tracked Python files compile. With the local model endpoint
+  disabled for regression tests, the full tests/ suite completed in 16.83s:
+  **1,353 passed, 20 skipped, 1 failed**. The same failing legacy cover-letter
+  test reproduces before integration:
+  `test_an_invented_figure_or_audience_is_rejected` (the "ten years" case).
+  The quantity guard accepts that number from the verification record even
+  though this test expects rejection. This is an existing failure, not a new
+  regression; no change to its guard or test was included in the merge.
+- An initial test run was interrupted because an unmocked summary call was
+  waiting for the live local model. No live scraping, application submission,
+  model-mode change or nightly schedule change was part of this integration.
 
 ## Edinburgh local-work overnight follow-up — 2026-10-13
 
